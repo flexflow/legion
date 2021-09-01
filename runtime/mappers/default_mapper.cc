@@ -15,6 +15,7 @@
 
 #include "legion.h"
 #include "mappers/default_mapper.h"
+#include "mappers/mapping_utilities.h"
 
 #include <stdlib.h>
 #include <assert.h>
@@ -296,6 +297,13 @@ namespace Legion {
       for (int i = 0; i < 3; i++)
         random_number_generator[i] = (unsigned short)((local_proc.id &
                             (short_mask << (i*short_bits))) >> (i*short_bits));
+
+      // See whether there are multiple NUMA memories available.
+      {
+        Machine::MemoryQuery socketMems(this->machine);
+        socketMems.local_address_space().only_kind(Memory::SOCKET_MEM);
+        this->multipleNumaDomainsPresent = socketMems.count() > 1;
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -1810,15 +1818,23 @@ namespace Legion {
             }
           case Processor::LOC_PROC:
             {
-              // Put any of our local cpus on here
-              // TODO: NUMA-ness needs to go here
-              // If we're part of a must epoch launch, our
-              // target proc will be sufficient
-              if (!task.must_epoch_task)
-                target_procs.insert(target_procs.end(),
-                    local_cpus.begin(), local_cpus.end());
-              else
+              // Put any of our local CPUs on here. Except if
+              // we're part of an epoch launch, or there are multiple
+              // NUMA memories available. In the first case, this is
+              // sufficient. In the latter case, we want the target_proc
+              // to be at the front of the returned vector so that map_task
+              // chooses a numa memory closest to the chosen processor. If
+              // there aren't any NUMA domains or only one, then it doesn't
+              // matter which OMP is returned.
+              if (task.must_epoch_task || this->multipleNumaDomainsPresent) {
                 target_procs.push_back(task.target_proc);
+              } else {
+                target_procs.insert(
+                    target_procs.end(),
+                    this->local_cpus.begin(),
+                    this->local_cpus.end()
+                );
+              }
               break;
             }
           case Processor::IO_PROC:
@@ -1852,15 +1868,23 @@ namespace Legion {
             }
           case Processor::OMP_PROC:
             {
-              // Put any of our local omps on here
-              // TODO: NUMA-ness needs to go here
-              // If we're part of a must epoch launch, our
-              // target proc will be sufficient
-              if (!task.must_epoch_task)
-                target_procs.insert(target_procs.end(),
-                    local_omps.begin(), local_omps.end());
-              else
+              // Put any of our local OMPs on here. Except if
+              // we're part of an epoch launch, or there are multiple
+              // NUMA memories available. In the first case, this is
+              // sufficient. In the latter case, we want the target_proc
+              // to be at the front of the returned vector so that map_task
+              // chooses a numa memory closest to the chosen processor. If
+              // there aren't any NUMA domains or only one, then it doesn't
+              // matter which OMP is returned.
+              if (task.must_epoch_task || this->multipleNumaDomainsPresent) {
                 target_procs.push_back(task.target_proc);
+              } else {
+                target_procs.insert(
+                    target_procs.end(),
+                    local_omps.begin(),
+                    local_omps.end()
+                );
+              }
               break;
             }
           default:
@@ -2603,7 +2627,7 @@ namespace Legion {
     {
       log_mapper.error("Default mapper failed allocation of size %zd bytes for "
                        "region  requirement %d of task %s (UID %lld) in memory "
-                       IDFMT " for processor " IDFMT ". This means the working "
+                       IDFMT " (%s) for processor " IDFMT " (%s). This means the working "
                        "set of your application is too big for the allotted "
                        "capacity of the given memory under the default "
                        "mapper's mapping scheme. You have three choices: "
@@ -2611,7 +2635,8 @@ namespace Legion {
                        "mapper to better manage working sets, or find a bigger "
                        "machine.", footprint, index,
                        task.get_task_name(), task.get_unique_id(),
-                       target_mem.id, target_proc.id);
+                       target_mem.id, Utilities::to_string(target_mem.kind()),
+                       target_proc.id, Utilities::to_string(target_proc.kind()));
       assert(false);
     }
 
@@ -2837,8 +2862,8 @@ namespace Legion {
         // If we failed to make it that is bad
         log_mapper.error("Default mapper failed allocation of size %zd bytes "
                          "for region requirement of inline mapping in task %s "
-                         "(UID %lld) in memory " IDFMT "for processor " IDFMT
-                         ". This means the working set of your application is "
+                         "(UID %lld) in memory " IDFMT " (%s) for processor " IDFMT
+                         " (%s). This means the working set of your application is "
                          "too big for the allotted capacity of the given memory"
                          " under the default mapper's mapping scheme. You have "
                          "three choices: ask Realm to allocate more memory, "
@@ -2847,7 +2872,10 @@ namespace Legion {
                          inline_op.parent_task->get_task_name(),
                          inline_op.parent_task->get_unique_id(),
                          target_memory.id,
-                         inline_op.parent_task->current_proc.id);
+                         Utilities::to_string(target_memory.kind()),
+                         inline_op.parent_task->current_proc.id,
+                         Utilities::to_string(inline_op.parent_task->current_proc.kind())
+                         );
         assert(false);
       }
     }
@@ -3050,7 +3078,7 @@ namespace Legion {
           // If we failed to make it that is bad
           log_mapper.error("Default mapper failed allocation of size %zd bytes "
                          "for region requirement of close in task %s (UID %lld)"
-                         " in memory " IDFMT "for processor " IDFMT ". This "
+                         " in memory " IDFMT " (%s) for processor " IDFMT " (%s). This "
                          "means the working set of your application is too big "
                          "for the allotted capacity of the given memory under "
                          "the default mapper's mapping scheme. You have three "
@@ -3059,8 +3087,11 @@ namespace Legion {
                          "a bigger machine.", footprint,
                          close.parent_task->get_task_name(),
                          close.parent_task->get_unique_id(),
+                         target_memory.id,
+                         Utilities::to_string(target_memory.kind()),
                          close.parent_task->current_proc.id,
-                         target_memory.id);
+                         Utilities::to_string(close.parent_task->current_proc.kind())
+                         );
           assert(false);
         }
       }
@@ -3297,7 +3328,7 @@ namespace Legion {
         // If we failed to make it that is bad
         log_mapper.error("Default mapper failed allocation of size %zd bytes "
                          "for region requirement of partition in task %s (UID "
-                         "%lld) in memory " IDFMT "for processor " IDFMT ". "
+                         "%lld) in memory " IDFMT " (%s) for processor " IDFMT " (%s). "
                          "This means the working set of your application is too"
                          " big for the allotted capacity of the given memory "
                          "under the default mapper's mapping scheme. You have "
@@ -3307,7 +3338,10 @@ namespace Legion {
                          partition.parent_task->get_task_name(),
                          partition.parent_task->get_unique_id(),
                          target_memory.id,
-                         partition.parent_task->current_proc.id);
+                         Utilities::to_string(target_memory.kind()),
+                         partition.parent_task->current_proc.id,
+                         Utilities::to_string(partition.parent_task->current_proc.kind())
+                         );
         assert(false);
       }
     }

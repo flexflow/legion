@@ -1832,7 +1832,7 @@ namespace Legion {
       fence_kind = MAPPING_FENCE;
       if (runtime->legion_spy_enabled)
         LegionSpy::log_fence_operation(parent_ctx->get_unique_id(),
-                                       unique_op_id);
+                                       unique_op_id, context_index);
       context_index = invalidator->get_ctx_index();
       current_template = tpl;
       // The summary could have been marked as being traced,
@@ -5350,6 +5350,7 @@ namespace Legion {
               BarrierArrival *arrival = inst->as_barrier_arrival();
               int subst = substs[arrival->rhs];
               if (subst >= 0) arrival->rhs = (unsigned)subst;
+              lhs = arrival->lhs;
               break;
             }
           case MERGE_EVENT:
