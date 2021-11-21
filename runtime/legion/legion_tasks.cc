@@ -5585,9 +5585,23 @@ namespace Legion {
         FutureInstance *bounce_instance = NULL;
         if (!instance->is_meta_visible)
         {
+#ifdef __GNUC__
+#if __GNUC__ >= 11
+          // GCC is dumb and thinks we need to initialize this buffer
+          // before we pass it into the create local call, which we
+          // obviously don't need to do, so tell the compiler to shut up
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+#endif
           void *bounce_buffer = malloc(instance->size);
           bounce_instance = FutureInstance::create_local(bounce_buffer,
                                   instance->size, true/*own*/, runtime);
+#ifdef __GNUC__
+#if __GNUC__ >= 11
+#pragma GCC diagnostic pop
+#endif
+#endif
           // Wait for the data here to be ready
           const ApEvent ready = bounce_instance->copy_from(instance, this);
           if (ready.exists())
@@ -5758,6 +5772,15 @@ namespace Legion {
       }
       map_id = launcher.map_id;
       tag = launcher.tag;
+      mapper_data_size = launcher.map_arg.get_size();
+      if (mapper_data_size > 0)
+      {
+#ifdef DEBUG_LEGION
+        assert(mapper_data == NULL);
+#endif
+        mapper_data = malloc(mapper_data_size);
+        memcpy(mapper_data, launcher.map_arg.get_ptr(), mapper_data_size);
+      }
       index_point = launcher.point;
       index_domain = Domain(index_point, index_point);
       sharding_space = launcher.sharding_space;
@@ -8382,6 +8405,15 @@ namespace Legion {
       }
       map_id = launcher.map_id;
       tag = launcher.tag;
+      mapper_data_size = launcher.map_arg.get_size();
+      if (mapper_data_size > 0)
+      {
+#ifdef DEBUG_LEGION
+        assert(mapper_data == NULL);
+#endif
+        mapper_data = malloc(mapper_data_size);
+        memcpy(mapper_data, launcher.map_arg.get_ptr(), mapper_data_size);
+      }
       is_index_space = true;
 #ifdef DEBUG_LEGION
       assert(launch_sp.exists());
@@ -8497,6 +8529,15 @@ namespace Legion {
       }
       map_id = launcher.map_id;
       tag = launcher.tag;
+      mapper_data_size = launcher.map_arg.get_size();
+      if (mapper_data_size > 0)
+      {
+#ifdef DEBUG_LEGION
+        assert(mapper_data == NULL);
+#endif
+        mapper_data = malloc(mapper_data_size);
+        memcpy(mapper_data, launcher.map_arg.get_ptr(), mapper_data_size);
+      }
       is_index_space = true;
 #ifdef DEBUG_LEGION
       assert(launch_sp.exists());
@@ -8567,7 +8608,7 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void IndexTask::initialize_predicate(const Future &pred_future,
-                                         const TaskArgument &pred_arg)
+                                         const UntypedBuffer &pred_arg)
     //--------------------------------------------------------------------------
     {
       if (pred_future.impl != NULL)
@@ -12126,7 +12167,7 @@ namespace Legion {
     {
       if (is_remote())
       {
-        CollectiveManager *volatile result = NULL;
+        std::atomic<CollectiveManager*> result(NULL);
         RtUserEvent ready_event = Runtime::create_rt_user_event();
         Serializer rez;
         {
@@ -12150,7 +12191,7 @@ namespace Legion {
         }
         runtime->send_slice_collective_instance_request(orig_proc, rez);
         ready_event.wait();
-        return result;
+        return result.load();
       }
       else
         return index_owner->find_or_create_collective_instance(mapper_call, 
@@ -12165,7 +12206,7 @@ namespace Legion {
     {
       if (is_remote())
       {
-        volatile bool result = success;
+        std::atomic<bool> result(success);
         RtUserEvent ready_event = Runtime::create_rt_user_event();
         Serializer rez;
         {
@@ -12180,7 +12221,7 @@ namespace Legion {
         }
         runtime->send_slice_collective_instance_request(orig_proc, rez);
         ready_event.wait();
-        return result;
+        return result.load();
       }
       else
         return index_owner->finalize_collective_instance(call_kind, index, 
@@ -12248,7 +12289,7 @@ namespace Legion {
             derez.deserialize(remote_unsat_index);
             DomainPoint point;
             derez.deserialize(point);
-            CollectiveManager **target;
+            std::atomic<CollectiveManager*> *target;
             derez.deserialize(target);
             RtUserEvent done_event;
             derez.deserialize(done_event);
@@ -12297,7 +12338,7 @@ namespace Legion {
             derez.deserialize(index);
             bool success;
             derez.deserialize(success);
-            bool *target;
+            std::atomic<bool> *target;
             derez.deserialize(target);
             RtUserEvent done_event;
             derez.deserialize(done_event);
@@ -12352,10 +12393,10 @@ namespace Legion {
             RtEvent ready_event;
             if (did > 0)
             {
-              CollectiveManager **target;
+              std::atomic<CollectiveManager*> *target;
               derez.deserialize(target);
-              *target = static_cast<CollectiveManager*>(
-                  runtime->find_or_request_instance_manager(did, ready_event)); 
+              target->store(static_cast<CollectiveManager*>(
+                  runtime->find_or_request_instance_manager(did, ready_event)));
             }
             size_t *footprint;
             derez.deserialize(footprint);
@@ -12376,9 +12417,11 @@ namespace Legion {
           }
         case SLICE_COLLECTIVE_FINALIZE:
           {
-            bool *target;
+            std::atomic<bool> *target;
             derez.deserialize(target);
-            derez.deserialize<bool>(*target);
+            bool result;
+            derez.deserialize<bool>(result);
+            target->store(result);
             RtUserEvent done_event;
             derez.deserialize(done_event);
             Runtime::trigger_event(done_event);

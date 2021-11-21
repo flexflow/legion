@@ -589,34 +589,37 @@ namespace Legion {
     //==========================================================================
 
     /**
-     * \class TaskArgument
-     * A class for describing an untyped task argument.  Note that task
-     * arguments do not make copies of the data they point to.  Copies
+     * \class UntypedBuffer
+     * A class for describing an untyped buffer value.  Note that untyped
+     * buffers do not make copies of the data they point to.  Copies
      * are only made upon calls to the runtime to avoid double copying.
-     * It is up to the user to make sure that the the data described by
-     * a task argument is valid throughout the duration of its lifetime.
+     * It is up to the user to make sure that the the memory described by
+     * an untyped buffer is live throughout the duration of its lifetime.
      */
-    class TaskArgument : public Unserializable<TaskArgument> {
+    class UntypedBuffer : public Unserializable<UntypedBuffer> {
       public:
-      TaskArgument(void) : args(NULL), arglen(0) { }
-      TaskArgument(const void *arg, size_t argsize)
+      UntypedBuffer(void) : args(NULL), arglen(0) { }
+      UntypedBuffer(const void *arg, size_t argsize)
         : args(const_cast<void*>(arg)), arglen(argsize) { }
-      TaskArgument(const TaskArgument &rhs)
+      UntypedBuffer(const UntypedBuffer &rhs)
         : args(rhs.args), arglen(rhs.arglen) { }
     public:
       inline size_t get_size(void) const { return arglen; }
       inline void*  get_ptr(void) const { return args; }
     public:
-      inline bool operator==(const TaskArgument &arg) const
+      inline bool operator==(const UntypedBuffer &arg) const
         { return (args == arg.args) && (arglen == arg.arglen); }
-      inline bool operator<(const TaskArgument &arg) const
+      inline bool operator<(const UntypedBuffer &arg) const
         { return (args < arg.args) && (arglen < arg.arglen); }
-      inline TaskArgument& operator=(const TaskArgument &rhs)
+      inline UntypedBuffer& operator=(const UntypedBuffer &rhs)
         { args = rhs.args; arglen = rhs.arglen; return *this; }
     private:
       void *args;
       size_t arglen;
     };
+    // This typedef is here for backwards compatibility since we
+    // used to call an UntypedBuffer a TaskArgument
+    typedef UntypedBuffer TaskArgument;
 
     /**
      * \class ArgumentMap
@@ -652,15 +655,15 @@ namespace Legion {
       bool has_point(const DomainPoint &point);
       /**
        * Associate an argument with a domain point
-       * @param point the point to associate with the task argument
-       * @param arg the task argument
+       * @param point the point to associate with the untyped buffer
+       * @param arg the untyped buffer
        * @param replace specify whether to overwrite an existing value
        */
-      void set_point(const DomainPoint &point, const TaskArgument &arg,
+      void set_point(const DomainPoint &point, const UntypedBuffer &arg,
                      bool replace = true);
       /**
        * Associate a future with a domain point
-       * @param point the point to associate with the task argument
+       * @param point the point to associate with the untyped buffer
        * @param future the future argument
        * @param replace specify whether to overwrite an existing value
        */
@@ -673,24 +676,24 @@ namespace Legion {
        */
       bool remove_point(const DomainPoint &point);
       /**
-       * Get the task argument for a point if it exists, otherwise
-       * return an empty task argument.
+       * Get the untyped buffer for a point if it exists, otherwise
+       * return an empty untyped buffer.
        * @param point the point to retrieve
-       * @return a task argument if the point exists otherwise
-       *    an empty task argument
+       * @return a untyped buffer if the point exists otherwise
+       *    an empty untyped buffer
        */
-      TaskArgument get_point(const DomainPoint &point) const;
+      UntypedBuffer get_point(const DomainPoint &point) const;
     public:
       /**
        * An older method for setting the point argument in
        * an argument map.
-       * @param point the point to associate the task argument
+       * @param point the point to associate the untyped buffer
        * @param arg the argument
        * @param replace specify if the value should overwrite
        *    the existing value if it already exists
        */
       template<typename PT, unsigned DIM>
-      inline void set_point_arg(const PT point[DIM], const TaskArgument &arg, 
+      inline void set_point_arg(const PT point[DIM], const UntypedBuffer &arg,
                                 bool replace = false);
       /**
        * An older method for removing a point argument from
@@ -1565,10 +1568,11 @@ namespace Legion {
     public:
       TaskLauncher(void);
       TaskLauncher(TaskID tid, 
-                   TaskArgument arg,
+                   UntypedBuffer arg,
                    Predicate pred = Predicate::TRUE_PRED,
                    MapperID id = 0,
-                   MappingTagID tag = 0);
+                   MappingTagID tag = 0,
+                   UntypedBuffer map_arg = UntypedBuffer());
     public:
       inline IndexSpaceRequirement&
               add_index_requirement(const IndexSpaceRequirement &req);
@@ -1584,7 +1588,7 @@ namespace Legion {
       inline void add_arrival_handshake(LegionHandshake handshake);
     public:
       inline void set_predicate_false_future(Future f);
-      inline void set_predicate_false_result(TaskArgument arg);
+      inline void set_predicate_false_result(UntypedBuffer arg);
     public:
       inline void set_independent_requirements(bool independent);
     public:
@@ -1595,10 +1599,11 @@ namespace Legion {
       std::vector<Grant>                 grants;
       std::vector<PhaseBarrier>          wait_barriers;
       std::vector<PhaseBarrier>          arrive_barriers;
-      TaskArgument                       argument;
+      UntypedBuffer                      argument;
       Predicate                          predicate;
       MapperID                           map_id;
       MappingTagID                       tag;
+      UntypedBuffer                      map_arg;
       DomainPoint                        point;
       // Only used in control replication contexts for
       // doing sharding. If left unspecified the runtime
@@ -1608,10 +1613,10 @@ namespace Legion {
       // If the predicate is set to anything other than
       // Predicate::TRUE_PRED, then the application must 
       // specify a value for the future in the case that
-      // the predicate resolves to false. TaskArgument(NULL,0)
+      // the predicate resolves to false. UntypedBuffer(NULL,0)
       // can be used if the task's return type is void.
       Future                             predicate_false_future;
-      TaskArgument                       predicate_false_result;
+      UntypedBuffer                      predicate_false_result;
     public:
       // Inform the runtime about any static dependences
       // These will be ignored outside of static traces
@@ -1663,20 +1668,22 @@ namespace Legion {
       IndexTaskLauncher(void);
       IndexTaskLauncher(TaskID tid,
                         Domain domain,
-                        TaskArgument global_arg,
+                        UntypedBuffer global_arg,
                         ArgumentMap map,
                         Predicate pred = Predicate::TRUE_PRED,
                         bool must = false,
                         MapperID id = 0,
-                        MappingTagID tag = 0);
+                        MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexTaskLauncher(TaskID tid,
                         IndexSpace launch_space,
-                        TaskArgument global_arg,
+                        UntypedBuffer global_arg,
                         ArgumentMap map,
                         Predicate pred = Predicate::TRUE_PRED,
                         bool must = false,
                         MapperID id = 0,
-                        MappingTagID tag = 0);
+                        MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
     public:
       inline IndexSpaceRequirement&
                   add_index_requirement(const IndexSpaceRequirement &req);
@@ -1692,7 +1699,7 @@ namespace Legion {
       inline void add_arrival_handshake(LegionHandshake handshake);
     public:
       inline void set_predicate_false_future(Future f);
-      inline void set_predicate_false_result(TaskArgument arg);
+      inline void set_predicate_false_result(UntypedBuffer arg);
     public:
       inline void set_independent_requirements(bool independent);
     public:
@@ -1711,20 +1718,21 @@ namespace Legion {
       std::vector<Grant>                 grants;
       std::vector<PhaseBarrier>          wait_barriers;
       std::vector<PhaseBarrier>          arrive_barriers;
-      TaskArgument                       global_arg;
+      UntypedBuffer                      global_arg;
       ArgumentMap                        argument_map;
       Predicate                          predicate;
       bool                               must_parallelism;
       MapperID                           map_id;
       MappingTagID                       tag;
+      UntypedBuffer                      map_arg;
     public:
       // If the predicate is set to anything other than
       // Predicate::TRUE_PRED, then the application must 
       // specify a value for the future in the case that
-      // the predicate resolves to false. TaskArgument(NULL,0)
+      // the predicate resolves to false. UntypedBuffer(NULL,0)
       // can be used if the task's return type is void.
       Future                             predicate_false_future;
-      TaskArgument                       predicate_false_result;
+      UntypedBuffer                      predicate_false_result;
     public:
       // Inform the runtime about any static dependences
       // These will be ignored outside of static traces
@@ -1767,7 +1775,8 @@ namespace Legion {
       InlineLauncher(const RegionRequirement &req,
                      MapperID id = 0,
                      MappingTagID tag = 0,
-                     LayoutConstraintID layout_id = 0);
+                     LayoutConstraintID layout_id = 0,
+                     UntypedBuffer map_arg = UntypedBuffer());
     public:
       inline void add_field(FieldID fid, bool inst = true);
     public:
@@ -1783,6 +1792,7 @@ namespace Legion {
       std::vector<PhaseBarrier>       arrive_barriers;
       MapperID                        map_id;
       MappingTagID                    tag;
+      UntypedBuffer                   map_arg;
     public:
       LayoutConstraintID              layout_constraint_id;
     public:
@@ -1818,7 +1828,8 @@ namespace Legion {
     struct CopyLauncher {
     public:
       CopyLauncher(Predicate pred = Predicate::TRUE_PRED,
-                   MapperID id = 0, MappingTagID tag = 0);
+                   MapperID id = 0, MappingTagID tag = 0,
+                   UntypedBuffer map_arg = UntypedBuffer());
     public:
       inline unsigned add_copy_requirements(const RegionRequirement &src,
 					    const RegionRequirement &dst);
@@ -1859,6 +1870,7 @@ namespace Legion {
       Predicate                       predicate;
       MapperID                        map_id;
       MappingTagID                    tag;
+      UntypedBuffer                   map_arg;
       DomainPoint                     point;
       // Only used in control replication contexts for
       // doing sharding. If left unspecified the runtime
@@ -1894,9 +1906,11 @@ namespace Legion {
     public:
       IndexCopyLauncher(void);
       IndexCopyLauncher(Domain domain, Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexCopyLauncher(IndexSpace space, Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
     public:
       inline unsigned add_copy_requirements(const RegionRequirement &src,
 					    const RegionRequirement &dst);
@@ -1942,6 +1956,7 @@ namespace Legion {
       Predicate                       predicate;
       MapperID                        map_id;
       MappingTagID                    tag;
+      UntypedBuffer                   map_arg;
     public:
       // Inform the runtime about any static dependences
       // These will be ignored outside of static traces
@@ -1974,13 +1989,15 @@ namespace Legion {
     public:
       FillLauncher(void);
       FillLauncher(LogicalRegion handle, LogicalRegion parent,
-                   TaskArgument arg, Predicate pred = Predicate::TRUE_PRED,
-                   MapperID id = 0, MappingTagID tag = 0);
+                   UntypedBuffer arg, Predicate pred = Predicate::TRUE_PRED,
+                   MapperID id = 0, MappingTagID tag = 0,
+                   UntypedBuffer map_arg = UntypedBuffer());
       FillLauncher(LogicalRegion handle, LogicalRegion parent,
                    Future f, Predicate pred = Predicate::TRUE_PRED,
-                   MapperID id = 0, MappingTagID tag = 0);
+                   MapperID id = 0, MappingTagID tag = 0,
+                   UntypedBuffer map_arg = UntypedBuffer());
     public:
-      inline void set_argument(TaskArgument arg);
+      inline void set_argument(UntypedBuffer arg);
       inline void set_future(Future f);
       inline void add_field(FieldID fid);
       inline void add_grant(Grant g);
@@ -1991,7 +2008,7 @@ namespace Legion {
     public:
       LogicalRegion                   handle;
       LogicalRegion                   parent;
-      TaskArgument                    argument;
+      UntypedBuffer                   argument;
       Future                          future;
       Predicate                       predicate;
       std::set<FieldID>               fields;
@@ -2000,6 +2017,7 @@ namespace Legion {
       std::vector<PhaseBarrier>       arrive_barriers;
       MapperID                        map_id;
       MappingTagID                    tag;
+      UntypedBuffer                   map_arg;
       DomainPoint                     point;
       // Only used in control replication contexts for
       // doing sharding. If left unspecified the runtime
@@ -2027,48 +2045,56 @@ namespace Legion {
       IndexFillLauncher(void);
       // Region projection
       IndexFillLauncher(Domain domain, LogicalRegion handle, 
-                        LogicalRegion parent, TaskArgument arg,
+                        LogicalRegion parent, UntypedBuffer arg,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexFillLauncher(Domain domain, LogicalRegion handle, 
                         LogicalRegion parent, Future f,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexFillLauncher(IndexSpace space, LogicalRegion handle, 
-                        LogicalRegion parent, TaskArgument arg,
+                        LogicalRegion parent, UntypedBuffer arg,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexFillLauncher(IndexSpace space, LogicalRegion handle, 
                         LogicalRegion parent, Future f,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       // Partition projection
       IndexFillLauncher(Domain domain, LogicalPartition handle, 
-                        LogicalRegion parent, TaskArgument arg,
+                        LogicalRegion parent, UntypedBuffer arg,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexFillLauncher(Domain domain, LogicalPartition handle, 
                         LogicalRegion parent, Future f,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexFillLauncher(IndexSpace space, LogicalPartition handle, 
-                        LogicalRegion parent, TaskArgument arg,
+                        LogicalRegion parent, UntypedBuffer arg,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
       IndexFillLauncher(IndexSpace space, LogicalPartition handle, 
                         LogicalRegion parent, Future f,
                         ProjectionID projection = 0,
                         Predicate pred = Predicate::TRUE_PRED,
-                        MapperID id = 0, MappingTagID tag = 0);
+                        MapperID id = 0, MappingTagID tag = 0,
+                        UntypedBuffer map_arg = UntypedBuffer());
     public:
-      inline void set_argument(TaskArgument arg);
+      inline void set_argument(UntypedBuffer arg);
       inline void set_future(Future f);
       inline void add_field(FieldID fid);
       inline void add_grant(Grant g);
@@ -2086,7 +2112,7 @@ namespace Legion {
       LogicalPartition                partition;
       LogicalRegion                   parent;
       ProjectionID                    projection;
-      TaskArgument                    argument;
+      UntypedBuffer                   argument;
       Future                          future;
       Predicate                       predicate;
       std::set<FieldID>               fields;
@@ -2095,6 +2121,7 @@ namespace Legion {
       std::vector<PhaseBarrier>       arrive_barriers;
       MapperID                        map_id;
       MappingTagID                    tag;
+      UntypedBuffer                   map_arg;
     public:
       // Inform the runtime about any static dependences
       // These will be ignored outside of static traces
@@ -2271,7 +2298,7 @@ namespace Legion {
       TunableID                           tunable;
       MapperID                            mapper;
       MappingTagID                        tag;
-      TaskArgument                        arg;
+      UntypedBuffer                       arg;
       std::vector<Future>                 futures;
       size_t                              return_type_size;
     };
@@ -2696,6 +2723,103 @@ namespace Legion {
                     const char *warning_string = NULL,
                     size_t subfield_offset = 0) { }
     public:
+      // Create a FieldAccessor for an UntypedDeferredValue
+      // (only with AffineAccessors)
+      FieldAccessor(const UntypedDeferredValue &value,
+                    // The actual field size in case it is different from the 
+                    // one being used in FT and we still want to check it
+                    size_t actual_field_size = sizeof(FT),
+#ifdef DEBUG_LEGION
+                    bool check_field_size = true,
+#else
+                    bool check_field_size = false,
+#endif
+                    bool silence_warnings = false,
+                    const char *warning_string = NULL,
+                    size_t subfield_offset = 0) { }
+      // Create a FieldAccessor for an UntypedDeferredValue
+      // Specify a specific bounds rectangle to use for the accessor
+      // (only with AffineAccessors)
+      FieldAccessor(const UntypedDeferredValue &value,
+                    const Rect<N,COORD_T> &bounds,
+                    // The actual field size in case it is different from the 
+                    // one being used in FT and we still want to check it
+                    size_t actual_field_size = sizeof(FT),
+#ifdef DEBUG_LEGION
+                    bool check_field_size = true,
+#else
+                    bool check_field_size = false,
+#endif
+                    bool silence_warnings = false,
+                    const char *warning_string = NULL,
+                    size_t subfield_offset = 0) { }
+    public:
+      // Create a FieldAccessor for UntypedDeferredBuffer
+      // (only with AffineAccessors)
+      FieldAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                    // The actual field size in case it is different from the 
+                    // one being used in FT and we still want to check it
+                    size_t actual_field_size = sizeof(FT),
+#ifdef DEBUG_LEGION
+                    bool check_field_size = true,
+#else
+                    bool check_field_size = false,
+#endif
+                    bool silence_warnings = false,
+                    const char *warning_string = NULL,
+                    size_t subfield_offset = 0) { }
+      // Create a FieldAccessor for UntypedDeferredBuffer
+      // Specify a specific bounds rectangle to use for the accessor
+      // (only with AffineAccessors)
+      FieldAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                    const Rect<N,COORD_T> &bounds,
+                    // The actual field size in case it is different from the 
+                    // one being used in FT and we still want to check it
+                    size_t actual_field_size = sizeof(FT),
+#ifdef DEBUG_LEGION
+                    bool check_field_size = true,
+#else
+                    bool check_field_size = false,
+#endif
+                    bool silence_warnings = false,
+                    const char *warning_string = NULL,
+                    size_t subfield_offset = 0) { }
+      // Create a FieldAccessor for UntypedDeferredBuffer
+      // Specify a specific Affine transform to use for interpreting points
+      // (only with AffineAccessors)
+      template<int M>
+      FieldAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                    const AffineTransform<M,N,COORD_T> &transform,
+                    // The actual field size in case it is different from the 
+                    // one being used in FT and we still want to check it
+                    size_t actual_field_size = sizeof(FT),
+#ifdef DEBUG_LEGION
+                    bool check_field_size = true,
+#else
+                    bool check_field_size = false,
+#endif
+                    bool silence_warnings = false,
+                    const char *warning_string = NULL,
+                    size_t subfield_offset = 0) { }
+      // Create a FieldAccessor for UntypedDeferredBuffer
+      // Specify both a transform and a bounds to use
+      // (only with AffineAccessors)
+      template<int M>
+      FieldAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                    const AffineTransform<M,N,COORD_T> &transform,
+                    const Rect<N,COORD_T> &bounds,
+                    // The actual field size in case it is different from the 
+                    // one being used in FT and we still want to check it
+                    size_t actual_field_size = sizeof(FT),
+#ifdef DEBUG_LEGION
+                    bool check_field_size = true,
+#else
+                    bool check_field_size = false,
+#endif
+                    bool silence_warnings = false,
+                    const char *warning_string = NULL,
+                    size_t subfield_offset = 0) { }
+    public:
       typedef FT value_type;
       typedef FT& reference;
       typedef const FT& const_reference;
@@ -2728,7 +2852,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false) { }
       // For Realm::AffineAccessor specializations there are additional
       // methods for creating accessors with limited bounding boxes and
@@ -2740,7 +2864,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false) { }
       // Specify a specific Affine transform to use for interpreting points
       // Not available for Realm::MultiAffineAccessor specializations
@@ -2751,7 +2875,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false) { }
       // Specify both a transform and a bounds to use
       // Not available for Realm::MultiAffineAccessor specializations
@@ -2763,7 +2887,68 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
+                        bool check_field_size = false) { }
+    public:
+      // Create a ReductionAccessor for an UntypedDeferredValue
+      // (only with AffineAccessors)
+      ReductionAccessor(const UntypedDeferredValue &value,
+                        bool silence_warnings = false,
+                        const char *warning_string = NULL,
+                        size_t subfield_offset = 0,
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
+                        bool check_field_size = false) { }
+      // Create a ReductionAccessor for an UntypedDeferredValue
+      // Specify a specific bounds rectangle to use for the accessor
+      // (only with AffineAccessors)
+      ReductionAccessor(const UntypedDeferredValue &value,
+                        const Rect<N,COORD_T> &bounds,
+                        bool silence_warnings = false,
+                        const char *warning_string = NULL,
+                        size_t subfield_offset = 0,
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
+                        bool check_field_size = false) { }
+    public:
+      // Create a ReductionAccessor for an UntypedDeferredBuffer
+      // (only with AffineAccessors)
+      ReductionAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                        bool silence_warnings = false,
+                        const char *warning_string = NULL,
+                        size_t subfield_offset = 0,
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
+                        bool check_field_size = false) { }
+      // Create a ReductionAccessor for an UntypedDeferredBuffer
+      // Specify a specific bounds rectangle to use for the accessor
+      // (only with AffineAccessors)
+      ReductionAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                        const Rect<N,COORD_T> &bounds,
+                        bool silence_warnings = false,
+                        const char *warning_string = NULL,
+                        size_t subfield_offset = 0,
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
+                        bool check_field_size = false) { }
+      // Create a ReductionAccessor for an UntypedDeferredBuffer
+      // Specify a specific Affine transform to use for interpreting points
+      // (only with AffineAccessors)
+      template<int M>
+      ReductionAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                        const AffineTransform<M,N,COORD_T> &transform, 
+                        bool silence_warnings = false,
+                        const char *warning_string = NULL,
+                        size_t subfield_offset = 0,
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
+                        bool check_field_size = false) { }
+      // Create a ReductionAccessor for an UntypedDeferredBuffer
+      // Specify both a transform and a bounds to use
+      // (only with AffineAccessors)
+      template<int M>
+      ReductionAccessor(const UntypedDeferredBuffer<COORD_T> &buffer,
+                        const AffineTransform<M,N,COORD_T> &transform, 
+                        const Rect<N,COORD_T> &bounds,
+                        bool silence_warnings = false,
+                        const char *warning_string = NULL,
+                        size_t subfield_offset = 0,
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false) { }
     public:
       typedef typename REDOP::RHS value_type;
@@ -3110,6 +3295,8 @@ namespace Legion {
     public:
       inline void finalize(Runtime *runtime, Context ctx) const;
     protected:
+      friend class UntypedDeferredValue;
+      DeferredValue(void);
       Realm::RegionInstance instance;
       Realm::AffineAccessor<T,1,coord_t> accessor;
     };
@@ -3132,6 +3319,40 @@ namespace Legion {
       inline void reduce(typename REDOP::RHS val) const;
       __CUDA_HD__
       inline void operator<<=(typename REDOP::RHS val) const;
+    };
+
+    /**
+     * \class UntypedDeferredValue
+     * This is a type-erased deferred value with the type of the field.
+     */
+    class UntypedDeferredValue {
+    public:
+      UntypedDeferredValue(void);
+      UntypedDeferredValue(size_t field_size, Memory target_memory,
+                           const void *initial_value = NULL,
+                           size_t alignment = 16);
+      UntypedDeferredValue(size_t field_size,
+                           Memory::Kind memory_kind = Memory::Z_COPY_MEM,
+                           const void *initial_value = NULL,
+                           size_t alignment = 16);
+      template<typename T>
+      UntypedDeferredValue(const DeferredValue<T> &rhs);
+      template<typename REDOP, bool EXCLUSIVE>
+      UntypedDeferredValue(const DeferredReduction<REDOP,EXCLUSIVE> &rhs);
+    public:
+      template<typename T>
+      inline operator DeferredValue<T>(void) const;
+      template<typename REDOP, bool EXCLUSIVE>
+      inline operator DeferredReduction<REDOP,EXCLUSIVE>(void) const;
+    public:
+      void finalize(Runtime *runtime, Context ctx) const;
+    private:
+      template<PrivilegeMode,typename,int,typename,typename,bool>
+      friend class FieldAccessor;
+      template<typename,bool,int,typename,typename,bool>
+      friend class ReductionAccessor;
+      Realm::RegionInstance instance;
+      size_t field_size;
     };
 
     /**
@@ -3220,11 +3441,67 @@ namespace Legion {
       Realm::RegionInstance get_instance() const;
     protected:
       friend class OutputRegion;
+      friend class UntypedDeferredBuffer<COORD_T>;
       Realm::RegionInstance instance;
       Realm::AffineAccessor<T,DIM,COORD_T> accessor;
 #ifdef LEGION_BOUNDS_CHECKS
       DomainT<DIM,COORD_T> bounds;
 #endif
+    };
+
+    /**
+     * \class UntypedDeferredBuffer
+     * An untypeded deferred buffer is a type-erased representation
+     * of a deferred buffer with the type of the field and the number
+     * of dimensions erased.
+     */
+    template<typename COORD_T = coord_t>
+    class UntypedDeferredBuffer {
+    public:
+      UntypedDeferredBuffer(void);
+    public: // Constructors specifying a generic memory kind
+      UntypedDeferredBuffer(size_t field_size, int dims,
+                            Memory::Kind kind, 
+                            const Domain &bounds,
+                            const void *initial_value = NULL,
+                            size_t alignment = 16,
+                            bool fortran_order_dims = false);
+      UntypedDeferredBuffer(size_t field_size, int dims,
+                            Memory::Kind kind, 
+                            IndexSpace bounds,
+                            const void *initial_value = NULL,
+                            size_t alignment = 16,
+                            bool fortran_order_dims = false);
+    public: // Constructors specifying a specific memory
+      UntypedDeferredBuffer(size_t field_size, int dims,
+                            Memory memory, 
+                            const Domain &bounds,
+                            const void *initial_value = NULL,
+                            size_t alignment = 16,
+                            bool fortran_order_dims = false);
+      UntypedDeferredBuffer(size_t field_size, int dims,
+                            Memory memory, 
+                            IndexSpace bounds,
+                            const void *initial_value = NULL,
+                            size_t alignment = 16,
+                            bool fortran_order_dims = false);
+    public:
+      template<typename T, int DIM>
+      UntypedDeferredBuffer(const DeferredBuffer<T,DIM,COORD_T> &rhs);
+    public:
+      template<typename T, int DIM, bool BC>
+      inline operator DeferredBuffer<T,DIM,COORD_T,BC>(void) const;
+    public:
+      inline void destroy(void);
+      inline Realm::RegionInstance get_instance(void) const { return instance; }
+    private:
+      template<PrivilegeMode,typename,int,typename,typename,bool>
+      friend class FieldAccessor;
+      template<typename,bool,int,typename,typename,bool>
+      friend class ReductionAccessor;
+      Realm::RegionInstance instance;
+      size_t field_size;
+      int dims; 
     };
 
     /**
@@ -3291,7 +3568,8 @@ namespace Legion {
                       LogicalRegion parent_region,
                       PhysicalRegion physical_region = PhysicalRegion(),
                       Predicate pred = Predicate::TRUE_PRED,
-                      MapperID id = 0, MappingTagID tag = 0);
+                      MapperID id = 0, MappingTagID tag = 0,
+                      UntypedBuffer map_arg = UntypedBuffer());
     public:
       inline void add_field(FieldID f);
       inline void add_grant(Grant g);
@@ -3313,6 +3591,7 @@ namespace Legion {
       Predicate                       predicate;
       MapperID                        map_id;
       MappingTagID                    tag;
+      UntypedBuffer                   map_arg;
     public:
       // Inform the runtime about any static dependences
       // These will be ignored outside of static traces
@@ -3333,7 +3612,8 @@ namespace Legion {
                       LogicalRegion parent_region,
                       PhysicalRegion physical_region = PhysicalRegion(),
                       Predicate pred = Predicate::TRUE_PRED,
-                      MapperID id = 0, MappingTagID tag = 0);
+                      MapperID id = 0, MappingTagID tag = 0,
+                      UntypedBuffer map_arg = UntypedBuffer());
     public:
       inline void add_field(FieldID f);
       inline void add_grant(Grant g);
@@ -3355,6 +3635,7 @@ namespace Legion {
       Predicate                       predicate;
       MapperID                        map_id;
       MappingTagID                    tag;
+      UntypedBuffer                   map_arg;
     public:
       // Inform the runtime about any static dependences
       // These will be ignored outside of static traces
@@ -4845,6 +5126,7 @@ namespace Legion {
        * @param fid the field of domain in which to place the results
        * @param range the index space to serve as the range of the mapping
        * @param id the ID of the mapper to use for mapping the fields
+       * @param map_arg an untyped buffer for the mapper data of the Partition
        * @param tag the tag to pass to the mapper for context
        */
       void create_association(Context ctx,
@@ -4853,7 +5135,8 @@ namespace Legion {
                               FieldID domain_fid,
                               IndexSpace range,
                               MapperID id = 0,
-                              MappingTagID tag = 0);
+                              MappingTagID tag = 0,
+                              UntypedBuffer marg = UntypedBuffer());
       void create_bidirectional_association(Context ctx,
                                             LogicalRegion domain,
                                             LogicalRegion domain_parent,
@@ -4862,7 +5145,9 @@ namespace Legion {
                                             LogicalRegion range_parent,
                                             FieldID range_fid,
                                             MapperID id = 0,
-                                            MappingTagID tag = 0);
+                                            MappingTagID tag = 0,
+                                            UntypedBuffer map_arg = 
+                                                    UntypedBuffer());
       // Template versions
       template<int DIM1, typename COORD_T1, int DIM2, typename COORD_T2>
       void create_association(Context ctx,
@@ -4871,7 +5156,8 @@ namespace Legion {
                               FieldID domain_fid, // type: Point<DIM2,COORD_T2>
                               IndexSpaceT<DIM2,COORD_T2> range,
                               MapperID id = 0,
-                              MappingTagID tag = 0);
+                              MappingTagID tag = 0,
+                              UntypedBuffer map_arg = UntypedBuffer());
       template<int DIM1, typename COORD_T1, int DIM2, typename COORD_T2>
       void create_bidirectional_association(Context ctx,
                               LogicalRegionT<DIM1,COORD_T1> domain,
@@ -4881,7 +5167,8 @@ namespace Legion {
                               LogicalRegionT<DIM2,COORD_T2> range_parent,
                               FieldID range_fid, // type: Point<DIM1,COORD_T1>
                               MapperID id = 0,
-                              MappingTagID tag = 0);
+                              MappingTagID tag = 0,
+                              UntypedBuffer map_arg = UntypedBuffer());
       ///@}
       ///@{
       /**
@@ -5064,6 +5351,7 @@ namespace Legion {
        * @param id the ID of the mapper to use for mapping the fields
        * @param tag the context tag to pass to the mapper
        * @param part_kind the kind of the partition
+       * @param map_arg an untyped buffer for the mapper data of the Partition
        * @return a new index partition of the index space of the logical region
        */
       IndexPartition create_partition_by_field(Context ctx,
@@ -5076,7 +5364,9 @@ namespace Legion {
                                                MapperID id = 0,
                                                MappingTagID tag = 0,
                                                PartitionKind part_kind = 
-                                                         LEGION_DISJOINT_KIND);
+                                                         LEGION_DISJOINT_KIND,
+                                               UntypedBuffer map_arg = 
+                                                         UntypedBuffer());
       template<int DIM, typename COORD_T, 
                int COLOR_DIM, typename COLOR_COORD_T>
       IndexPartitionT<DIM,COORD_T> create_partition_by_field(Context ctx,
@@ -5086,7 +5376,8 @@ namespace Legion {
                           IndexSpaceT<COLOR_DIM,COLOR_COORD_T> color_space,
                           Color color = LEGION_AUTO_GENERATE_ID,
                           MapperID id = 0, MappingTagID tag = 0,
-                          PartitionKind part_kind = LEGION_DISJOINT_KIND);
+                          PartitionKind part_kind = LEGION_DISJOINT_KIND,
+                          UntypedBuffer map_arg = UntypedBuffer());
       ///@}
       ///@{
       /**
@@ -5117,6 +5408,7 @@ namespace Legion {
        * @param color optional new color for the index partition
        * @param id the ID of the mapper to use for mapping field
        * @param tag the mapper tag to provide context to the mapper
+       * @param map_arg an untyped buffer for the mapper data of the Partition
        * @return a new index partition of the 'handle' index space
        */
       IndexPartition create_partition_by_image(Context ctx,
@@ -5127,7 +5419,8 @@ namespace Legion {
                                  IndexSpace color_space,
                                  PartitionKind part_kind = LEGION_COMPUTE_KIND,
                                  Color color = LEGION_AUTO_GENERATE_ID,
-                                 MapperID id = 0, MappingTagID tag = 0);
+                                 MapperID id = 0, MappingTagID tag = 0,
+                                 UntypedBuffer map_arg = UntypedBuffer());
       template<int DIM1, typename COORD_T1, 
                int DIM2, typename COORD_T2, 
                int COLOR_DIM, typename COLOR_COORD_T>
@@ -5139,7 +5432,8 @@ namespace Legion {
                               IndexSpaceT<COLOR_DIM,COLOR_COORD_T> color_space,
                               PartitionKind part_kind = LEGION_COMPUTE_KIND,
                               Color color = LEGION_AUTO_GENERATE_ID,
-                              MapperID id = 0, MappingTagID tag = 0);
+                              MapperID id = 0, MappingTagID tag = 0,
+                              UntypedBuffer map_arg = UntypedBuffer());
       // Range versions of image
       IndexPartition create_partition_by_image_range(Context ctx,
                                  IndexSpace handle,
@@ -5149,7 +5443,8 @@ namespace Legion {
                                  IndexSpace color_space,
                                  PartitionKind part_kind = LEGION_COMPUTE_KIND,
                                  Color color = LEGION_AUTO_GENERATE_ID,
-                                 MapperID id = 0, MappingTagID tag = 0);
+                                 MapperID id = 0, MappingTagID tag = 0,
+                                 UntypedBuffer map_arg = UntypedBuffer());
       template<int DIM1, typename COORD_T1, 
                int DIM2, typename COORD_T2, 
                int COLOR_DIM, typename COLOR_COORD_T>
@@ -5162,7 +5457,8 @@ namespace Legion {
                               IndexSpaceT<COLOR_DIM,COLOR_COORD_T> color_space,
                               PartitionKind part_kind = LEGION_COMPUTE_KIND,
                               Color color = LEGION_AUTO_GENERATE_ID,
-                              MapperID id = 0, MappingTagID tag = 0);
+                              MapperID id = 0, MappingTagID tag = 0,
+                              UntypedBuffer map_arg = UntypedBuffer());
       ///@}                                    
       ///@{
       /**
@@ -5190,6 +5486,7 @@ namespace Legion {
        * @param color optional new color for the index partition
        * @param id the ID of the mapper to use for mapping field
        * @param tag the mapper tag to provide context to the mapper
+       * @param map_arg an untyped buffer for the mapper data of the Partition
        * @return a new index partition of the index space of 'handle'
        */
       IndexPartition create_partition_by_preimage(Context ctx, 
@@ -5200,7 +5497,8 @@ namespace Legion {
                                   IndexSpace color_space,
                                   PartitionKind part_kind = LEGION_COMPUTE_KIND,
                                   Color color = LEGION_AUTO_GENERATE_ID,
-                                  MapperID id = 0, MappingTagID tag = 0);
+                                  MapperID id = 0, MappingTagID tag = 0,
+                                  UntypedBuffer map_arg = UntypedBuffer());
       template<int DIM1, typename COORD_T1,
                int DIM2, typename COORD_T2,
                int COLOR_DIM, typename COLOR_COORD_T>
@@ -5212,7 +5510,8 @@ namespace Legion {
                               IndexSpaceT<COLOR_DIM,COLOR_COORD_T> color_space,
                               PartitionKind part_kind = LEGION_COMPUTE_KIND,
                               Color color = LEGION_AUTO_GENERATE_ID,
-                              MapperID id = 0, MappingTagID tag = 0);
+                              MapperID id = 0, MappingTagID tag = 0,
+                              UntypedBuffer map_arg = UntypedBuffer());
       // Range versions of preimage 
       IndexPartition create_partition_by_preimage_range(Context ctx, 
                                   IndexPartition projection,
@@ -5222,7 +5521,8 @@ namespace Legion {
                                   IndexSpace color_space,
                                   PartitionKind part_kind = LEGION_COMPUTE_KIND,
                                   Color color = LEGION_AUTO_GENERATE_ID,
-                                  MapperID id = 0, MappingTagID tag = 0);
+                                  MapperID id = 0, MappingTagID tag = 0,
+                                  UntypedBuffer map_arg = UntypedBuffer());
       template<int DIM1, typename COORD_T1,
                int DIM2, typename COORD_T2,
                int COLOR_DIM, typename COLOR_COORD_T>
@@ -5235,7 +5535,8 @@ namespace Legion {
                               IndexSpaceT<COLOR_DIM,COLOR_COORD_T> color_space,
                               PartitionKind part_kind = LEGION_COMPUTE_KIND,
                               Color color = LEGION_AUTO_GENERATE_ID,
-                              MapperID id = 0, MappingTagID tag = 0);
+                              MapperID id = 0, MappingTagID tag = 0,
+                              UntypedBuffer map_arg = UntypedBuffer());
       ///@} 
     public:
       //------------------------------------------------------------------------
@@ -6392,15 +6693,20 @@ namespace Legion {
        *                   should work collectively to construct the map
        * @param sid the sharding function ID that describes the sharding
        *                   pattern if collective=true
+       * @param implicit_sharding if collective=true this says whether the
+       *                   sharding should be implicitly handled by the
+       *                   runtime and the sharding function ID ignored
        * @return a new future map containing all the futures
        */
       FutureMap construct_future_map(Context ctx, IndexSpace domain, 
-                           const std::map<DomainPoint,TaskArgument> &data,
-                           bool collective = false, ShardingID sid = 0);
+                           const std::map<DomainPoint,UntypedBuffer> &data,
+                           bool collective = false, ShardingID sid = 0,
+                           bool implicit_sharding = false);
       LEGION_DEPRECATED("Use the version that takes an IndexSpace instead")
       FutureMap construct_future_map(Context ctx, const Domain &domain,
-                           const std::map<DomainPoint,TaskArgument> &data,
-                           bool collective = false, ShardingID sid = 0);
+                           const std::map<DomainPoint,UntypedBuffer> &data,
+                           bool collective = false, ShardingID sid = 0,
+                           bool implicit_sharding = false);
 
       /**
        * Construct a future map from a collection of futures. The user must
@@ -6418,16 +6724,20 @@ namespace Legion {
        *                   should work collectively to construct the map
        * @param sid the sharding function ID that describes the sharding
        *                   pattern if collective=true
+       * @param implicit_sharding if collective=true this says whether the
+       *                   sharding should be implicitly handled by the
+       *                   runtime and the sharding function ID ignored
        * @return a new future map containing all the futures
        */
       FutureMap construct_future_map(Context ctx, IndexSpace domain,
                            const std::map<DomainPoint,Future> &futures,
-                           bool collective = false, ShardingID sid = 0);
+                           bool collective = false, ShardingID sid = 0,
+                           bool implicit_sharding = false);
       LEGION_DEPRECATED("Use the version that takes an IndexSpace instead")
       FutureMap construct_future_map(Context ctx, const Domain &domain,
                            const std::map<DomainPoint,Future> &futures,
-                           bool collective = false, ShardingID sid = 0);
-      
+                           bool collective = false, ShardingID sid = 0,
+                           bool implicit_sharding = false);
 
       /**
        * Apply a transform to a FutureMap. All points that access the
@@ -6491,7 +6801,7 @@ namespace Legion {
                           const std::vector<IndexSpaceRequirement> &indexes,
                           const std::vector<FieldSpaceRequirement> &fields,
                           const std::vector<RegionRequirement> &regions,
-                          const TaskArgument &arg, 
+                          const UntypedBuffer &arg, 
                           const Predicate &predicate = Predicate::TRUE_PRED,
                           MapperID id = 0, 
                           MappingTagID tag = 0);
@@ -6521,7 +6831,7 @@ namespace Legion {
                           const std::vector<IndexSpaceRequirement> &indexes,
                           const std::vector<FieldSpaceRequirement> &fields,
                           const std::vector<RegionRequirement> &regions,
-                          const TaskArgument &global_arg, 
+                          const UntypedBuffer &global_arg, 
                           const ArgumentMap &arg_map,
                           const Predicate &predicate = Predicate::TRUE_PRED,
                           bool must_paralleism = false, 
@@ -6556,10 +6866,10 @@ namespace Legion {
                           const std::vector<IndexSpaceRequirement> &indexes,
                           const std::vector<FieldSpaceRequirement> &fields,
                           const std::vector<RegionRequirement> &regions,
-                          const TaskArgument &global_arg, 
+                          const UntypedBuffer &global_arg, 
                           const ArgumentMap &arg_map,
                           ReductionOpID reduction, 
-                          const TaskArgument &initial_value,
+                          const UntypedBuffer &initial_value,
                           const Predicate &predicate = Predicate::TRUE_PRED,
                           bool must_parallelism = false, 
                           MapperID id = 0, 
@@ -9172,6 +9482,14 @@ namespace Legion {
                                          const char *task_name = NULL);
     public:
       /**
+       * Provide a method to test whether the Legion runtime has been
+       * started yet or not. Note that this method simply queries at a
+       * single point in time and can race with a call to Runtime::start
+       * performed by a different thread.
+       */
+      static bool has_runtime(void);
+
+      /**
        * Provide a mechanism for finding the Legion runtime
        * pointer for a processor wrapper tasks that are starting
        * a new application level task.
@@ -9179,6 +9497,14 @@ namespace Legion {
        * @return the Legion runtime pointer for the specified processor
        */
       static Runtime* get_runtime(Processor p = Processor::NO_PROC);
+
+      /**
+       * Test whether we are inside of a Legion task and therefore
+       * have a context available. This can be used to see if it
+       * is safe to call 'Runtime::get_context'.
+       * @return boolean indicating if we are inside of a Legion task
+       */
+      static bool has_context(void);
 
       /**
        * Get the context for the currently executing task this must
@@ -9256,6 +9582,9 @@ namespace Legion {
       friend class DeferredValue;
       template<typename T, int DIM, typename COORD_T, bool CHECK_BOUNDS>
       friend class DeferredBuffer;
+      friend class UntypedDeferredValue;
+      template<typename>
+      friend class UntypedDeferredBuffer;
       Realm::RegionInstance create_task_local_instance(Memory memory,
                                 Realm::InstanceLayoutGeneric *layout);
       void destroy_task_local_instance(Realm::RegionInstance instance);

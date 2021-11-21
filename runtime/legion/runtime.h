@@ -112,11 +112,11 @@ namespace Legion {
       ArgumentMapImpl& operator=(const ArgumentMapImpl &rhs);
     public:
       bool has_point(const DomainPoint &point);
-      void set_point(const DomainPoint &point, const TaskArgument &arg,
+      void set_point(const DomainPoint &point, const UntypedBuffer &arg,
                      bool replace);
       void set_point(const DomainPoint &point, const Future &f, bool replace);
       bool remove_point(const DomainPoint &point);
-      TaskArgument get_point(const DomainPoint &point);
+      UntypedBuffer get_point(const DomainPoint &point);
     public:
       FutureMap freeze(TaskContext *ctx);
       void unfreeze(void);
@@ -415,8 +415,8 @@ namespace Legion {
       // Whether this future has a size set yet
       bool future_size_set;
     private:
-      volatile bool empty;
-      volatile bool sampled;
+      std::atomic<bool> empty;
+      std::atomic<bool> sampled;
     };
 
     /**
@@ -703,7 +703,7 @@ namespace Legion {
       virtual void get_shard_local_futures(
                                      std::map<DomainPoint,Future> &futures);
     public:
-      void set_sharding_function(ShardingFunction *function);
+      void set_sharding_function(ShardingFunction *function, bool own = false);
       void handle_future_map_request(Deserializer &derez);
     protected:
       void process_future_map_request(const DomainPoint &point,
@@ -730,6 +730,8 @@ namespace Legion {
       std::set<RtEvent> exchange_events;
       RtUserEvent sharding_function_ready;
       ShardingFunction *sharding_function;
+      // Whether the future map owns the sharding function
+      bool own_sharding_function;
       bool collective_performed;
       // For replicated future maps we track whether there have been any
       // non-triival calls to this shard of the future map. If there are
@@ -1157,7 +1159,7 @@ namespace Legion {
       unsigned expected_remote_arrivals;
       unsigned local_shard_id;
       InnerContext *top_context;
-      ShardManager *volatile shard_manager;
+      std::atomic<ShardManager*> shard_manager;
       RtUserEvent manager_ready;
       std::vector<std::pair<AddressSpaceID,void*> > remote_spaces;
     };
@@ -1377,11 +1379,11 @@ namespace Legion {
         {
           if (!ready.has_triggered())
             ready.wait();
-          return success;
+          return success.load();
         }
       private:
         const RtUserEvent ready;
-        volatile bool success;
+        std::atomic<bool> success;
       };
 #ifdef LEGION_MALLOC_INSTANCES
     public:
@@ -1673,6 +1675,7 @@ namespace Legion {
       VirtualChannel& operator=(const VirtualChannel &rhs);
     public:
       void package_message(Serializer &rez, MessageKind k, bool flush,
+                           RtEvent flush_precondition,
                            Runtime *runtime, Processor target, 
                            bool response, bool shutdown);
       void process_message(const void *args, size_t arglen, 
@@ -1680,7 +1683,8 @@ namespace Legion {
       void confirm_shutdown(ShutdownManager *shutdown_manager, bool phase_one);
     private:
       void send_message(bool complete, Runtime *runtime, Processor target, 
-                        MessageKind kind, bool response, bool shutdown);
+                        MessageKind kind, bool response, bool shutdown,
+                        RtEvent send_precondition);
       bool handle_messages(unsigned num_messages, Runtime *runtime, 
                            AddressSpaceID remote_address_space,
                            const char *args, size_t arglen) const;
@@ -1758,7 +1762,8 @@ namespace Legion {
     public:
       void send_message(Serializer &rez, MessageKind kind, 
                         VirtualChannelKind channel, bool flush, 
-                        bool response = false, bool shutdown = false);
+                        bool response = false, bool shutdown = false,
+                        RtEvent flush_precondition = RtEvent::NO_RT_EVENT);
       void receive_message(const void *args, size_t arglen);
       void confirm_shutdown(ShutdownManager *shutdown_manager,
                             bool phase_one);
@@ -2616,7 +2621,7 @@ namespace Legion {
       void finalize_runtime(void);
       ApEvent launch_mapper_task(Mapper *mapper, Processor proc, 
                                  TaskID tid,
-                                 const TaskArgument &arg, MapperID map_id);
+                                 const UntypedBuffer &arg, MapperID map_id);
       void process_mapper_task_result(const MapperTaskArgs *args); 
     public:
       void create_shared_ownership(IndexSpace handle, 
@@ -2968,9 +2973,9 @@ namespace Legion {
       void send_remote_task_replay(AddressSpaceID target, Serializer &rez);
       void send_remote_task_profiling_response(Processor tar, Serializer &rez);
       void send_shared_ownership(AddressSpaceID target, Serializer &rez);
-      void send_index_space_node(AddressSpaceID target, Serializer &rez);
       void send_index_space_request(AddressSpaceID target, Serializer &rez);
-      void send_index_space_return(AddressSpaceID target, Serializer &rez);
+      void send_index_space_return(AddressSpaceID target, Serializer &rez,
+                                   RtEvent precondition);
       void send_index_space_set(AddressSpaceID target, Serializer &rez);
       void send_index_space_child_request(AddressSpaceID target, 
                                           Serializer &rez);
@@ -2994,9 +2999,9 @@ namespace Legion {
                                           Serializer &rez);
       void send_index_partition_notification(AddressSpaceID target, 
                                              Serializer &rez);
-      void send_index_partition_node(AddressSpaceID target, Serializer &rez);
       void send_index_partition_request(AddressSpaceID target, Serializer &rez);
-      void send_index_partition_return(AddressSpaceID target, Serializer &rez);
+      void send_index_partition_return(AddressSpaceID target, Serializer &rez,
+                                       RtEvent precondition);
       void send_index_partition_child_request(AddressSpaceID target,
                                               Serializer &rez);
       void send_index_partition_child_response(AddressSpaceID target,
@@ -3040,7 +3045,6 @@ namespace Legion {
       void send_local_field_update(AddressSpaceID target, Serializer &rez);
       void send_top_level_region_request(AddressSpaceID target,Serializer &rez);
       void send_top_level_region_return(AddressSpaceID target, Serializer &rez);
-      void send_logical_region_node(AddressSpaceID target, Serializer &rez);
       void send_index_space_destruction(IndexSpace handle, 
                                         AddressSpaceID target,
                                         std::set<RtEvent> &applied);
@@ -3303,10 +3307,10 @@ namespace Legion {
       void handle_remote_task_replay(Deserializer &derez);
       void handle_remote_task_profiling_response(Deserializer &derez);
       void handle_shared_ownership(Deserializer &derez);
-      void handle_index_space_node(Deserializer &derez, AddressSpaceID source);
       void handle_index_space_request(Deserializer &derez, 
                                       AddressSpaceID source);
-      void handle_index_space_return(Deserializer &derez); 
+      void handle_index_space_return(Deserializer &derez,
+                                     AddressSpaceID source); 
       void handle_index_space_set(Deserializer &derez, AddressSpaceID source);
       void handle_index_space_child_request(Deserializer &derez, 
                                             AddressSpaceID source); 
@@ -3325,11 +3329,10 @@ namespace Legion {
       void handle_index_space_generate_color_response(Deserializer &derez);
       void handle_index_space_release_color(Deserializer &derez);
       void handle_index_partition_notification(Deserializer &derez);
-      void handle_index_partition_node(Deserializer &derez,
-                                       AddressSpaceID source);
       void handle_index_partition_request(Deserializer &derez,
                                           AddressSpaceID source);
-      void handle_index_partition_return(Deserializer &derez);
+      void handle_index_partition_return(Deserializer &derez,
+                                         AddressSpaceID source);
       void handle_index_partition_child_request(Deserializer &derez,
                                                 AddressSpaceID source);
       void handle_index_partition_child_response(Deserializer &derez);
@@ -3367,9 +3370,8 @@ namespace Legion {
       void handle_local_field_update(Deserializer &derez);
       void handle_top_level_region_request(Deserializer &derez,
                                            AddressSpaceID source);
-      void handle_top_level_region_return(Deserializer &derez);
-      void handle_logical_region_node(Deserializer &derez, 
-                                      AddressSpaceID source);
+      void handle_top_level_region_return(Deserializer &derez,
+                                          AddressSpaceID source);
       void handle_index_space_destruction(Deserializer &derez);
       void handle_index_partition_destruction(Deserializer &derez);
       void handle_field_space_destruction(Deserializer &derez);

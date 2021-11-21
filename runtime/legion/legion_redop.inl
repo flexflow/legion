@@ -25,6 +25,9 @@
 
 namespace Legion {
 
+#if __cplusplus < 202002L
+  // We only need this crap if we're using a version of c++ < 20
+  // Starting with c++20 we can do all this the right way with atomic_ref
   namespace TypePunning {
     // The tenth circle of hell is reserved for members of the C++ committee
     // that decided to deviate from C's support for type punning unions.
@@ -123,6 +126,7 @@ namespace Legion {
       uint8_t buffer[sizeof(T1)];
     };
   }; // TypePunning
+#endif
 
 #if defined (__CUDACC__) || defined (__HIPCC__)
   // We have these functions here because calling memcpy (per the
@@ -456,7 +460,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<bool>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -500,7 +504,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<bool>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -544,7 +548,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -572,7 +576,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -600,7 +604,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -656,7 +660,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -712,7 +716,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&lhs, rhs);
 #else
     __sync_fetch_and_add(&lhs, rhs);
@@ -728,7 +732,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&rhs1, rhs2);
 #else
     __sync_fetch_and_add(&rhs1, rhs2);
@@ -744,7 +748,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -770,7 +774,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -796,7 +800,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -824,7 +828,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -852,7 +856,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void SumReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -904,7 +908,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -956,7 +960,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&lhs, rhs); 
 #else
     __sync_fetch_and_add(&lhs, rhs);
@@ -972,7 +976,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&rhs1, rhs2);
 #else
     __sync_fetch_and_add(&rhs1, rhs2);
@@ -988,7 +992,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd((unsigned long long*)&lhs, (unsigned long long)rhs);
 #else
     __sync_fetch_and_add(&lhs, rhs);
@@ -1004,7 +1008,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd((unsigned long long*)&rhs1, (unsigned long long)rhs2);
 #else
     __sync_fetch_and_add(&rhs1, rhs2);
@@ -1021,7 +1025,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<__half>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     atomicAdd(&lhs,rhs);
 #else
@@ -1088,7 +1092,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<__half>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     atomicAdd(&rhs1, rhs2);
 #else
@@ -1156,7 +1160,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<float>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&lhs, rhs);
 #else
 #if __cplusplus >= 202002L
@@ -1188,7 +1192,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<float>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&rhs1, rhs2);
 #else
 #if __cplusplus >= 202002L
@@ -1220,8 +1224,8 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<double>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
-#if __CUDA_ARCH__ >= 600
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if (__CUDA_ARCH__ >= 600) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&lhs, rhs);
 #else
     RHS newval = lhs, oldval;
@@ -1265,8 +1269,8 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<double>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
-#if __CUDA_ARCH__ >= 600
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if (__CUDA_ARCH__ >= 600) || defined(__HIP_DEVICE_COMPILE__)
     atomicAdd(&rhs1, rhs2);
 #else
     RHS newval = rhs1, oldval;
@@ -1312,7 +1316,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<complex<__half> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -1324,6 +1328,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval + rhs;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&lhs);
     do {
@@ -1331,6 +1343,7 @@ namespace Legion {
       newval = oldval.as_two() + rhs;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -1343,7 +1356,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<complex<__half> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -1355,6 +1368,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(rhs1);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval + rhs2;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&rhs1);
     do {
@@ -1362,6 +1383,7 @@ namespace Legion {
       newval = oldval.as_two() + rhs2;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 #endif // LEGION_REDOP_HALF
@@ -1375,7 +1397,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<complex<float> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -1415,7 +1437,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<complex<float> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -1455,8 +1477,8 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<complex<double> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
-#if __CUDA_ARCH__ >= 600
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if (__CUDA_ARCH__ >= 600) || defined(__HIP_DEVICE_COMPILE__)
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
     double *lptr = (double*)&lhs;
@@ -1512,8 +1534,8 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void SumReduction<complex<double> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
-#if __CUDA_ARCH__ >= 600
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#if (__CUDA_ARCH__ >= 600) || defined(__HIP_DEVICE_COMPILE__)
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
     double *lptr = (double*)&rhs1;
@@ -1570,7 +1592,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -1598,7 +1620,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -1626,7 +1648,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -1682,7 +1704,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -1738,7 +1760,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicSub(&lhs, rhs);
 #else
     __sync_fetch_and_sub(&lhs, rhs);
@@ -1754,7 +1776,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicSub(&rhs1, rhs2);
 #else
     __sync_fetch_and_add(&rhs1, rhs2);
@@ -1770,7 +1792,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -1796,7 +1818,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -1822,7 +1844,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -1850,7 +1872,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -1878,7 +1900,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void DiffReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -1930,7 +1952,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -1982,7 +2004,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicSub(&lhs, rhs); 
 #else
     __sync_fetch_and_sub(&lhs, rhs);
@@ -1998,7 +2020,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicSub(&rhs1, rhs2);
 #else
     __sync_fetch_and_add(&rhs1, rhs2);
@@ -2014,7 +2036,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64 bit int atomic yet
     unsigned long long *target = (unsigned long long *)&lhs;
     unsigned long long oldval, newval = *target;
@@ -2037,7 +2059,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64 bit int atomic yet
     unsigned long long *target = (unsigned long long *)&rhs1;
     unsigned long long oldval, newval = *target;
@@ -2061,7 +2083,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<__half>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -2137,7 +2159,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<__half>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -2214,7 +2236,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<float>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2255,7 +2277,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<float>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2296,7 +2318,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<double>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2337,7 +2359,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<double>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2380,7 +2402,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<complex<__half> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2392,6 +2414,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval - rhs;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&lhs);
     do {
@@ -2399,6 +2429,7 @@ namespace Legion {
       newval = oldval.as_two() - rhs;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -2411,7 +2442,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<complex<__half> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2423,6 +2454,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(rhs1);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval - rhs2;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&rhs1);
     do {
@@ -2430,6 +2469,7 @@ namespace Legion {
       newval = oldval.as_two() - rhs2;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 #endif // LEGION_REDOP_HALF
@@ -2443,7 +2483,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<complex<float> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2483,7 +2523,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DiffReduction<complex<float> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -2524,7 +2564,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<bool>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -2568,7 +2608,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<bool>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -2588,7 +2628,7 @@ namespace Legion {
     RHS oldval = atomic.load();
     RHS newval;
     do {
-      newval = oldval || rhs2;
+      newval = oldval && rhs2;
     } while (!atomic.compare_exchange_weak(oldval, newval));
 #else
     // No atomic logical operations so use compare and swap
@@ -2596,7 +2636,7 @@ namespace Legion {
     TypePunning::Pointer<int8_t> pointer((void*)&rhs1);
     do {
       oldval.load(pointer);
-      newval = oldval.as_two() || rhs2;
+      newval = oldval.as_two() && rhs2;
     } while (!__sync_bool_compare_and_swap((int8_t*)pointer,
           oldval.as_one(), newval.as_one()));
 #endif
@@ -2612,7 +2652,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -2655,7 +2695,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -2698,7 +2738,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -2769,7 +2809,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -2840,7 +2880,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     int *target = (int *)&lhs;
     int oldval, newval = lhs;
     do {
@@ -2877,7 +2917,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     int *target = (int *)&rhs1;
     int oldval, newval = rhs1;
     do {
@@ -2914,7 +2954,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -2955,7 +2995,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -2996,7 +3036,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -3039,7 +3079,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -3082,7 +3122,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void ProdReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -3149,7 +3189,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -3216,7 +3256,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned *target = (unsigned *)&lhs;
     unsigned oldval, newval = lhs;
     do {
@@ -3253,7 +3293,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned *target = (unsigned *)&rhs1;
     unsigned oldval, newval = rhs1;
     do {
@@ -3290,7 +3330,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned long long *target = (unsigned long long *)&lhs;
     unsigned long long oldval, newval = lhs;
     do {
@@ -3327,7 +3367,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned long long *target = (unsigned long long *)&rhs1;
     unsigned long long oldval, newval = rhs1;
     do {
@@ -3365,7 +3405,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<__half>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -3441,7 +3481,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<__half>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -3518,7 +3558,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<float>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3559,7 +3599,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<float>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3600,7 +3640,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<double>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3641,7 +3681,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<double>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3684,7 +3724,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<complex<__half> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3696,6 +3736,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval * rhs;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&lhs);
     do {
@@ -3703,6 +3751,7 @@ namespace Legion {
       newval = oldval.as_two() * rhs;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -3715,7 +3764,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<complex<__half> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3727,6 +3776,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(rhs1);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval * rhs2;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&rhs1);
     do {
@@ -3734,6 +3791,7 @@ namespace Legion {
       newval = oldval.as_two() * rhs2;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 #endif // LEGION_REDOP_HALF
@@ -3747,7 +3805,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<complex<float> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3787,7 +3845,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void ProdReduction<complex<float> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -3828,7 +3886,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -3871,7 +3929,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -3914,7 +3972,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -3985,7 +4043,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -4056,7 +4114,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     int *target = (int *)&lhs;
     int oldval, newval = lhs;
     do {
@@ -4093,7 +4151,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     int *target = (int *)&rhs1;
     int oldval, newval = rhs1;
     do {
@@ -4130,7 +4188,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -4171,7 +4229,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -4212,7 +4270,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -4255,7 +4313,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -4298,7 +4356,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void DivReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -4365,7 +4423,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -4432,7 +4490,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned *target = (unsigned *)&lhs;
     unsigned oldval, newval = lhs;
     do {
@@ -4469,7 +4527,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned *target = (unsigned *)&rhs1;
     unsigned oldval, newval = rhs1;
     do {
@@ -4506,7 +4564,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned long long *target = (unsigned long long *)&lhs;
     unsigned long long oldval, newval = lhs;
     do {
@@ -4543,7 +4601,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     unsigned long long *target = (unsigned long long *)&rhs1;
     unsigned long long oldval, newval = rhs1;
     do {
@@ -4581,7 +4639,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<__half>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -4657,7 +4715,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<__half>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -4734,7 +4792,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<float>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -4775,7 +4833,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<float>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -4816,7 +4874,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<double>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -4857,7 +4915,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<double>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -4900,7 +4958,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<complex<__half> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -4912,6 +4970,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval / rhs;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&lhs);
     do {
@@ -4919,6 +4985,7 @@ namespace Legion {
       newval = oldval.as_two() / rhs;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -4931,7 +4998,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<complex<__half> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -4943,6 +5010,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(rhs1);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval / rhs2;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&rhs1);
     do {
@@ -4950,6 +5025,7 @@ namespace Legion {
       newval = oldval.as_two() / rhs2;
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 #endif // LEGION_REDOP_HALF
@@ -4963,7 +5039,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<complex<float> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -5003,7 +5079,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void DivReduction<complex<float> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -5015,6 +5091,14 @@ namespace Legion {
             __complex_as_ulonglong(oldval), __complex_as_ulonglong(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(rhs1);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = oldval / rhs2;
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int64_t,complex<float> > oldval, newval;
     TypePunning::Pointer<int64_t> pointer((void*)&rhs1);
     do {
@@ -5022,6 +5106,7 @@ namespace Legion {
       newval = oldval.as_two() / rhs2;
     } while (!__sync_bool_compare_and_swap((int64_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 #endif // LEGION_REDOP_COMPLEX
@@ -5036,7 +5121,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<bool>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -5081,7 +5166,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<bool>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -5126,7 +5211,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -5170,7 +5255,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -5214,7 +5299,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -5286,7 +5371,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -5358,7 +5443,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMax(&lhs, rhs);
 #else
 #if __cplusplus >= 202002L 
@@ -5390,7 +5475,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMax(&rhs1, rhs2);  
 #else
 #if __cplusplus >= 202002L 
@@ -5422,7 +5507,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -5464,7 +5549,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -5506,7 +5591,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -5550,7 +5635,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -5594,7 +5679,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void MaxReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -5662,7 +5747,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -5730,7 +5815,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMax(&lhs, rhs);
 #else
 #if __cplusplus >= 202002L 
@@ -5762,7 +5847,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMax(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -5794,7 +5879,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicMax
     unsigned long long *target = (unsigned long long *)&lhs;
@@ -5837,7 +5922,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicMax
     unsigned long long *target = (unsigned long long *)&rhs1;
@@ -5881,7 +5966,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<__half>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -5958,7 +6043,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<__half>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -6036,7 +6121,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<float>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6078,7 +6163,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<float>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6120,7 +6205,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<double>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6162,7 +6247,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<double>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6206,7 +6291,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<complex<__half> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6218,6 +6303,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = __MAX__(oldval, rhs);
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&lhs);
     do {
@@ -6225,6 +6318,7 @@ namespace Legion {
       newval = __MAX__(oldval.as_two(), rhs);
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -6238,7 +6332,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<complex<__half> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6250,6 +6344,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(rhs1);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = __MAX__(oldval, rhs2);
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&rhs1);
     do {
@@ -6257,6 +6359,7 @@ namespace Legion {
       newval = __MAX__(oldval.as_two(), rhs2);
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 #endif // LEGION_REDOP_HALF
@@ -6271,7 +6374,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<complex<float> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6283,6 +6386,14 @@ namespace Legion {
             __complex_as_ulonglong(oldval), __complex_as_ulonglong(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = __MAX__(oldval, rhs);
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int64_t,complex<float> > oldval, newval;
     TypePunning::Pointer<int64_t> pointer((void*)&lhs);
     do {
@@ -6290,6 +6401,7 @@ namespace Legion {
       newval = __MAX__(oldval.as_two(), rhs);
     } while (!__sync_bool_compare_and_swap((int64_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -6303,7 +6415,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MaxReduction<complex<float> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -6345,7 +6457,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<bool>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -6390,7 +6502,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<bool>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -6435,7 +6547,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -6479,7 +6591,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -6523,7 +6635,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -6595,7 +6707,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -6667,7 +6779,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMin(&lhs, rhs);
 #else
 #if __cplusplus >= 202002L 
@@ -6699,7 +6811,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMin(&rhs1, rhs2);
 #else
 #if __cplusplus >= 202002L 
@@ -6731,7 +6843,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -6773,7 +6885,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -6815,7 +6927,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -6859,7 +6971,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -6903,7 +7015,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void MinReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -6971,7 +7083,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -7039,7 +7151,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMin(&lhs, rhs); 
 #else
 #if __cplusplus >= 202002L 
@@ -7071,7 +7183,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicMin(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -7103,7 +7215,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicMin
     unsigned long long *target = (unsigned long long *)&lhs;
@@ -7146,7 +7258,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicMin
     unsigned long long *target = (unsigned long long *)&rhs1;
@@ -7190,7 +7302,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<__half>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -7260,7 +7372,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<__half>::fold<true>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     if (rhs2 < rhs1)
       rhs1 = rhs2;
 #else
@@ -7272,7 +7384,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<__half>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -7350,7 +7462,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<float>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7392,7 +7504,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<float>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7434,7 +7546,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<double>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7476,7 +7588,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<double>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7520,7 +7632,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<complex<__half> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7532,6 +7644,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = __MIN__(oldval, rhs);
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&lhs);
     do {
@@ -7539,6 +7659,7 @@ namespace Legion {
       newval = __MIN__(oldval.as_two(), rhs);
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -7552,7 +7673,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<complex<__half> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7564,6 +7685,14 @@ namespace Legion {
             __complex_as_uint(oldval), __complex_as_uint(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(rhs1);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = __MIN__(oldval, rhs2);
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int32_t,complex<__half> > oldval, newval;
     TypePunning::Pointer<int32_t> pointer((void*)&rhs1);
     do {
@@ -7571,6 +7700,7 @@ namespace Legion {
       newval = __MIN__(oldval.as_two(), rhs2);
     } while (!__sync_bool_compare_and_swap((int32_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 #endif // LEGION_REDOP_HALF
@@ -7585,7 +7715,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<complex<float> >::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7597,6 +7727,14 @@ namespace Legion {
             __complex_as_ulonglong(oldval), __complex_as_ulonglong(newval)));
     } while (oldval != newval);
 #else
+#if __cplusplus >= 202002L
+    std::atomic_ref<RHS> atomic(lhs);
+    RHS oldval = atomic.load();
+    RHS newval;
+    do {
+      newval = __MIN__(oldval, rhs);
+    } while (!atomic.compare_exchange_weak(oldval, newval));
+#else
     TypePunning::Alias<int64_t,complex<float> > oldval, newval;
     TypePunning::Pointer<int64_t> pointer((void*)&lhs);
     do {
@@ -7604,6 +7742,7 @@ namespace Legion {
       newval = __MIN__(oldval.as_two(), rhs);
     } while (!__sync_bool_compare_and_swap((int64_t*)pointer,
                       oldval.as_one(), newval.as_one()));
+#endif
 #endif
   }
 
@@ -7617,7 +7756,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void MinReduction<complex<float> >::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
     // CUDA manual has an example just like it so fuck it
@@ -7658,7 +7797,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -7701,7 +7840,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -7744,7 +7883,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -7815,7 +7954,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -7886,7 +8025,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicOr(&lhs, rhs);
 #else
 #if __cplusplus >= 202002L 
@@ -7917,7 +8056,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicOr(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -7948,7 +8087,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -7989,7 +8128,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -8030,7 +8169,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -8073,7 +8212,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -8116,7 +8255,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void OrReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -8183,7 +8322,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -8250,7 +8389,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicOr(&lhs, rhs);
 #else
 #if __cplusplus >= 202002L 
@@ -8281,7 +8420,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicOr(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -8312,7 +8451,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicOr
     unsigned long long *target = (unsigned long long *)&lhs;
@@ -8354,7 +8493,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void OrReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicOr
     unsigned long long *target = (unsigned long long *)&rhs1;
@@ -8396,7 +8535,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -8439,7 +8578,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -8482,7 +8621,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -8553,7 +8692,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -8624,7 +8763,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAnd(&lhs, rhs); 
 #else
 #if __cplusplus >= 202002L 
@@ -8655,7 +8794,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAnd(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -8686,7 +8825,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -8727,7 +8866,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -8768,7 +8907,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -8811,7 +8950,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -8854,7 +8993,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void AndReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -8921,7 +9060,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -8988,7 +9127,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAnd(&lhs, rhs); 
 #else
 #if __cplusplus >= 202002L 
@@ -9019,7 +9158,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicAnd(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -9050,7 +9189,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicAnd
     unsigned long long *target = (unsigned long long *)&lhs;
@@ -9092,7 +9231,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void AndReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicAnd
     unsigned long long *target = (unsigned long long *)&rhs1;
@@ -9134,7 +9273,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<bool>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -9178,7 +9317,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<bool>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -9222,7 +9361,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(int);
@@ -9265,7 +9404,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(int);
@@ -9308,7 +9447,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -9379,7 +9518,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -9450,7 +9589,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicXor(&lhs, rhs);
 #else
 #if __cplusplus >= 202002L 
@@ -9481,7 +9620,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicXor(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -9512,7 +9651,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = lhs, oldval;
     // Type punning like this is illegal in C++ but the
@@ -9553,7 +9692,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<int64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // Apparently there is no signed 64bit int atomic yet
     RHS newval = rhs1, oldval;
     // Type punning like this is illegal in C++ but the
@@ -9594,7 +9733,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<uint8_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&lhs);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -9637,7 +9776,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<uint8_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     // GPU atomics need 4 byte alignment
     const uintptr_t unaligned = reinterpret_cast<uintptr_t>(&rhs1);
     const unsigned offset = unaligned % sizeof(unsigned int);
@@ -9680,7 +9819,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline 
   void XorReduction<uint16_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = lhs, oldval;
     do {
@@ -9747,7 +9886,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<uint16_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDA_ARCH__ >= 700
     RHS newval = rhs1, oldval;
     do {
@@ -9814,7 +9953,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<uint32_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicXor(&lhs, rhs); 
 #else
 #if __cplusplus >= 202002L 
@@ -9845,7 +9984,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<uint32_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
     atomicXor(&rhs1, rhs2); 
 #else
 #if __cplusplus >= 202002L 
@@ -9876,7 +10015,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<uint64_t>::apply<false>(LHS &lhs, RHS rhs)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicXor
     unsigned long long *target = (unsigned long long *)&lhs;
@@ -9918,7 +10057,7 @@ namespace Legion {
   template<> __CUDA_HD__ inline
   void XorReduction<uint64_t>::fold<false>(RHS &rhs1, RHS rhs2)
   {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #if __CUDACC_VER_MAJOR__ < 11
     // Older versions of CUDA don't have 64-bit atomicXor
     unsigned long long *target = (unsigned long long *)&rhs1;

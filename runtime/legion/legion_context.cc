@@ -2275,12 +2275,12 @@ namespace Legion {
             owner_task->get_unique_op_id(), ready,size, true/*eager*/);
         // create an external instance for the current allocation
         const std::vector<Realm::FieldID> fids(1, 0/*field id*/);
-        const std::vector<size_t> sizes(1, size);
+        const std::vector<size_t> sizes(1, 1);
         const int dim_order[1] = { 0 };
         const Realm::InstanceLayoutConstraints constraints(fids, sizes, 1);
         const Realm::IndexSpace<1,coord_t> rect_space(
             Realm::Rect<1,coord_t>(Realm::Point<1,coord_t>(0),
-                                   Realm::Point<1,coord_t>(0)));
+                                   Realm::Point<1,coord_t>(size - 1)));
         Realm::InstanceLayoutGeneric *ilg =
           Realm::InstanceLayoutGeneric::choose_instance_layout<1,coord_t>(
               rect_space, constraints, dim_order);
@@ -3867,9 +3867,6 @@ namespace Legion {
         if (!it->second)
           to_delete.push_back(it->first);
       }
-#ifdef DEBUG_LEGION
-      assert(!to_delete.empty());
-#endif
       if (to_delete.size() != finder->second.size())
       {
         for (std::vector<PendingEquivalenceSet*>::const_iterator it =
@@ -3901,7 +3898,7 @@ namespace Legion {
             to_untrack.begin(); it != to_untrack.end(); it++)
         it->first->invalidate_trackers(it->second, applied_events,
             runtime->address_space, NULL/*no collective mapping*/,
-            local_only ? this : NULL/*filter everything*/);
+            local_only ? get_context_uid() : 0/*filter everything*/);
     }
 
     //--------------------------------------------------------------------------
@@ -4679,7 +4676,8 @@ namespace Legion {
                                           LogicalRegion domain_parent,
                                           FieldID domain_fid,
                                           IndexSpace range,
-                                          MapperID id, MappingTagID tag)
+                                          MapperID id, MappingTagID tag,
+                                          const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
@@ -4690,7 +4688,7 @@ namespace Legion {
       DependentPartitionOp *part_op = 
         runtime->get_available_dependent_partition_op();
       part_op->initialize_by_association(this, domain, domain_parent, 
-                                         domain_fid, range, id, tag);
+                                         domain_fid, range, id, tag, marg);
       // Now figure out if we need to unmap and re-map any inline mappings
       std::vector<PhysicalRegion> unmapped_regions;
       if (!runtime->unsafe_launch)
@@ -4772,7 +4770,7 @@ namespace Legion {
       for (std::map<DomainPoint,Domain>::const_iterator it = 
             domains.begin(); it != domains.end(); it++)
         argmap.set_point(it->first,
-            TaskArgument(&it->second, sizeof(it->second)));
+            UntypedBuffer(&it->second, sizeof(it->second)));
       FutureMap future_map(argmap.impl->freeze(this));
       return create_partition_by_domain(parent, future_map, color_space, 
                                         perform_intersections, part_kind,color);
@@ -4827,7 +4825,8 @@ namespace Legion {
                                               IndexSpace color_space,
                                               Color color,
                                               MapperID id, MappingTagID tag,
-                                              PartitionKind part_kind)
+                                              PartitionKind part_kind,
+                                              const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
@@ -4855,7 +4854,8 @@ namespace Legion {
             parent, color_space, part_color, part_kind, did, term_event);
       // Do this after creating the pending partition so the node exists
       // in case we need to look at it during initialization
-      part_op->initialize_by_field(this, pid, handle, parent_priv, fid, id,tag);
+      part_op->initialize_by_field(this, pid, handle, parent_priv, 
+                                   fid, id, tag, marg);
       // Now figure out if we need to unmap and re-map any inline mappings
       std::vector<PhysicalRegion> unmapped_regions;
       if (!runtime->unsafe_launch)
@@ -4895,7 +4895,8 @@ namespace Legion {
                                                     PartitionKind part_kind,
                                                     Color color,
                                                     MapperID id, 
-                                                    MappingTagID tag)
+                                                    MappingTagID tag,
+                                                    const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this); 
@@ -4921,7 +4922,7 @@ namespace Legion {
             handle, color_space, part_color, part_kind, did, term_event);
       // Do this after creating the pending partition so the node exists
       // in case we need to look at it during initialization
-      part_op->initialize_by_image(this, pid, projection, parent, fid, id, tag);
+      part_op->initialize_by_image(this,pid,projection,parent,fid,id,tag,marg);
       // Now figure out if we need to unmap and re-map any inline mappings
       std::vector<PhysicalRegion> unmapped_regions;
       if (!runtime->unsafe_launch)
@@ -4961,7 +4962,8 @@ namespace Legion {
                                                     PartitionKind part_kind,
                                                     Color color,
                                                     MapperID id, 
-                                                    MappingTagID tag)
+                                                    MappingTagID tag,
+                                                    const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this); 
@@ -4988,7 +4990,7 @@ namespace Legion {
       // Do this after creating the pending partition so the node exists
       // in case we need to look at it during initialization
       part_op->initialize_by_image_range(this, pid, projection, parent, 
-                                         fid, id, tag);
+                                         fid, id, tag, marg);
       // Now figure out if we need to unmap and re-map any inline mappings
       std::vector<PhysicalRegion> unmapped_regions;
       if (!runtime->unsafe_launch)
@@ -5027,7 +5029,8 @@ namespace Legion {
                                                   IndexSpace color_space,
                                                   PartitionKind part_kind,
                                                   Color color,
-                                                  MapperID id, MappingTagID tag)
+                                                  MapperID id, MappingTagID tag,
+                                                  const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this); 
@@ -5073,7 +5076,7 @@ namespace Legion {
       // Do this after creating the pending partition so the node exists
       // in case we need to look at it during initialization
       part_op->initialize_by_preimage(this, pid, projection, handle, 
-                                      parent, fid, id, tag);
+                                      parent, fid, id, tag, marg);
       // Now figure out if we need to unmap and re-map any inline mappings
       std::vector<PhysicalRegion> unmapped_regions;
       if (!runtime->unsafe_launch)
@@ -5112,7 +5115,8 @@ namespace Legion {
                                                   IndexSpace color_space,
                                                   PartitionKind part_kind,
                                                   Color color,
-                                                  MapperID id, MappingTagID tag)
+                                                  MapperID id, MappingTagID tag,
+                                                  const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this); 
@@ -5141,7 +5145,7 @@ namespace Legion {
       // Do this after creating the pending partition so the node exists
       // in case we need to look at it during initialization
       part_op->initialize_by_preimage_range(this, pid, projection, handle,
-                                            parent, fid, id, tag);
+                                            parent, fid, id, tag, marg);
       // Now figure out if we need to unmap and re-map any inline mappings
       std::vector<PhysicalRegion> unmapped_regions;
       if (!runtime->unsafe_launch)
@@ -6300,8 +6304,7 @@ namespace Legion {
       }
       // Quick out for predicate false
       if (launcher.predicate == Predicate::FALSE_PRED)
-        return predicate_index_task_false(
-            __sync_add_and_fetch(&outstanding_children_count,1), launcher);
+        return predicate_index_task_false(total_children_count++, launcher);
       IndexSpace launch_space = launcher.launch_space;
       if (!launch_space.exists())
         launch_space = find_index_launch_space(launcher.launch_domain);
@@ -6403,8 +6406,8 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMap InnerContext::construct_future_map(IndexSpace space,
-                                 const std::map<DomainPoint,TaskArgument> &data,
-                                 bool collective, ShardingID sid)
+                                const std::map<DomainPoint,UntypedBuffer> &data,
+                                bool collective, ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
@@ -6419,10 +6422,9 @@ namespace Legion {
       const DistributedID did = runtime->get_available_distributed_id();
       IndexSpaceNode *launch_node = runtime->forest->get_node(space);
       FutureMapImpl *impl = new FutureMapImpl(this, runtime, launch_node, did,
-                      __sync_add_and_fetch(&outstanding_children_count, 1),
-                      runtime->address_space, RtEvent::NO_RT_EVENT);
+          total_children_count++, runtime->address_space, RtEvent::NO_RT_EVENT);
       LocalReferenceMutator mutator;
-      for (std::map<DomainPoint,TaskArgument>::const_iterator it =
+      for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
             data.begin(); it != data.end(); it++)
       {
         if (!domain.contains(it->first))
@@ -6442,25 +6444,26 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMap InnerContext::construct_future_map(const Domain &domain,
-                                 const std::map<DomainPoint,TaskArgument> &data,
-                                 bool collective, ShardingID sid)
+                                const std::map<DomainPoint,UntypedBuffer> &data,
+                                bool collective, ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       return construct_future_map(find_index_launch_space(domain),
-                                  data, collective, sid);   
+                                  data, collective, sid, implicit);   
     }
 
     //--------------------------------------------------------------------------
     FutureMap InnerContext::construct_future_map(IndexSpace space,
-                                 const std::map<DomainPoint,Future> &futures,
-                                 bool internal, bool collective, ShardingID sid)
+                                    const std::map<DomainPoint,Future> &futures,
+                                    bool internal, bool collective,
+                                    ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       if (!internal)
       {
         AutoRuntimeCall call(this);
         return construct_future_map(space, futures, true/*internal*/,
-                                    collective, sid);
+                                    collective, sid, implicit);
       }
       CreationOp *creation_op = runtime->get_available_creation_op();
       creation_op->initialize_map(this, futures);
@@ -6483,11 +6486,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     FutureMap InnerContext::construct_future_map(const Domain &domain,
                                  const std::map<DomainPoint,Future> &futures,
-                                 bool internal, bool collective, ShardingID sid)
+                                 bool internal, bool collective,
+                                 ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       return construct_future_map(find_index_launch_space(domain), futures,
-                                  internal, collective, sid);
+                                  internal, collective, sid, implicit);
     }
 
     //--------------------------------------------------------------------------
@@ -7022,8 +7026,9 @@ namespace Legion {
       const IndexAttachLauncher &launcher, const std::vector<unsigned> &indexes)
     //--------------------------------------------------------------------------
     {
-      unsigned ancestor_depth = 0;
-      RegionTreeNode *common_ancestor = NULL;
+      std::vector<RegionTreeNode*> previous_nodes(indexes.size());
+      std::vector<unsigned> depths(indexes.size());
+      unsigned max_depth = 0;
       for (unsigned idx = 0; idx < indexes.size(); idx++)
       {
         const unsigned index = indexes[idx];
@@ -7037,52 +7042,74 @@ namespace Legion {
               handle.field_space.id, handle.tree_id, get_task_name(),
               get_unique_id(), launcher.parent.index_space.id,
               launcher.parent.field_space.id, launcher.parent.tree_id)
-        RegionTreeNode *node = runtime->forest->get_node(handle);
-        if (common_ancestor != NULL)
-        {
-          if (common_ancestor == node)
-            REPORT_LEGION_ERROR(ERROR_ATTEMPTED_EXTERNAL_ATTACH,
-              "Handle (%d,%d,%d) of index attach operation in parent task %s "
-              "(UID %lld) is overlaps with previous regions. All regions "
-              "in index space attach operations must be disjoint.",
-              handle.index_space.id, handle.field_space.id, handle.tree_id,
-              get_task_name(), get_unique_id())
-          // Bring them to the same depth
-          unsigned node_depth = node->get_depth();
-          while (ancestor_depth < node_depth)
-          {
-#ifdef DEBUG_LEGION
-            assert(node_depth > 0);
-#endif
-            node = node->get_parent();
-            node_depth--;
-          }
-          while (node_depth < ancestor_depth)
-          {
-#ifdef DEBUG_LEGION
-            assert(ancestor_depth > 0);
-#endif
-            common_ancestor = common_ancestor->get_parent();
-            ancestor_depth--;
-          }
-          while (node != common_ancestor)
-          {
-            // Same depth but different nodes
-#ifdef DEBUG_LEGION
-            assert(ancestor_depth > 0);
-#endif
-            node = node->get_parent();
-            common_ancestor = common_ancestor->get_parent();
-            ancestor_depth--;
-          }
-        }
-        else
-        {
-          common_ancestor = node;
-          ancestor_depth = common_ancestor->get_depth();
-        }
+        previous_nodes[idx] = runtime->forest->get_node(handle);
+        depths[idx] = previous_nodes[idx]->get_depth();
+        if (max_depth < depths[idx])
+          max_depth = depths[idx];
       }
-      return common_ancestor;
+      // Walk all the nodes up from the bottom until they arrive at a 
+      // common ancestor, along the way check to make sure that any nodes
+      // that arrive at a common join point from two different paths do
+      // so at a disjoint partition
+      std::vector<RegionTreeNode*> next_nodes(indexes.size());
+      while (max_depth > 0)
+      {
+        std::map<RegionTreeNode*,std::vector<unsigned> > next_to_previous;
+        bool all_same = true;
+        for (unsigned idx = 0; idx < indexes.size(); idx++)
+        {
+          if (depths[idx] == max_depth)
+          {
+            depths[idx]--;
+            next_nodes[idx] = previous_nodes[idx]->get_parent();
+            next_to_previous[next_nodes[idx]].push_back(idx);
+            if (all_same && (idx > 0) && (next_nodes[idx-1] != next_nodes[idx]))
+              all_same = false;
+          }
+          else
+          {
+            next_nodes[idx] = previous_nodes[idx];
+            all_same = false;
+          }
+        }
+        // check to see if all the next to previous cases play by the rules
+        for (std::map<RegionTreeNode*,std::vector<unsigned> >::const_iterator
+              it = next_to_previous.begin(); it != next_to_previous.end(); it++)
+        {
+          if (it->second.size() == 1)
+            continue;
+          // Can skip any disjoint partitions since it doesn't matter where
+          // their children came from
+          if (!it->first->is_region() &&
+              it->first->as_partition_node()->row_source->is_disjoint())
+            continue;
+          // Otherwise check to see that they all came from the same child
+          // If they didn't, then we can't prove tree disjointness
+          RegionTreeNode *previous = previous_nodes[it->second.front()];
+          for (unsigned idx = 1; idx < it->second.size(); idx++)
+          {
+            if (previous == previous_nodes[it->second[idx]])
+              continue;
+            const LogicalRegion h1 = launcher.handles[it->second.front()];
+            const LogicalRegion h2 = launcher.handles[it->second[idx]];
+            REPORT_LEGION_ERROR(ERROR_ATTEMPTED_EXTERNAL_ATTACH,
+              "Logical region handle (%d,%d,%d) from index %d of index attach "
+              "operation in parent task %s (UID %lld) is not region-tree "
+              "disjoint with logical region handle (%d,%d,%d) from index %d. "
+              "All regions in index space attach operations must be "
+              "region-tree disjoint.", h1.index_space.id,
+              h1.field_space.id, h1.tree_id, it->second.front(),
+              get_task_name(), get_unique_id(), h2.index_space.id,
+              h2.field_space.id, h2.tree_id, it->second[idx])
+          }
+        }
+        previous_nodes.swap(next_nodes);
+        if (all_same)
+          break;
+        max_depth--;
+      }
+      // At this point all the previous nodes should be the same
+      return previous_nodes.back();
     }
 
     //--------------------------------------------------------------------------
@@ -10138,22 +10165,22 @@ namespace Legion {
       // on that node is actually the point of serialization
       if (!manager->is_owner())
       {
-        InstanceView *volatile result = NULL;
+        std::atomic<InstanceView*> result(NULL);
         RtUserEvent wait_on = Runtime::create_rt_user_event();
         Serializer rez;
         {
           RezCheck z(rez);
           rez.serialize<UniqueID>(get_context_uid());
           rez.serialize(manager->did);
-          rez.serialize<InstanceView**>(const_cast<InstanceView**>(&result));
+          rez.serialize(&result);
           rez.serialize(wait_on); 
         }
         runtime->send_create_top_view_request(manager->owner_space, rez);
         wait_on.wait();
 #ifdef DEBUG_LEGION
-        assert(result != NULL); // when we wake up we should have the result
+        assert(result.load() != NULL); // when we wake up we should have the result
 #endif
-        return result;
+        return result.load();
       }
       // Check to see if we already have the 
       // instance, if we do, return it, otherwise make it and save it
@@ -10305,7 +10332,7 @@ namespace Legion {
       derez.deserialize(context_uid);
       DistributedID manager_did;
       derez.deserialize(manager_did);
-      InstanceView **target;
+      std::atomic<InstanceView*> *target;
       derez.deserialize(target);
       RtUserEvent to_trigger;
       derez.deserialize(to_trigger);
@@ -10365,7 +10392,7 @@ namespace Legion {
       DerezCheck z(derez);
       DistributedID result_did;
       derez.deserialize(result_did);
-      InstanceView **target;
+      std::atomic<InstanceView*> *target;
       derez.deserialize(target);
       RtUserEvent to_trigger;
       derez.deserialize(to_trigger);
@@ -10373,7 +10400,7 @@ namespace Legion {
       LogicalView *view = 
         runtime->find_or_request_logical_view(result_did, ready);
       // Have to static cast since it might not be ready
-      *target = static_cast<InstanceView*>(view);
+      target->store(static_cast<InstanceView*>(view));
       if (ready.exists())
         Runtime::trigger_event(to_trigger, ready);
       else
@@ -11971,7 +11998,7 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     /*static*/ void ReplicateContext::hash_argument(Murmur3Hasher &hasher,
-                              unsigned safe_level, const TaskArgument &argument)
+                             unsigned safe_level, const UntypedBuffer &argument)
     //--------------------------------------------------------------------------
     {
       if (safe_level == 1)
@@ -12035,6 +12062,7 @@ namespace Legion {
       hash_predicate(hasher, launcher.predicate);
       hasher.hash(launcher.map_id);
       hasher.hash(launcher.tag);
+      hash_argument(hasher, safe_level, launcher.map_arg);
       for (int idx = 0; idx < launcher.point.get_dim(); idx++)
         hasher.hash(launcher.point[idx]);
       hasher.hash(launcher.sharding_space);
@@ -12075,6 +12103,7 @@ namespace Legion {
       hasher.hash(launcher.must_parallelism);
       hasher.hash(launcher.map_id);
       hasher.hash(launcher.tag);
+      hash_argument(hasher, safe_level, launcher.map_arg);
       hash_future(hasher, safe_level, launcher.predicate_false_future);
       hash_argument(hasher, safe_level, launcher.predicate_false_result);
       hash_static_dependences(hasher, launcher.static_dependences);
@@ -13859,7 +13888,8 @@ namespace Legion {
                                               LogicalRegion domain_parent,
                                               FieldID domain_fid,
                                               IndexSpace range,
-                                              MapperID id, MappingTagID tag)
+                                              MapperID id, MappingTagID tag,
+                                              const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
@@ -13874,6 +13904,7 @@ namespace Legion {
         hasher.hash(range);
         hasher.hash(id);
         hasher.hash(tag);
+        hash_argument(hasher, runtime->safe_control_replication, marg);
         verify_replicable(hasher, "create_association");
       }
       ReplDependentPartitionOp *part_op = 
@@ -13886,7 +13917,7 @@ namespace Legion {
                                     0/*owner shard*/, COLLECTIVE_LOC_37));
 #endif
       part_op->initialize_by_association(this, domain, domain_parent, 
-          domain_fid, range, id, tag, dependent_partition_barrier);
+          domain_fid, range, id, tag, marg, dependent_partition_barrier);
       // Now figure out if we need to unmap and re-map any inline mappings
       std::vector<PhysicalRegion> unmapped_regions;
       if (!runtime->unsafe_launch)
@@ -14004,8 +14035,8 @@ namespace Legion {
       const DistributedID did = runtime->get_available_distributed_id();
       IndexSpaceNode *color_node = runtime->forest->get_node(color_space); 
       FutureMap future_map(new FutureMapImpl(this, runtime, color_node, did,
-            __sync_add_and_fetch(&outstanding_children_count, 1),
-            runtime->address_space, RtEvent::NO_RT_EVENT, true/*reg now*/));
+                              total_children_count++, runtime->address_space,
+                              RtEvent::NO_RT_EVENT, true/*reg now*/));
       // Prune out every N-th one for this shard and then pass through
       // the subset to the normal InnerContext variation of this
       ShardID shard = 0;
@@ -14092,7 +14123,8 @@ namespace Legion {
                                               IndexSpace color_space,
                                               Color color,
                                               MapperID id, MappingTagID tag,
-                                              PartitionKind part_kind)
+                                              PartitionKind part_kind,
+                                              const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
@@ -14109,6 +14141,7 @@ namespace Legion {
         hasher.hash(id);
         hasher.hash(tag);
         hasher.hash(part_kind);
+        hash_argument(hasher, runtime->safe_control_replication, marg);
         verify_replicable(hasher, "create_partition_by_field");
       }
       // Partition by field is disjoint by construction
@@ -14133,7 +14166,7 @@ namespace Legion {
       const ApEvent term_event = part_op->get_completion_event();
       part_op->initialize_by_field(this, index_partition_allocator_shard,
                                    pending_partition_barrier, pid, handle, 
-                                   parent_priv, fid, id, tag,
+                                   parent_priv, fid, id, tag, marg,
                                    dependent_partition_barrier);
 #ifdef DEBUG_LEGION
       part_op->set_sharding_collective(new ShardingGatherCollective(this, 
@@ -14176,7 +14209,8 @@ namespace Legion {
                                                     PartitionKind part_kind,
                                                     Color color,
                                                     MapperID id, 
-                                                    MappingTagID tag)
+                                                    MappingTagID tag,
+                                                    const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);  
@@ -14194,6 +14228,7 @@ namespace Legion {
         hasher.hash(color);
         hasher.hash(id);
         hasher.hash(tag);
+        hash_argument(hasher, runtime->safe_control_replication, marg);
         verify_replicable(hasher, "create_partition_by_image");
       }
       PartitionKind verify_kind = LEGION_COMPUTE_KIND;
@@ -14226,7 +14261,7 @@ namespace Legion {
                                    index_partition_allocator_shard,
 #endif
                                    pending_partition_barrier, 
-                                   pid, projection, parent, fid, id, tag,
+                                   pid, projection, parent, fid, id, tag, marg,
                                    owner_shard->shard_id, total_shards,
                                    dependent_partition_barrier);
 #ifdef DEBUG_LEGION
@@ -14270,7 +14305,8 @@ namespace Legion {
                                                     PartitionKind part_kind,
                                                     Color color,
                                                     MapperID id, 
-                                                    MappingTagID tag)
+                                                    MappingTagID tag,
+                                                    const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);  
@@ -14288,6 +14324,7 @@ namespace Legion {
         hasher.hash(color);
         hasher.hash(id);
         hasher.hash(tag);
+        hash_argument(hasher, runtime->safe_control_replication, marg);
         verify_replicable(hasher, "create_partition_by_image_range");
       }
       PartitionKind verify_kind = LEGION_COMPUTE_KIND;
@@ -14319,8 +14356,8 @@ namespace Legion {
 #ifndef SHARD_BY_IMAGE
                                          index_partition_allocator_shard,
 #endif
-                                         pending_partition_barrier,
-                                         pid, projection, parent, fid, id, tag,
+                                         pending_partition_barrier, pid,
+                                         projection, parent, fid, id, tag, marg,
                                          owner_shard->shard_id, total_shards,
                                          dependent_partition_barrier);
 #ifdef DEBUG_LEGION
@@ -14363,7 +14400,8 @@ namespace Legion {
                                                   IndexSpace color_space,
                                                   PartitionKind part_kind,
                                                   Color color,
-                                                  MapperID id, MappingTagID tag)
+                                                  MapperID id, MappingTagID tag,
+                                                  const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);  
@@ -14381,6 +14419,7 @@ namespace Legion {
         hasher.hash(color);
         hasher.hash(id);
         hasher.hash(tag);
+        hash_argument(hasher, runtime->safe_control_replication, marg);
         verify_replicable(hasher, "create_partition_by_preimage");
       }
       PartitionKind verify_kind = LEGION_COMPUTE_KIND;
@@ -14429,7 +14468,7 @@ namespace Legion {
       part_op->initialize_by_preimage(this, index_partition_allocator_shard,
                                       pending_partition_barrier,
                                       pid, projection, handle,
-                                      parent, fid, id, tag, 
+                                      parent, fid, id, tag, marg,
                                       dependent_partition_barrier);
 #ifdef DEBUG_LEGION
       part_op->set_sharding_collective(new ShardingGatherCollective(this, 
@@ -14471,7 +14510,8 @@ namespace Legion {
                                                   IndexSpace color_space,
                                                   PartitionKind part_kind,
                                                   Color color,
-                                                  MapperID id, MappingTagID tag)
+                                                  MapperID id, MappingTagID tag,
+                                                  const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);  
@@ -14489,6 +14529,7 @@ namespace Legion {
         hasher.hash(color);
         hasher.hash(id);
         hasher.hash(tag);
+        hash_argument(hasher, runtime->safe_control_replication, marg);
         verify_replicable(hasher, "create_partition_by_preimage_range");
       }
       PartitionKind verify_kind = LEGION_COMPUTE_KIND;
@@ -14521,7 +14562,7 @@ namespace Legion {
                                             index_partition_allocator_shard, 
                                             pending_partition_barrier,
                                             pid, projection, handle,
-                                            parent, fid, id, tag,
+                                            parent, fid, id, tag, marg,
                                             dependent_partition_barrier);
 #ifdef DEBUG_LEGION
       part_op->set_sharding_collective(new ShardingGatherCollective(this, 
@@ -16708,8 +16749,7 @@ namespace Legion {
       }
       // Quick out for predicate false
       if (launcher.predicate == Predicate::FALSE_PRED)
-        return predicate_index_task_false(
-            __sync_add_and_fetch(&outstanding_children_count,1), launcher);
+        return predicate_index_task_false(total_children_count++, launcher);
       IndexSpace launch_space = launcher.launch_space;
       if (!launch_space.exists())
         launch_space = find_index_launch_space(launcher.launch_domain);
@@ -16851,8 +16891,8 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMap ReplicateContext::construct_future_map(IndexSpace space,
-                                 const std::map<DomainPoint,TaskArgument> &data,
-                                 bool collective, ShardingID sid)
+                                const std::map<DomainPoint,UntypedBuffer> &data,
+                                bool collective, ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
@@ -16864,7 +16904,7 @@ namespace Legion {
         hasher.hash(space);
         if (!collective)
         {
-          for (std::map<DomainPoint,TaskArgument>::const_iterator it =
+          for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
                 data.begin(); it != data.end(); it++)
           {
             hasher.hash(it->first);
@@ -16872,49 +16912,45 @@ namespace Legion {
               hasher.hash(it->second.get_ptr(), it->second.get_size());
           }
         }
-        else
+        else if (!implicit)
           hasher.hash(sid);
         verify_replicable(hasher, "construct_future_map");
       }
       IndexSpaceNode *domain_node = runtime->forest->get_node(space);
       Domain domain;
       domain_node->get_launch_space_domain(domain);
-      FutureMapImpl *impl = NULL;
+      FutureMap result;
       if (collective)
       {
-        // Make one future map for all the shards
-        DistributedID did = 0;
-        if (owner_shard->shard_id == dynamic_id_allocator_shard)
+        ReplFutureMapImpl *repl_impl =
+          new ReplFutureMapImpl(this, runtime, domain_node, domain_node,
+              runtime->get_available_distributed_id(), total_children_count++,
+              runtime->address_space, RtEvent::NO_RT_EVENT);
+        result = FutureMap(repl_impl);
+        ShardingFunction *function = NULL;
+        if (implicit)
         {
-          ValueBroadcast<DistributedID> collective(this, COLLECTIVE_LOC_99);
-          did = runtime->get_available_distributed_id();
-          collective.broadcast(did);
+          // Do an exchange between the shards to compute the implicit sharding
+          // No need to wait for it to be done before continuing
+          ImplicitShardingFunctor *functor = new
+            ImplicitShardingFunctor(this, COLLECTIVE_LOC_101, repl_impl);
+          functor->compute_sharding(data);
+          function =
+            new ShardingFunction(functor, runtime->forest, sid, total_shards);
         }
         else
-        {
-          ValueBroadcast<DistributedID> collective(this,
-              dynamic_id_allocator_shard, COLLECTIVE_LOC_99);
-          did = collective.get_value();
-        }
-        const AddressSpaceID owner_space =
-          shard_manager->get_shard_space(dynamic_id_allocator_shard);
-        ReplFutureMapImpl *repl_impl =
-          new ReplFutureMapImpl(this, runtime, domain_node, domain_node, did,
-            __sync_add_and_fetch(&outstanding_children_count, 1),
-            owner_space, RtEvent::NO_RT_EVENT);
-        ShardingFunction *function = shard_manager->find_sharding_function(sid);
+          function = shard_manager->find_sharding_function(sid);
         // Check that all the points abide by the sharding function 
-        for (std::map<DomainPoint,TaskArgument>::const_iterator it =
+        for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
               data.begin(); it != data.end(); it++)
           if (function->find_owner(it->first, domain) != owner_shard->shard_id)
             REPORT_LEGION_ERROR(ERROR_FUTURE_MAP_COUNT_MISMATCH,
                 "Sharding function does not match described sharding for "
                 "future map construction in %s (UID %lld)",
                 get_task_name(), get_unique_id())
-        repl_impl->set_sharding_function(function);
+        repl_impl->set_sharding_function(function, implicit);
         if (++dynamic_id_allocator_shard == total_shards)
           dynamic_id_allocator_shard = 0;
-        impl = repl_impl;
       }
       else
       {
@@ -16925,12 +16961,12 @@ namespace Legion {
             "in task %s (UID %lld)", data.size(), domain_node->get_volume(),
             get_task_name(), get_unique_id())
         const DistributedID did = runtime->get_available_distributed_id();
-        impl = new FutureMapImpl(this, runtime, domain_node, did,
-                      __sync_add_and_fetch(&outstanding_children_count, 1),
-                      runtime->address_space, RtEvent::NO_RT_EVENT);
+        result = FutureMap(
+            new FutureMapImpl(this, runtime, domain_node, did,
+         total_children_count++, runtime->address_space, RtEvent::NO_RT_EVENT));
       }
       LocalReferenceMutator mutator;
-      for (std::map<DomainPoint,TaskArgument>::const_iterator it =
+      for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
             data.begin(); it != data.end(); it++)
       {
         if (!domain.contains(it->first))
@@ -16943,15 +16979,16 @@ namespace Legion {
             runtime->get_available_distributed_id(), runtime->address_space,
             ApEvent::NO_AP_EVENT, &future_size);
         future->set_local(it->second.get_ptr(), future_size);
-        impl->set_future(it->first, future, &mutator);
+        result.impl->set_future(it->first, future, &mutator);
       }
-      return FutureMap(impl);
+      return result;
     }
 
     //--------------------------------------------------------------------------
     FutureMap ReplicateContext::construct_future_map(IndexSpace space,
-                                 const std::map<DomainPoint,Future> &futures,
-                                 bool internal, bool collective, ShardingID sid)
+                                    const std::map<DomainPoint,Future> &futures,
+                                    bool internal, bool collective,
+                                    ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       if (!internal)
@@ -16972,46 +17009,38 @@ namespace Legion {
               hash_future(hasher,runtime->safe_control_replication,it->second);
             }
           }
-          else
+          else if (!implicit)
             hasher.hash(sid);
           verify_replicable(hasher, "construct_future_map");
         }
-        
         return construct_future_map(space, futures, true/*internal*/,
-                                    collective, sid);
+                                    collective, sid, implicit);
       }
       IndexSpaceNode *domain_node = runtime->forest->get_node(space);
-      if (futures.size() != domain_node->get_volume())
-        REPORT_LEGION_ERROR(ERROR_FUTURE_MAP_COUNT_MISMATCH,
-          "The number of futures passed into a future map construction (%zd) "
-          "does not match the volume of the domain (%zd) for the future map "
-          "in task %s (UID %lld)", futures.size(), domain_node->get_volume(),
-          get_task_name(), get_unique_id())
       CreationOp *creation_op = runtime->get_available_creation_op();
       creation_op->initialize_map(this, futures);
-      FutureMapImpl *impl = NULL;
+      FutureMap result;
       if (collective)
       {
         // Make one future map for all the shards
-        DistributedID did = 0;
-        if (owner_shard->shard_id == dynamic_id_allocator_shard)
-        {
-          ValueBroadcast<DistributedID> collective(this, COLLECTIVE_LOC_99);
-          did = runtime->get_available_distributed_id();
-          collective.broadcast(did);
-        }
-        else
-        {
-          ValueBroadcast<DistributedID> collective(this,
-              dynamic_id_allocator_shard, COLLECTIVE_LOC_99);
-          did = collective.get_value();
-        }
-        const AddressSpaceID owner_space =
-          shard_manager->get_shard_space(dynamic_id_allocator_shard);
         ReplFutureMapImpl *repl_impl = new ReplFutureMapImpl(this, creation_op,
                             RtEvent::NO_RT_EVENT, domain_node, domain_node,
-                            runtime, did, owner_space);
-        ShardingFunction *function = shard_manager->find_sharding_function(sid);
+                            runtime, runtime->get_available_distributed_id(),
+                            runtime->address_space);
+        result = FutureMap(repl_impl);
+        ShardingFunction *function = NULL;
+        if (implicit)
+        {
+          // Do an exchange between the shards to compute the implicit sharding
+          // No need to wait for it to be done before continuing
+          ImplicitShardingFunctor *functor = new
+            ImplicitShardingFunctor(this, COLLECTIVE_LOC_102, repl_impl);
+          functor->compute_sharding(futures);
+          function =
+            new ShardingFunction(functor, runtime->forest, sid, total_shards);
+        }
+        else
+          function = shard_manager->find_sharding_function(sid);
         // Check that all the points abide by the sharding function
         Domain domain;
         domain_node->get_launch_space_domain(domain);
@@ -17022,20 +17051,26 @@ namespace Legion {
                 "Sharding function does not match described sharding for "
                 "future map construction in %s (UID %lld)",
                 get_task_name(), get_unique_id())
-        repl_impl->set_sharding_function(function);
+        repl_impl->set_sharding_function(function, implicit);
         if (++dynamic_id_allocator_shard == total_shards)
           dynamic_id_allocator_shard = 0;
-        impl = repl_impl;
       }
       else
       {
+        if (futures.size() != domain_node->get_volume())
+          REPORT_LEGION_ERROR(ERROR_FUTURE_MAP_COUNT_MISMATCH,
+            "The number of futures passed into a future map construction (%zd) "
+            "does not match the volume of the domain (%zd) for the future map "
+            "in task %s (UID %lld)", futures.size(), domain_node->get_volume(),
+            get_task_name(), get_unique_id())
         const DistributedID did = runtime->get_available_distributed_id();
-        impl = new FutureMapImpl(this, creation_op, RtEvent::NO_RT_EVENT,
-                      domain_node, runtime, did, runtime->address_space);
+        result = FutureMap(
+            new FutureMapImpl(this, creation_op, RtEvent::NO_RT_EVENT,
+                      domain_node, runtime, did, runtime->address_space));
       }
       add_to_dependence_queue(creation_op);
-      impl->set_all_futures(futures);
-      return FutureMap(impl);
+      result.impl->set_all_futures(futures);
+      return result;
     }
 
     //--------------------------------------------------------------------------
@@ -17056,6 +17091,8 @@ namespace Legion {
         hash_phase_barriers(hasher, launcher.arrive_barriers);
         hasher.hash(launcher.map_id);
         hasher.hash(launcher.tag);
+        hash_argument(hasher,
+            runtime->safe_control_replication, launcher.map_arg);
         hasher.hash(launcher.layout_constraint_id);
         hash_static_dependences(hasher, launcher.static_dependences);
         verify_replicable(hasher, "map_region");
@@ -17180,6 +17217,8 @@ namespace Legion {
         hash_phase_barriers(hasher, launcher.arrive_barriers);
         hasher.hash(launcher.map_id);
         hasher.hash(launcher.tag);
+        hash_argument(hasher,
+            runtime->safe_control_replication, launcher.map_arg);
         for (int idx = 0; idx < launcher.point.get_dim(); idx++)
           hasher.hash(launcher.point[idx]);
         hasher.hash(launcher.sharding_space);
@@ -17257,6 +17296,8 @@ namespace Legion {
         hash_phase_barriers(hasher, launcher.arrive_barriers);
         hasher.hash(launcher.map_id);
         hasher.hash(launcher.tag);
+        hash_argument(hasher,
+            runtime->safe_control_replication, launcher.map_arg);
         hash_static_dependences(hasher, launcher.static_dependences);
         hasher.hash(launcher.silence_warnings);
         verify_replicable(hasher, "fill_fields");
@@ -17339,6 +17380,8 @@ namespace Legion {
         hash_predicate(hasher, launcher.predicate);
         hasher.hash(launcher.map_id);
         hasher.hash(launcher.tag);
+        hash_argument(hasher, 
+            runtime->safe_control_replication, launcher.map_arg);
         for (int idx = 0; idx < launcher.point.get_dim(); idx++)
           hasher.hash(launcher.point[idx]);
         hasher.hash(launcher.sharding_space);
@@ -17409,6 +17452,8 @@ namespace Legion {
         hash_predicate(hasher, launcher.predicate);
         hasher.hash(launcher.map_id);
         hasher.hash(launcher.tag);
+        hash_argument(hasher,
+            runtime->safe_control_replication, launcher.map_arg);
         hasher.hash(launcher.launch_domain);
         hasher.hash(launcher.launch_space);
         hasher.hash(launcher.sharding_space);
@@ -20205,7 +20250,7 @@ namespace Legion {
           if (first_local_shard)
             it->first->invalidate_trackers(it->second, applied_events,
                 runtime->address_space, &collective_mapping,
-                local_only ? this : NULL/*filter everything*/);
+                local_only ? get_context_uid() : 0/*filter everything*/);
         }
         else
         {
@@ -20231,7 +20276,7 @@ namespace Legion {
           if (target_shard == owner_shard->shard_id)
             it->first->invalidate_trackers(it->second, applied_events,
                   runtime->address_space, NULL/*collective manager*/,
-                  local_only ? this : NULL/*filter everything*/);
+                  local_only ? get_context_uid() : 0/*filter everything*/);
         }
       }
     }
@@ -20827,23 +20872,23 @@ namespace Legion {
       // then we need to send this request back to our owner node
       if (repl_id > 0)
       {
-        InstanceView *volatile result = NULL;
+        std::atomic<InstanceView*> result(NULL);
         RtUserEvent wait_on = Runtime::create_rt_user_event();
         Serializer rez;
         {
           RezCheck z(rez);
           rez.serialize<UniqueID>(context_uid);
           rez.serialize(manager->did);
-          rez.serialize<InstanceView**>(const_cast<InstanceView**>(&result));
+          rez.serialize(&result);
           rez.serialize(wait_on); 
         }
         const AddressSpaceID target = runtime->get_runtime_owner(context_uid);
         runtime->send_create_top_view_request(target, rez);
         wait_on.wait();
 #ifdef DEBUG_LEGION
-        assert(result != NULL);
+        assert(result.load() != NULL);
 #endif
-        return result;
+        return result.load();
       }
       else
         return InnerContext::create_instance_top_view(manager, source);
@@ -21663,7 +21708,8 @@ namespace Legion {
     void LeafContext::create_association(LogicalRegion domain,
                                          LogicalRegion domain_parent,
                                          FieldID domain_fid, IndexSpace range,
-                                         MapperID id, MappingTagID tag)
+                                         MapperID id, MappingTagID tag,
+                                         const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_CREATE_ASSOCIATION,
@@ -21729,7 +21775,8 @@ namespace Legion {
                                                 IndexSpace color_space,
                                                 Color color,
                                                 MapperID id, MappingTagID tag,
-                                                PartitionKind part_kind)
+                                                PartitionKind part_kind,
+                                                const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_PARTITION_FIELD,
@@ -21747,7 +21794,8 @@ namespace Legion {
                                               IndexSpace color_space,
                                               PartitionKind part_kind,
                                               Color color,
-                                              MapperID id, MappingTagID tag)
+                                              MapperID id, MappingTagID tag,
+                                              const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_PARTITION_IMAGE,
@@ -21765,7 +21813,8 @@ namespace Legion {
                                               IndexSpace color_space,
                                               PartitionKind part_kind,
                                               Color color,
-                                              MapperID id, MappingTagID tag)
+                                              MapperID id, MappingTagID tag,
+                                              const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_PARTITION_IMAGE_RANGE,
@@ -21783,7 +21832,8 @@ namespace Legion {
                                                 IndexSpace color_space,
                                                 PartitionKind part_kind,
                                                 Color color,
-                                                MapperID id, MappingTagID tag)
+                                                MapperID id, MappingTagID tag,
+                                                const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_PARTITION_PREIMAGE,
@@ -21801,7 +21851,8 @@ namespace Legion {
                                                 IndexSpace color_space,
                                                 PartitionKind part_kind,
                                                 Color color,
-                                                MapperID id, MappingTagID tag)
+                                                MapperID id, MappingTagID tag,
+                                                const UntypedBuffer &marg)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_PARTITION_PREIMAGE_RANGE,
@@ -22329,8 +22380,8 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMap LeafContext::construct_future_map(IndexSpace domain,
-                                 const std::map<DomainPoint,TaskArgument> &data,
-                                 bool collective, ShardingID sid)
+                                const std::map<DomainPoint,UntypedBuffer> &data,
+                                bool collective, ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_EXECUTE_INDEX_SPACE,
@@ -22341,8 +22392,8 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMap LeafContext::construct_future_map(const Domain &domain,
-                                 const std::map<DomainPoint,TaskArgument> &data,
-                                 bool collective, ShardingID sid)
+                                const std::map<DomainPoint,UntypedBuffer> &data,
+                                bool collective, ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_EXECUTE_INDEX_SPACE,
@@ -22353,8 +22404,9 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMap LeafContext::construct_future_map(IndexSpace domain,
-                                 const std::map<DomainPoint,Future> &futures,
-                                 bool internal, bool collective, ShardingID sid)
+                                    const std::map<DomainPoint,Future> &futures,
+                                    bool internal, bool collective,
+                                    ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_EXECUTE_INDEX_SPACE,
@@ -22365,8 +22417,9 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMap LeafContext::construct_future_map(const Domain &domain,
-                                 const std::map<DomainPoint,Future> &futures,
-                                 bool internal, bool collective, ShardingID sid)
+                                    const std::map<DomainPoint,Future> &futures,
+                                    bool internal, bool collective,
+                                    ShardingID sid, bool implicit)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_EXECUTE_INDEX_SPACE,

@@ -157,8 +157,8 @@ namespace Legion {
                             const std::set<ApEvent>& rhs, Memoizable *memo) = 0;
       virtual void record_merge_events(ApEvent &lhs,
                          const std::vector<ApEvent>& rhs, Memoizable *memo) = 0;
-      virtual void record_collective_barrier(ShardID owner_shard, ApBarrier bar,
-                                             ApEvent pre, size_t arrivals) = 0;
+      virtual void record_collective_barrier(ApBarrier bar, ApEvent pre,
+                 const std::pair<size_t,size_t> &key, size_t arrival_count) = 0;
     public:
       virtual void record_issue_copy(Memoizable *memo, ApEvent &lhs,
                            IndexSpaceExpression *expr,
@@ -298,8 +298,8 @@ namespace Legion {
                             const std::set<ApEvent>& rhs, Memoizable *memo);
       virtual void record_merge_events(ApEvent &lhs, 
                             const std::vector<ApEvent>& rhs, Memoizable *memo);
-      virtual void record_collective_barrier(ShardID owner_shard, ApBarrier bar,
-                                             ApEvent pre, size_t arrivals);
+      virtual void record_collective_barrier(ApBarrier bar, ApEvent pre,
+                    const std::pair<size_t,size_t> &key, size_t arrival_count);
     public:
       virtual void record_issue_copy(Memoizable *memo, ApEvent &lhs,
                            IndexSpaceExpression *expr,
@@ -453,11 +453,11 @@ namespace Legion {
           base_sanity_check();
           rec->record_merge_events(result, events, memo);
         }
-      inline void record_collective_barrier(ShardID owner_shard, ApBarrier bar,
-                                    ApEvent pre, size_t arrival_count = 1) const
+      inline void record_collective_barrier(ApBarrier bar, ApEvent pre,
+           const std::pair<size_t,size_t> &key, size_t arrival_count = 1) const
         {
           base_sanity_check();
-          rec->record_collective_barrier(owner_shard, bar, pre, arrival_count);
+          rec->record_collective_barrier(bar, pre, key, arrival_count);
         }
       inline void record_op_sync_event(ApEvent &result) const
         {
@@ -1964,11 +1964,15 @@ namespace Legion {
     public:
       ReleaseAnalysis(Runtime *rt, Operation *op, unsigned index,
                       ApEvent precondition, IndexSpaceExpression *expr,
+                      const InstanceSet &target_instances,
+                      std::vector<InstanceView*> &target_views,
                       std::vector<InstanceView*> &source_views,
                       const PhysicalTraceInfo &trace_info);
       ReleaseAnalysis(Runtime *rt, AddressSpaceID src, AddressSpaceID prev,
                       Operation *op, unsigned index, IndexSpaceExpression *expr,
                       ApEvent precondition, ReleaseAnalysis *target, 
+                      InstanceSet &target_instances,
+                      std::vector<InstanceView*> &target_views,
                       std::vector<InstanceView*> &source_views,
                       const PhysicalTraceInfo &info);
       ReleaseAnalysis(const ReleaseAnalysis &rhs);
@@ -1995,6 +1999,8 @@ namespace Legion {
     public:
       const ApEvent precondition;
       ReleaseAnalysis *const target_analysis;
+      const InstanceSet target_instances;
+      const std::vector<InstanceView*> target_views;
       const std::vector<InstanceView*> source_views;
       const PhysicalTraceInfo trace_info;
     public:
@@ -2525,7 +2531,7 @@ namespace Legion {
                                std::set<RtEvent> &applied_events,
                                const AddressSpaceID origin_space,
                                const CollectiveMapping *collective_mapping,
-                               InnerContext *filter_context = NULL);
+                               UniqueID context_uid = 0);
       void clone_from(const AddressSpaceID target_space, EquivalenceSet *src,
                       const FieldMask &clone_mask,
                       const bool forward_to_owner,
@@ -2556,12 +2562,9 @@ namespace Legion {
                            const bool already_deferred);
       inline RtEvent chain_deferral_events(RtUserEvent deferral_event)
       {
-        volatile Realm::Event::id_t *ptr = &next_deferral_precondition.id;
         RtEvent continuation_pre;
-        do {
-          continuation_pre.id = *ptr;
-        } while (!__sync_bool_compare_and_swap(ptr,
-                  continuation_pre.id, deferral_event.id));
+        continuation_pre.id = 
+          next_deferral_precondition.exchange(deferral_event.id);
         return continuation_pre;
       }
       bool is_remote_analysis(PhysicalAnalysis &analysis,
@@ -2835,7 +2838,7 @@ namespace Legion {
       // cases so that reductions that depend on the same fill are ordered
       FieldMaskSet<CopyFillGuard>                       reduction_fill_guards;
       // An event to order to deferral tasks
-      volatile RtEvent                               next_deferral_precondition;
+      std::atomic<Realm::Event::id_t>                next_deferral_precondition;
     protected:
       // This node is the node which contains the valid state data
       AddressSpaceID                                    logical_owner_space;

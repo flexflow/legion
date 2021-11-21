@@ -393,15 +393,27 @@ namespace Realm {
     , cfg_use_immediate(true)
     , cfg_use_negotiated(true)
     , cfg_crit_timeout(50000 /* 50us */)
+    , cfg_max_medium(0 /* use GASNet limit */)
     , cfg_max_long(4 << 20 /* 4 MB */)
     , cfg_bind_hostmem(true)
 #ifdef REALM_USE_CUDA
     , cfg_bind_cudamem(true)
 #endif
+#ifdef REALM_USE_HIP
+    , cfg_bind_hipmem(true)
+#endif
     , cfg_do_checksums(true) // TODO
     , cfg_batch_messages(true)
     , cfg_outbuf_count(64)
     , cfg_outbuf_size(256 << 10 /* 256 KB*/)
+    , cfg_force_rma(false)
+      // in GASNet releases before 2021.8.3, bugs 4148 and 4150 made RMA puts
+      // unsafe to use for ibv + CUDA_UVA memory, so disable them by default
+#if REALM_GEX_RELEASE < 20210803
+    , cfg_use_rma_put(false)
+#else
+    , cfg_use_rma_put(true)
+#endif
     , internal(nullptr)
   {}
 
@@ -467,16 +479,22 @@ namespace Realm {
     CommandLineParser cp;
     cp.add_option_int("-gex:immediate", cfg_use_immediate)
       .add_option_int("-gex:negotiated", cfg_use_negotiated)
+      .add_option_int_units("-gex:maxmed", cfg_max_medium)
       .add_option_int_units("-gex:maxlong", cfg_max_long, 'm')
       .add_option_int("-gex:crittime", cfg_crit_timeout)
       .add_option_int("-gex:bindhost", cfg_bind_hostmem)
 #ifdef REALM_USE_CUDA
       .add_option_int("-gex:bindcuda", cfg_bind_cudamem)
 #endif
+#ifdef REALM_USE_HIP
+      .add_option_int("-gex:bindhip", cfg_bind_hipmem)
+#endif
       .add_option_int("-gex:cksum", cfg_do_checksums)
       .add_option_int("-gex:batch", cfg_batch_messages)
       .add_option_int("-gex:obcount", cfg_outbuf_count)
-      .add_option_int_units("-gex:obsize", cfg_outbuf_size);
+      .add_option_int_units("-gex:obsize", cfg_outbuf_size)
+      .add_option_int("-gex:forcerma", cfg_force_rma)
+      .add_option_int("-gex:rmaput", cfg_use_rma_put);
     size_t deprecated_gsize = 0;
     cp.add_option_int_units("-ll:gsize", deprecated_gsize, 'm');
 
@@ -734,6 +752,9 @@ namespace Realm {
 						 bool with_congestion,
 						 size_t header_size)
   {
+    if(cfg_do_checksums)
+      header_size += sizeof(gex_AM_Arg_t);
+
     return internal->recommended_max_payload(target, 0 /*ep_index*/,
 					     with_congestion,
 					     header_size,
@@ -744,6 +765,9 @@ namespace Realm {
 						 bool with_congestion,
 						 size_t header_size)
   {
+    if(cfg_do_checksums)
+      header_size += sizeof(gex_AM_Arg_t);
+
     if(targets.size() == 1) {
       // optimization - if there's exactly 1 target, redirect to the unicast mode
       NodeID target = *(targets.begin());
@@ -763,6 +787,9 @@ namespace Realm {
 						 bool with_congestion,
 						 size_t header_size)
   {
+    if(cfg_do_checksums)
+      header_size += sizeof(gex_AM_Arg_t);
+
     return internal->recommended_max_payload(target,
 					     dest_payload_addr.extra,
 					     with_congestion,

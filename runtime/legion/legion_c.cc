@@ -1941,6 +1941,12 @@ legion_field_space_create_shared_ownership(legion_runtime_t runtime_,
   runtime->create_shared_ownership(ctx, handle);
 }
 
+legion_field_space_t
+legion_field_space_no_space()
+{
+  return CObjectWrapper::wrap(FieldSpace::NO_SPACE);
+}
+
 void
 legion_field_space_destroy(legion_runtime_t runtime_,
                            legion_context_t ctx_,
@@ -2838,12 +2844,12 @@ legion_argument_map_from_future_map(legion_future_map_t map_)
 void
 legion_argument_map_set_point(legion_argument_map_t map_,
                               legion_domain_point_t dp_,
-                              legion_task_argument_t arg_,
+                              legion_untyped_buffer_t arg_,
                               bool replace)
 {
   ArgumentMap *map = CObjectWrapper::unwrap(map_);
   DomainPoint dp = CObjectWrapper::unwrap(dp_);
-  TaskArgument arg = CObjectWrapper::unwrap(arg_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
 
   map->set_point(dp, arg, replace);
 }
@@ -3245,35 +3251,40 @@ legion_future_map_reduce(legion_runtime_t runtime_,
 }
 
 legion_future_map_t
-legion_construct_future_map(legion_runtime_t runtime_,
-                            legion_context_t ctx_,
-                            legion_domain_t domain_,
-                            legion_domain_point_t *points_,
-                            legion_task_argument_t *data_,
-                            size_t num_points,
-                            bool collective)
+legion_future_map_construct_from_buffers(legion_runtime_t runtime_,
+                                         legion_context_t ctx_,
+                                         legion_domain_t domain_,
+                                         legion_domain_point_t *points_,
+                                         legion_untyped_buffer_t *data_,
+                                         size_t num_points,
+                                         bool collective,
+                                         legion_sharding_id_t sid,
+                                         bool implicit_sharding)
 {
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   Context ctx = CObjectWrapper::unwrap(ctx_)->context();
   Domain domain = CObjectWrapper::unwrap(domain_);
-  std::map<DomainPoint,TaskArgument> data;
+  std::map<DomainPoint,UntypedBuffer> data;
   for (unsigned idx = 0; idx < num_points; idx++)
   {
     DomainPoint point = CObjectWrapper::unwrap(points_[idx]);
     data[point] = CObjectWrapper::unwrap(data_[idx]);
   }
   return CObjectWrapper::wrap(new FutureMap(
-        runtime->construct_future_map(ctx, domain, data, collective)));
+    runtime->construct_future_map(ctx, domain, data, collective, sid,
+                                  implicit_sharding)));
 }
 
 legion_future_map_t
-legion_future_map_construct(legion_runtime_t runtime_,
-                            legion_context_t ctx_,
-                            legion_domain_t domain_,
-                            legion_domain_point_t *points_,
-                            legion_future_t *futures_,
-                            size_t num_futures,
-                            bool collective)
+legion_future_map_construct_from_futures(legion_runtime_t runtime_,
+                                         legion_context_t ctx_,
+                                         legion_domain_t domain_,
+                                         legion_domain_point_t *points_,
+                                         legion_future_t *futures_,
+                                         size_t num_futures,
+                                         bool collective,
+                                         legion_sharding_id_t sid,
+                                         bool implicit_sharding)
 {
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   Context ctx = CObjectWrapper::unwrap(ctx_)->context();
@@ -3285,7 +3296,8 @@ legion_future_map_construct(legion_runtime_t runtime_,
     futures[point] = *(CObjectWrapper::unwrap(futures_[idx]));
   }
   return CObjectWrapper::wrap(new FutureMap(
-        runtime->construct_future_map(ctx, domain, futures, collective)));
+    runtime->construct_future_map(ctx, domain, futures, collective, sid,
+                                  implicit_sharding)));
 }
 
 // -----------------------------------------------------------------------
@@ -3339,12 +3351,12 @@ LEGION_FOREACH_N(BUFFER_DESTROY)
 legion_task_launcher_t
 legion_task_launcher_create(
   legion_task_id_t tid,
-  legion_task_argument_t arg_,
+  legion_untyped_buffer_t arg_,
   legion_predicate_t pred_ /* = legion_predicate_true() */,
   legion_mapper_id_t id /* = 0 */,
   legion_mapping_tag_id_t tag /* = 0 */)
 {
-  TaskArgument arg = CObjectWrapper::unwrap(arg_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
   TaskLauncher *launcher = new TaskLauncher(tid, arg, *pred, id, tag);
@@ -3363,7 +3375,7 @@ legion_task_launcher_create_from_buffer(
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
   TaskLauncher *launcher = new TaskLauncher(tid, 
-      TaskArgument(buffer, buffer_size), *pred, id, tag);
+      UntypedBuffer(buffer, buffer_size), *pred, id, tag);
   return CObjectWrapper::wrap(launcher);
 }
 
@@ -3614,10 +3626,10 @@ legion_task_launcher_add_arrival_barrier(legion_task_launcher_t launcher_,
 
 void
 legion_task_launcher_set_argument(legion_task_launcher_t launcher_,
-                                  legion_task_argument_t arg_)
+                                  legion_untyped_buffer_t arg_)
 {
   TaskLauncher *launcher = CObjectWrapper::unwrap(launcher_);
-  TaskArgument arg = CObjectWrapper::unwrap(arg_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
 
   launcher->argument = arg;
 }
@@ -3654,10 +3666,10 @@ legion_task_launcher_set_predicate_false_future(legion_task_launcher_t launcher_
 
 void
 legion_task_launcher_set_predicate_false_result(legion_task_launcher_t launcher_,
-                                                legion_task_argument_t arg_)
+                                                legion_untyped_buffer_t arg_)
 {
   TaskLauncher *launcher = CObjectWrapper::unwrap(launcher_);
-  TaskArgument arg = CObjectWrapper::unwrap(arg_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
 
   launcher->predicate_false_result = arg;
 }
@@ -3678,6 +3690,16 @@ legion_task_launcher_set_mapping_tag(legion_task_launcher_t launcher_,
   TaskLauncher *launcher = CObjectWrapper::unwrap(launcher_);
 
   launcher->tag = tag;
+}
+
+void
+legion_task_launcher_set_mapper_arg(legion_task_launcher_t launcher_,
+                                    legion_untyped_buffer_t arg_)
+{
+  TaskLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
 }
 
 void
@@ -3711,7 +3733,7 @@ legion_index_launcher_t
 legion_index_launcher_create(
   legion_task_id_t tid,
   legion_domain_t domain_,
-  legion_task_argument_t global_arg_,
+  legion_untyped_buffer_t global_arg_,
   legion_argument_map_t map_,
   legion_predicate_t pred_ /* = legion_predicate_true() */,
   bool must /* = false */,
@@ -3719,7 +3741,7 @@ legion_index_launcher_create(
   legion_mapping_tag_id_t tag /* = 0 */)
 {
   Domain domain = CObjectWrapper::unwrap(domain_);
-  TaskArgument global_arg = CObjectWrapper::unwrap(global_arg_);
+  UntypedBuffer global_arg = CObjectWrapper::unwrap(global_arg_);
   ArgumentMap *map = CObjectWrapper::unwrap(map_);
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
@@ -3745,7 +3767,7 @@ legion_index_launcher_create_from_buffer(
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
   IndexTaskLauncher *launcher = new IndexTaskLauncher(tid, domain,
-      TaskArgument(buffer, buffer_size), *map, *pred, must, id, tag);
+      UntypedBuffer(buffer, buffer_size), *map, *pred, must, id, tag);
   return CObjectWrapper::wrap(launcher);
 }
 
@@ -4159,10 +4181,10 @@ legion_index_launcher_add_point_future(legion_index_launcher_t launcher_,
 
 void
 legion_index_launcher_set_global_arg(legion_index_launcher_t launcher_,
-                                     legion_task_argument_t global_arg_)
+                                     legion_untyped_buffer_t global_arg_)
 {
   IndexTaskLauncher *launcher = CObjectWrapper::unwrap(launcher_);
-  TaskArgument global_arg = CObjectWrapper::unwrap(global_arg_);
+  UntypedBuffer global_arg = CObjectWrapper::unwrap(global_arg_);
 
   launcher->global_arg = global_arg;
 }
@@ -4193,6 +4215,16 @@ legion_index_launcher_set_mapping_tag(legion_index_launcher_t launcher_,
   IndexTaskLauncher *launcher = CObjectWrapper::unwrap(launcher_);
 
   launcher->tag = tag;
+}
+
+void
+legion_index_launcher_set_mapper_arg(legion_index_launcher_t launcher_,
+                                     legion_untyped_buffer_t arg_)
+{
+  IndexTaskLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
 }
 
 void
@@ -4258,6 +4290,16 @@ legion_inline_launcher_add_field(legion_inline_launcher_t launcher_,
   InlineLauncher *launcher = CObjectWrapper::unwrap(launcher_);
 
   launcher->add_field(fid, inst);
+}
+
+void
+legion_inline_launcher_set_mapper_arg(legion_inline_launcher_t launcher_,
+                                      legion_untyped_buffer_t arg_)
+{
+  InlineLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
 }
 
 void
@@ -4354,7 +4396,7 @@ legion_fill_launcher_create(
   Predicate *pred = CObjectWrapper::unwrap(pred_);
   
   FillLauncher *launcher = new FillLauncher(handle, parent,
-      TaskArgument(value, value_size), *pred, id, tag); 
+      UntypedBuffer(value, value_size), *pred, id, tag); 
   launcher->add_field(fid);
   return CObjectWrapper::wrap(launcher);
 }
@@ -4429,6 +4471,16 @@ legion_fill_launcher_set_sharding_space(legion_fill_launcher_t launcher_,
   launcher->sharding_space = is;
 }
 
+void
+legion_fill_launcher_set_mapper_arg(legion_fill_launcher_t launcher_,
+                                    legion_untyped_buffer_t arg_)
+{
+  FillLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
+}
+
 // -----------------------------------------------------------------------
 // Index Fill Field Operations
 // -----------------------------------------------------------------------
@@ -4455,7 +4507,7 @@ legion_runtime_index_fill_field(
 
   IndexFillLauncher launcher(
       runtime->get_index_partition_color_space_name(handle.get_index_partition()),
-      handle, parent, TaskArgument(value, value_size), proj,
+      handle, parent, UntypedBuffer(value, value_size), proj,
       *pred, id, launcher_tag);
   launcher.add_field(fid);
   runtime->fill_fields(ctx, launcher);
@@ -4484,7 +4536,7 @@ legion_runtime_index_fill_field_with_space(
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
   IndexFillLauncher launcher(
-      space, handle, parent, TaskArgument(value, value_size), proj,
+      space, handle, parent, UntypedBuffer(value, value_size), proj,
       *pred, id, launcher_tag);
   launcher.add_field(fid);
   runtime->fill_fields(ctx, launcher);
@@ -4513,7 +4565,7 @@ legion_runtime_index_fill_field_with_domain(
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
   IndexFillLauncher launcher(
-      domain, handle, parent, TaskArgument(value, value_size), proj,
+      domain, handle, parent, UntypedBuffer(value, value_size), proj,
       *pred, id, launcher_tag);
   launcher.add_field(fid);
   runtime->fill_fields(ctx, launcher);
@@ -4621,7 +4673,7 @@ legion_index_fill_launcher_create_with_space(
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
   IndexFillLauncher *launcher = new IndexFillLauncher(space, handle, parent,
-      TaskArgument(value, value_size), proj, *pred, id, launcher_tag);
+      UntypedBuffer(value, value_size), proj, *pred, id, launcher_tag);
   launcher->add_field(fid);
   return CObjectWrapper::wrap(launcher);
 }
@@ -4645,7 +4697,7 @@ legion_index_fill_launcher_create_with_domain(
   Predicate *pred = CObjectWrapper::unwrap(pred_);
 
   IndexFillLauncher *launcher = new IndexFillLauncher(domain, handle, parent,
-      TaskArgument(value, value_size), proj, *pred, id, launcher_tag);
+      UntypedBuffer(value, value_size), proj, *pred, id, launcher_tag);
   launcher->add_field(fid);
   return CObjectWrapper::wrap(launcher);
 }
@@ -4735,6 +4787,16 @@ legion_index_fill_launcher_set_sharding_space(legion_index_fill_launcher_t launc
   IndexSpace is = CObjectWrapper::unwrap(space_);
 
   launcher->sharding_space = is;
+}
+
+void
+legion_index_fill_launcher_set_mapper_arg(legion_index_fill_launcher_t launcher_,
+                                          legion_untyped_buffer_t arg_)
+{
+  IndexFillLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
 }
 
 legion_region_requirement_t
@@ -5030,6 +5092,16 @@ legion_copy_launcher_set_sharding_space(legion_copy_launcher_t launcher_,
   IndexSpace is = CObjectWrapper::unwrap(space_);
 
   launcher->sharding_space = is;
+}
+
+void
+legion_copy_launcher_set_mapper_arg(legion_copy_launcher_t launcher_,
+                                    legion_untyped_buffer_t arg_)
+{
+  CopyLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
 }
 
 legion_region_requirement_t
@@ -5377,6 +5449,16 @@ legion_index_copy_launcher_set_sharding_space(legion_index_copy_launcher_t launc
   launcher->sharding_space = is;
 }
 
+void
+legion_index_copy_launcher_set_mapper_arg(legion_index_copy_launcher_t launcher_,
+                                          legion_untyped_buffer_t arg_)
+{
+  IndexCopyLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
+}
+
 // -----------------------------------------------------------------------
 // Acquire Operations
 // -----------------------------------------------------------------------
@@ -5449,6 +5531,16 @@ legion_acquire_launcher_add_arrival_barrier(
   launcher->add_arrival_barrier(bar);
 }
 
+void
+legion_acquire_launcher_set_mapper_arg(legion_acquire_launcher_t launcher_,
+                                       legion_untyped_buffer_t arg_)
+{
+  AcquireLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
+}
+
 // -----------------------------------------------------------------------
 // Release Operations
 // -----------------------------------------------------------------------
@@ -5519,6 +5611,16 @@ legion_release_launcher_add_arrival_barrier(
   PhaseBarrier bar = CObjectWrapper::unwrap(bar_);
 
   launcher->add_arrival_barrier(bar);
+}
+
+void
+legion_release_launcher_set_mapper_arg(legion_release_launcher_t launcher_,
+                                       legion_untyped_buffer_t arg_)
+{
+  ReleaseLauncher *launcher = CObjectWrapper::unwrap(launcher_);
+  UntypedBuffer arg = CObjectWrapper::unwrap(arg_);
+
+  launcher->map_arg = arg;
 }
 
 // -----------------------------------------------------------------------
@@ -5974,11 +6076,23 @@ legion_runtime_select_tunable_value(legion_runtime_t runtime_,
 // Miscellaneous Operations
 // -----------------------------------------------------------------------
 
+bool
+legion_runtime_has_runtime()
+{
+  return Runtime::has_runtime();
+}
+
 legion_runtime_t
 legion_runtime_get_runtime()
 {
   Runtime *runtime = Runtime::get_runtime();
   return CObjectWrapper::wrap(runtime);
+}
+
+bool
+legion_runtime_has_context()
+{
+  return Runtime::has_context();
 }
 
 legion_context_t
@@ -6043,6 +6157,42 @@ legion_runtime_total_shards(legion_runtime_t runtime_, legion_context_t ctx_)
   Context ctx = CObjectWrapper::unwrap(ctx_)->context();
 
   return runtime->total_shards(ctx);
+}
+
+legion_shard_id_t
+legion_sharding_functor_shard(legion_sharding_id_t sid,
+                              legion_domain_point_t point_,
+                              legion_domain_t full_space_,
+                              size_t total_shards)
+{
+  DomainPoint point = CObjectWrapper::unwrap(point_);
+  Domain full_space = CObjectWrapper::unwrap(full_space_);
+  ShardingFunctor *functor = Runtime::get_sharding_functor(sid);
+  return functor->shard(point, full_space, total_shards);
+}
+
+void
+legion_sharding_functor_invert(legion_sharding_id_t sid,
+                               legion_shard_id_t shard,
+                               legion_domain_t shard_domain_,
+                               legion_domain_t full_domain_,
+                               size_t total_shards,
+                               legion_domain_point_t *points_,
+                               size_t *points_size)
+{
+  Domain shard_domain = CObjectWrapper::unwrap(shard_domain_);
+  Domain full_domain = CObjectWrapper::unwrap(full_domain_);
+  ShardingFunctor *functor = Runtime::get_sharding_functor(sid);
+#ifdef DEBUG_LEGION
+  assert(functor->is_invertible());
+#endif
+  std::vector<DomainPoint> points;
+  functor->invert(shard, shard_domain, full_domain, total_shards, points);
+  assert(*points_size >= points.size());
+  *points_size = points.size();
+  for (size_t i = 0; i < points.size(); ++i) {
+    points_[i] = CObjectWrapper::wrap(points[i]);
+  }
 }
 
 void

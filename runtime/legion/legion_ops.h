@@ -2377,6 +2377,7 @@ namespace Legion {
                                          std::set<RtEvent> &applied) const;
     protected:
       RegionRequirement requirement;
+      PhysicalRegion    restricted_region;
       RegionTreePath    privilege_path;
       VersionInfo       version_info;
       unsigned          parent_req_index;
@@ -3292,26 +3293,32 @@ namespace Legion {
     public:
       void initialize_by_field(InnerContext *ctx, IndexPartition pid,
                                LogicalRegion handle, LogicalRegion parent,
-                               FieldID fid, MapperID id, MappingTagID tag); 
+                               FieldID fid, MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg); 
       void initialize_by_image(InnerContext *ctx, IndexPartition pid,
                                LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
-                               MapperID id, MappingTagID tag);
+                               MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg);
       void initialize_by_image_range(InnerContext *ctx, IndexPartition pid,
                                LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
-                               MapperID id, MappingTagID tag);
+                               MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg);
       void initialize_by_preimage(InnerContext *ctx, IndexPartition pid,
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
-                               MapperID id, MappingTagID tag);
+                               MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg);
       void initialize_by_preimage_range(InnerContext *ctx, IndexPartition pid,
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
-                               MapperID id, MappingTagID tag);
+                               MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg);
       void initialize_by_association(InnerContext *ctx, LogicalRegion domain,
                                LogicalRegion domain_parent, FieldID fid,
-                               IndexSpace range, MapperID id, MappingTagID tag);
+                               IndexSpace range, MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg);
       void perform_logging(void) const;
       void log_requirement(void) const;
       const RegionRequirement& get_requirement(void) const;
@@ -3712,7 +3719,9 @@ namespace Legion {
       virtual void record_reference_mutation_effect(RtEvent event);
       virtual void pack_remote_operation(Serializer &rez, AddressSpaceID target,
                                          std::set<RtEvent> &applied) const;
+      virtual RtEvent check_for_coregions(void);
     public:
+      LogicalRegion create_external_instance(void);
       PhysicalInstance create_instance(IndexSpaceNode *node,
                                        const std::vector<FieldID> &field_set,
                                        const std::vector<size_t> &field_sizes,
@@ -3736,6 +3745,8 @@ namespace Legion {
       LegionFileMode file_mode;
       PhysicalRegion region;
       unsigned parent_req_index;
+      InstanceSet external_instances;
+      ApUserEvent attached_event;
       std::set<RtEvent> map_applied_conditions;
       LayoutConstraintSet layout_constraint_set;
       size_t footprint;
@@ -3784,6 +3795,8 @@ namespace Legion {
       virtual void check_point_requirements(
                     const std::vector<IndexSpace> &spaces);
       virtual bool are_all_direct_children(bool local) { return local; }
+      virtual RtEvent find_coregions(PointAttachOp *point, LogicalRegion region,
+          InstanceSet &instances, ApUserEvent &attached_event);
     public:
       void handle_point_commit(void);
     protected:
@@ -3798,6 +3811,8 @@ namespace Legion {
       RegionTreePath                                privilege_path;
       IndexSpaceNode*                               launch_space;
       std::vector<PointAttachOp*>                   points;
+      std::map<LogicalRegion,std::vector<PointAttachOp*> >  coregions;
+      std::map<LogicalRegion,ApUserEvent>           coregions_attached;
       std::set<RtEvent>                             map_applied_conditions;
       unsigned                                      parent_req_index;
       unsigned                                      points_committed;
@@ -3823,6 +3838,8 @@ namespace Legion {
         const IndexAttachLauncher &launcher, const OrderingConstraint &ordering,
         const DomainPoint &point, unsigned index);
     public:
+      // Overload to look for coregions between points
+      virtual RtEvent check_for_coregions(void);
       virtual void trigger_ready(void);
       virtual void trigger_commit(void);
     protected:

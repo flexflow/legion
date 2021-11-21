@@ -44,6 +44,10 @@ variables:
   CC:  "gcc-10"
   CXX: "g++-10"
   F90: "gfortran-10"
+.gcc11: &gcc11
+  CC:  "gcc-11"
+  CXX: "g++-11"
+  F90: "gfortran-11"
 
 .clang38: &clang38
   CC:  "clang-3.8"
@@ -175,6 +179,11 @@ variables:
   # source URL is set by a GitLab CI variable as the GASNet-EX team prefers
   #  it not to be public at this time
   #GASNETEX_SNAPSHOT_SOURCE_URL: ...
+.gasnetex_ucx : &gasnetex_ucx
+  REALM_NETWORKS: "gasnetex"
+  CONDUIT: "ucx"
+  UCX_SOURCE: "https://github.com/openucx/ucx/releases/download/v1.8.0/ucx-1.8.0.tar.gz"
+  UCX_WARN_UNUSED_ENV_VARS: "n"
 .gasnet1_ucx : &gasnet1_ucx
   REALM_NETWORKS: "gasnet1"
   CONDUIT: "ucx"
@@ -330,7 +339,10 @@ before_script:
     if [[ "$USE_KOKKOS" -eq 1 ]]; then
       # Kokkos requires cmake 3.16 - grab it here so the default can remain
       #  an older version
-      wget -nv https://cmake.org/files/v3.16/cmake-3.16.0-Linux-x86_64.tar.gz
+      # cmake.org serves up a certificate that old openssl can't verify, so
+      #  accept an insecure connection and verify the tarball hash directly
+      wget -nv --no-check-certificate https://cmake.org/files/v3.16/cmake-3.16.0-Linux-x86_64.tar.gz
+      echo "85f55f13c922c853049edcf37c828b02b9b2fc00729d0cbb56cf20181a39340b  cmake-3.16.0-Linux-x86_64.tar.gz" | shasum --check
       tar -zxf cmake-3.16.0-Linux-x86_64.tar.gz
       PATH=`pwd`/cmake-3.16.0-Linux-x86_64/bin:$PATH
 
@@ -502,7 +514,7 @@ before_script:
 .image_clang: &image_clang
   image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-16.04-clang:210610
 .image_2004: &image_2004
-  image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-20.04:210609
+  image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-20.04:210923
 .image_hpcsdk: &image_hpcsdk
   image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-hpcsdk
 .image_icc: &image_icc
@@ -789,6 +801,18 @@ gcc49_cxx11_release_gasnet1_ucx_regent:
   <<: [*linux_compute, *image, *tests]
   variables:
     <<: [*gcc49, *terra38, *release, *cxx11_normal, *gasnet1_ucx, *regent, *incremental]
+gcc48_cxx11_release_gasnetex_ucx_legion:
+  <<: [*linux_compute, *image, *tests]
+  variables:
+    <<: [*gcc48, *terra38, *release, *cxx11_normal, *gasnetex_ucx, *legion]
+gcc49_cxx11_debug_gasnetex_ucx_cmake_legion:
+  <<: [*linux, *image, *tests]
+  variables:
+    <<: [*gcc49, *terra38, *debug, *cxx11_normal, *gasnetex_ucx, *cmake, *legion, *ctest]
+gcc49_cxx11_release_gasnetex_ucx_regent:
+  <<: [*linux_compute, *image, *tests]
+  variables:
+    <<: [*gcc49, *terra38, *release, *cxx11_normal, *gasnetex_ucx, *regent, *incremental,  *short]
 #   * MPI
 gcc49_cxx11_release_mpi_legion:
   <<: [*linux, *image, *tests]
@@ -1129,10 +1153,6 @@ gcc9_cxx17_release_regent_pretty:
     <<: [*gcc9, *terra9, *release, *cxx17_normal, *regent_pretty]
 
 # GCC 10
-gcc10_cxx17_debug_legion:
-  <<: [*linux, *image_2004, *tests]
-  variables:
-    <<: [*gcc10, *terra9, *debug, *cxx17_normal, *legion]
 gcc10_cxx17_release_legion:
   <<: [*linux, *image_2004, *tests]
   variables:
@@ -1141,14 +1161,20 @@ gcc10_cxx17_debug_regent:
   <<: [*linux, *image_2004, *tests]
   variables:
     <<: [*gcc10, *terra9, *debug, *cxx17_normal, *regent]
-gcc10_cxx17_release_regent:
-  <<: [*linux, *image_2004, *tests]
-  variables:
-    <<: [*gcc10, *terra9, *release, *cxx17_normal, *regent]
 gcc10_cxx20_release_legion:
   <<: [*linux, *image_2004, *tests]
   variables:
     <<: [*gcc10, *terra9, *release, *cxx20_normal, *legion, *short]
+
+# GCC 11
+gcc11_cxx17_debug_legion:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc11, *terra9, *debug, *cxx17_normal, *legion]
+gcc11_cxx20_release_regent:
+  <<: [*linux, *image_2004, *tests]
+  variables:
+    <<: [*gcc11, *terra9, *release, *cxx20_normal, *regent, *short]
 
 # Clang 9
 clang9_cxx17_debug_legion:

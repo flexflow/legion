@@ -219,6 +219,8 @@ namespace Legion {
       bool send_ready_stages(const int start_stage=1);
       void unpack_stage(int stage, Deserializer &derez);
       void complete_exchange(void);
+      virtual RtEvent post_complete_exchange(void) 
+        { return RtEvent::NO_RT_EVENT; }
     public: 
       const int shard_collective_radix;
       const int shard_collective_log_radix;
@@ -616,8 +618,7 @@ namespace Legion {
         Domain domain;
       };
     public:
-      IndirectRecordExchange(ReplicateContext *ctx,
-                             CollectiveIndexLocation loc);
+      IndirectRecordExchange(ReplicateContext *ctx, CollectiveID id);
       IndirectRecordExchange(const IndirectRecordExchange &rhs);
       virtual ~IndirectRecordExchange(void);
     public:
@@ -1199,6 +1200,91 @@ namespace Legion {
     };
 
     /**
+     * \class IndexAttachCoregions
+     * Exchange the information about coregions between the different
+     * shards to ensure that only a single point will perform the 
+     * mapping if multiple points map to the same region
+     */
+    class IndexAttachCoregions : public AllGatherCollective<false> {
+    public:
+      struct PendingPoint {
+      public:
+        PendingPoint(void)
+          : region(LogicalRegion::NO_REGION),
+            instances(NULL), attached_event(NULL) { }
+        PendingPoint(LogicalRegion r, InstanceSet &s, ApUserEvent &e)
+          : region(r), instances(&s), attached_event(&e) { }
+      public:
+        LogicalRegion region;
+        InstanceSet *instances;
+        ApUserEvent *attached_event;
+      };
+      struct RegionPoints {
+      public:
+        std::map<ShardID,ApUserEvent> shard_events;
+        std::set<DistributedID> managers;
+      };
+    public:
+      IndexAttachCoregions(ReplicateContext *ctx,
+                           CollectiveIndexLocation loc, size_t points);
+      IndexAttachCoregions(const IndexAttachCoregions &rhs);
+      virtual ~IndexAttachCoregions(void);
+    public:
+      IndexAttachCoregions& operator=(const IndexAttachCoregions &rhs);
+    public:
+      virtual void pack_collective_stage(Serializer &rez, int stage);
+      virtual void unpack_collective_stage(Deserializer &derez, int stage);
+      virtual RtEvent post_complete_exchange(void);
+    public:
+      bool record_point(PointAttachOp *point, LogicalRegion region,
+              InstanceSet &instances, ApUserEvent &attached_event);
+    public:
+      const size_t total_points;
+    protected:
+      std::map<PointAttachOp*,PendingPoint> pending_points;
+      std::map<LogicalRegion,RegionPoints> region_points;
+    };
+
+    /**
+     * \class ImplicitShardingFunctor
+     * Support the computation of an implicit sharding function for 
+     * the creation of replicated future maps
+     */
+    class ImplicitShardingFunctor : public AllGatherCollective<false>,
+                                    public ShardingFunctor {
+    public:
+      ImplicitShardingFunctor(ReplicateContext *ctx,
+                              CollectiveIndexLocation loc,
+                              ReplFutureMapImpl *map);
+      ImplicitShardingFunctor(const ImplicitShardingFunctor &rhs);
+      virtual ~ImplicitShardingFunctor(void);
+    public:
+      ImplicitShardingFunctor& operator=(const ImplicitShardingFunctor &rhs);
+    public:
+      virtual void pack_collective_stage(Serializer &rez, int stage);
+      virtual void unpack_collective_stage(Deserializer &derez, int stage);
+    public:
+      virtual ShardID shard(const DomainPoint &point,
+                            const Domain &full_space,
+                            const size_t total_shards);
+    protected:
+      virtual RtEvent post_complete_exchange(void);
+    public:
+      template<typename T>
+      void compute_sharding(const std::map<DomainPoint,T> &points)
+      {
+        for (typename std::map<DomainPoint,T>::const_iterator it =
+              points.begin(); it != points.end(); it++)
+          implicit_sharding[it->first] = local_shard; 
+        this->perform_collective_async();
+      }
+    public:
+      ReplFutureMapImpl *const map;
+    protected:
+      std::map<DomainPoint,ShardID> implicit_sharding;
+    };
+
+    /**
      * \class SlowBarrier
      * This class creates a collective that behaves like a barrier, but is
      * probably slower than Realm phase barriers. It's useful for cases
@@ -1548,9 +1634,8 @@ namespace Legion {
       ShardingFunction *sharding_function;
       std::vector<ApBarrier> pre_indirection_barriers;
       std::vector<ApBarrier> post_indirection_barriers;
-      std::vector<ShardID> indirection_barrier_owner_shards;
-      std::vector<IndirectRecordExchange*> src_collectives;
-      std::vector<IndirectRecordExchange*> dst_collectives;
+      std::vector<CollectiveID> src_collectives;
+      std::vector<CollectiveID> dst_collectives;
 #ifdef DEBUG_LEGION
     public:
       inline void set_sharding_collective(ShardingGatherCollective *collective)
@@ -1730,6 +1815,7 @@ namespace Legion {
                                ApEvent ready_event, IndexPartition pid,
                                LogicalRegion handle, LogicalRegion parent,
                                FieldID fid, MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg,
                                RtBarrier &dependent_partition_bar);
       void initialize_by_image(ReplicateContext *ctx,
 #ifndef SHARD_BY_IMAGE
@@ -1739,6 +1825,7 @@ namespace Legion {
                                LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg,
                                ShardID shard, size_t total_shards,
                                RtBarrier &dependent_partition_bar);
       void initialize_by_image_range(ReplicateContext *ctx,
@@ -1749,6 +1836,7 @@ namespace Legion {
                                LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg,
                                ShardID shard, size_t total_shards,
                                RtBarrier &dependent_partition_bar);
       void initialize_by_preimage(ReplicateContext *ctx, ShardID target,
@@ -1756,16 +1844,19 @@ namespace Legion {
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg,
                                RtBarrier &dependent_partition_bar);
       void initialize_by_preimage_range(ReplicateContext *ctx, ShardID target, 
                                ApEvent ready_event, IndexPartition pid,
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg,
                                RtBarrier &dependent_partition_bar);
       void initialize_by_association(ReplicateContext *ctx,LogicalRegion domain,
                                LogicalRegion domain_parent, FieldID fid,
                                IndexSpace range, MapperID id, MappingTagID tag,
+                               const UntypedBuffer &marg,
                                RtBarrier &dependent_partition_bar);
     public:
       virtual void activate(void);
@@ -2008,6 +2099,7 @@ namespace Legion {
     public:
       virtual void activate(void);
       virtual void deactivate(void);
+      virtual void trigger_prepipeline_stage(void);
       virtual void trigger_ready(void);
       virtual void trigger_mapping(void);
     protected:
@@ -2043,11 +2135,14 @@ namespace Legion {
       virtual void check_point_requirements(
                     const std::vector<IndexSpace> &spaces);
       virtual bool are_all_direct_children(bool local);
+      virtual RtEvent find_coregions(PointAttachOp *point, LogicalRegion region,
+          InstanceSet &instances, ApUserEvent &attached_event);
     public:
       void initialize_replication(ReplicateContext *ctx);
     protected:
       IndexAttachExchange *collective;
       ShardingFunction *sharding_function;
+      IndexAttachCoregions *attach_coregions_collective;
     };
 
     /**

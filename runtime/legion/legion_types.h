@@ -116,7 +116,7 @@ namespace Legion {
   template<int DIM, typename T> class LogicalPartitionT;
   class IndexAllocator;
   class FieldAllocator;
-  class TaskArgument;
+  class UntypedBuffer;
   class ArgumentMap;
   class Lock;
   struct LockRequest;
@@ -142,6 +142,15 @@ namespace Legion {
   class PhysicalRegion;
   class OutputRegion;
   class ExternalResources;
+  class UntypedDeferredValue;
+  template<typename>
+    class DeferredValue;
+  template<typename, bool>
+    class DeferredReduction;
+  template<typename, int, typename, bool>
+    class DeferredBuffer;
+  template<typename COORD_T>
+    class UntypedDeferredBuffer;
   template<PrivilegeMode,typename,int,typename,typename,bool> 
     class FieldAccessor;
   template<typename, bool, int, typename, typename, bool>
@@ -698,9 +707,7 @@ namespace Legion {
       // All the rest of these are ordered (latency-priority) channels
       MAPPER_VIRTUAL_CHANNEL = 1, 
       TASK_VIRTUAL_CHANNEL = 2,
-      INDEX_SPACE_VIRTUAL_CHANNEL = 3,
       FIELD_SPACE_VIRTUAL_CHANNEL = 4,
-      LOGICAL_TREE_VIRTUAL_CHANNEL = 5,
       REFERENCE_VIRTUAL_CHANNEL = 6,
       UPDATE_VIRTUAL_CHANNEL = 7, // deferred-priority
       SUBSET_VIRTUAL_CHANNEL = 8,
@@ -720,7 +727,6 @@ namespace Legion {
       SEND_REMOTE_TASK_REPLAY,
       SEND_REMOTE_TASK_PROFILING_RESPONSE,
       SEND_SHARED_OWNERSHIP,
-      SEND_INDEX_SPACE_NODE,
       SEND_INDEX_SPACE_REQUEST,
       SEND_INDEX_SPACE_RETURN,
       SEND_INDEX_SPACE_SET,
@@ -735,7 +741,6 @@ namespace Legion {
       SEND_INDEX_SPACE_GENERATE_COLOR_RESPONSE,
       SEND_INDEX_SPACE_RELEASE_COLOR,
       SEND_INDEX_PARTITION_NOTIFICATION,
-      SEND_INDEX_PARTITION_NODE,
       SEND_INDEX_PARTITION_REQUEST,
       SEND_INDEX_PARTITION_RETURN,
       SEND_INDEX_PARTITION_CHILD_REQUEST,
@@ -766,7 +771,6 @@ namespace Legion {
       SEND_LOCAL_FIELD_UPDATE,
       SEND_TOP_LEVEL_REGION_REQUEST,
       SEND_TOP_LEVEL_REGION_RETURN,
-      SEND_LOGICAL_REGION_NODE,
       INDEX_SPACE_DESTRUCTION_MESSAGE,
       INDEX_PARTITION_DESTRUCTION_MESSAGE,
       FIELD_SPACE_DESTRUCTION_MESSAGE,
@@ -941,7 +945,6 @@ namespace Legion {
         "Send Remote Task Replay",                                    \
         "Send Remote Task Profiling Response",                        \
         "Send Shared Ownership",                                      \
-        "Send Index Space Node",                                      \
         "Send Index Space Request",                                   \
         "Send Index Space Return",                                    \
         "Send Index Space Set",                                       \
@@ -956,7 +959,6 @@ namespace Legion {
         "Send Index Space Generate Color Response",                   \
         "Send Index Space Release Color",                             \
         "Send Index Partition Notification",                          \
-        "Send Index Partition Node",                                  \
         "Send Index Partition Request",                               \
         "Send Index Partition Return",                                \
         "Send Index Partition Child Request",                         \
@@ -987,7 +989,6 @@ namespace Legion {
         "Send Local Field Update",                                    \
         "Send Top Level Region Request",                              \
         "Send Top Level Region Return",                               \
-        "Send Logical Region Node",                                   \
         "Index Space Destruction",                                    \
         "Index Partition Destruction",                                \
         "Field Space Destruction",                                    \
@@ -1584,6 +1585,9 @@ namespace Legion {
       COLLECTIVE_LOC_98 = 98,
       COLLECTIVE_LOC_99 = 99,
       COLLECTIVE_LOC_100 = 100,
+      COLLECTIVE_LOC_101 = 101,
+      COLLECTIVE_LOC_102 = 102,
+      COLLECTIVE_LOC_103 = 103,
     };
 
     // legion_types.h
@@ -1745,6 +1749,10 @@ namespace Legion {
 #ifdef DEBUG_LEGION_WAITS
     extern __thread int meta_task_id;
 #endif
+#ifdef DEBUG_LEGION_CALLERS
+    extern __thread LgTaskID implicit_task_kind;
+    extern __thread LgTaskID implicit_task_caller;
+#endif
 
     /**
      * \class LgTaskArgs
@@ -1754,10 +1762,17 @@ namespace Legion {
     struct LgTaskArgs {
     public:
       LgTaskArgs(::legion_unique_id_t uid)
-        : provenance(uid), lg_task_id(T::TASK_ID) { }
+        : provenance(uid),
+#ifdef DEBUG_LEGION_CALLERS
+          lg_call_id(implicit_task_kind),
+#endif
+          lg_task_id(T::TASK_ID) { }
     public:
       // In this order for alignment reasons
       const ::legion_unique_id_t provenance;
+#ifdef DEBUG_LEGION_CALLERS
+      const LgTaskID lg_call_id;
+#endif
       const LgTaskID lg_task_id;
     };
     
@@ -2721,6 +2736,10 @@ namespace Legion {
       Internal::TaskContext *local_ctx = Internal::implicit_context; 
       // Save the task provenance information
       UniqueID local_provenance = Internal::implicit_provenance;
+#ifdef DEBUG_LEGION_CALLERS
+      LgTaskID local_kind = Internal::implicit_task_kind;
+      LgTaskID local_caller = Internal::implicit_task_caller;
+#endif
       // Save whether we are in a registration callback
       unsigned local_callback = Internal::inside_registration_callback;
       // Check to see if we have any local locks to notify
@@ -2759,6 +2778,10 @@ namespace Legion {
       Internal::implicit_context = local_ctx;
       // Write the provenance information back
       Internal::implicit_provenance = local_provenance;
+#ifdef DEBUG_LEGION_CALLERS
+      Internal::implicit_task_kind = local_kind;
+      Internal::implicit_task_caller = local_caller;
+#endif
       // Write the registration callback information back
       Internal::inside_registration_callback = local_callback;
 #ifdef DEBUG_LEGION_WAITS
@@ -2777,6 +2800,10 @@ namespace Legion {
       Internal::TaskContext *local_ctx = Internal::implicit_context; 
       // Save the task provenance information
       UniqueID local_provenance = Internal::implicit_provenance;
+#ifdef DEBUG_LEGION_CALLERS
+      LgTaskID local_kind = Internal::implicit_task_kind;
+      LgTaskID local_caller = Internal::implicit_task_caller;
+#endif
       // Save whether we are in a registration callback
       unsigned local_callback = Internal::inside_registration_callback;
       // Check to see if we have any local locks to notify
@@ -2815,6 +2842,10 @@ namespace Legion {
       Internal::implicit_context = local_ctx;
       // Write the provenance information back
       Internal::implicit_provenance = local_provenance;
+#ifdef DEBUG_LEGION_CALLERS
+      Internal::implicit_task_kind = local_kind;
+      Internal::implicit_task_caller = local_caller;
+#endif
       // Write the registration callback information back
       Internal::inside_registration_callback = local_callback;
     }

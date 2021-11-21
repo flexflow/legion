@@ -29,6 +29,8 @@ add_subdirectory(output_requirements)
 add_subdirectory(rendering)
 add_subdirectory(realm)
 add_subdirectory(gather_perf)
+add_subdirectory(performance/realm/event_latency)
+add_subdirectory(performance/realm/task_throughput)
 
 if(Legion_USE_HDF5)
   add_subdirectory(hdf_attach_subregion_parallel)

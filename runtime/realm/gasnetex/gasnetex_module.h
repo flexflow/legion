@@ -133,16 +133,22 @@ namespace Realm {
     bool cfg_use_immediate;
     bool cfg_use_negotiated;
     long long cfg_crit_timeout;
+    size_t cfg_max_medium;
     size_t cfg_max_long;
     bool cfg_bind_hostmem;
 #ifdef REALM_USE_CUDA
     bool cfg_bind_cudamem;
+#endif
+#ifdef REALM_USE_HIP
+    bool cfg_bind_hipmem;
 #endif
     bool cfg_do_checksums;
     bool cfg_batch_messages;
     // number and size of "outbufs", used to put pkt header and/or data in
     //  registered memory for RDMA goodness
     size_t cfg_outbuf_count, cfg_outbuf_size;
+    bool cfg_force_rma;
+    bool cfg_use_rma_put;
 
   protected:
     GASNetEXInternal *internal;

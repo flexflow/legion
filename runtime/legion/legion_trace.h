@@ -118,10 +118,10 @@ namespace Legion {
       void end_trace_execution(FenceOp *fence_op);
     public:
       void initialize_tracing_state(void) { state = LOGICAL_ONLY; }
-      void set_state_record(void) { state = PHYSICAL_RECORD; }
-      void set_state_replay(void) { state = PHYSICAL_REPLAY; }
-      bool is_recording(void) const { return state == PHYSICAL_RECORD; }
-      bool is_replaying(void) const { return state == PHYSICAL_REPLAY; }
+      void set_state_record(void) { state.store(PHYSICAL_RECORD); }
+      void set_state_replay(void) { state.store(PHYSICAL_REPLAY); }
+      bool is_recording(void) const { return state.load() == PHYSICAL_RECORD; }
+      bool is_replaying(void) const { return state.load() == PHYSICAL_REPLAY; }
     public:
       inline void clear_blocking_call(void) { blocking_call_observed = false; }
       inline void record_blocking_call(void) { blocking_call_observed = true; }
@@ -147,7 +147,7 @@ namespace Legion {
       // aliased but non-interfering region requirements. This should
       // be pretty sparse so we'll make it a map
       std::map<unsigned,LegionVector<AliasChildren>::aligned> aliased_children;
-      volatile TracingState state;
+      std::atomic<TracingState> state;
       // Pointer to a physical trace
       PhysicalTrace *physical_trace;
       unsigned last_memoized;
@@ -793,7 +793,8 @@ namespace Legion {
       PhysicalTemplate(const PhysicalTemplate &rhs);
       virtual ~PhysicalTemplate(void);
     public:
-      void initialize_replay(ApEvent fence_completion, bool recurrent);
+      virtual void initialize_replay(ApEvent fence_completion, bool recurrent,
+                                     bool need_lock = true);
       virtual void perform_replay(Runtime *rt, 
                                   std::set<RtEvent> &replayed_events,
                                   RtEvent replay_precondition = 
@@ -874,12 +875,12 @@ namespace Legion {
       UniqueID get_fence_uid(void) const { return prev_fence_uid; }
 #endif
     public:
-      inline bool is_replaying(void) const { return !recording; }
+      inline bool is_replaying(void) const { return !recording.load(); }
       inline bool is_replayable(void) const { return replayable.replayable; }
       inline const std::string& get_replayable_message(void) const
         { return replayable.message; }
     public:
-      virtual bool is_recording(void) const { return recording; }
+      virtual bool is_recording(void) const { return recording.load(); }
       virtual void add_recorder_reference(void) { /*do nothing*/ }
       virtual bool remove_recorder_reference(void) 
         { /*do nothing, never delete*/ return false; }
@@ -923,8 +924,8 @@ namespace Legion {
                             const std::set<ApEvent>& rhs, Memoizable *memo);
       virtual void record_merge_events(ApEvent &lhs, 
                             const std::vector<ApEvent>& rhs, Memoizable *memo);
-      virtual void record_collective_barrier(ShardID owner_shard, ApBarrier bar,
-                                             ApEvent pre, size_t arrival_count);
+      virtual void record_collective_barrier(ApBarrier bar, ApEvent pre,
+                    const std::pair<size_t,size_t> &key, size_t arrival_count);
     public:
       virtual void record_issue_copy(Memoizable *memo, ApEvent &lhs,
                              IndexSpaceExpression *expr,
@@ -1071,7 +1072,7 @@ namespace Legion {
     protected:
       PhysicalTrace * const trace;
       const TaskTreeCoordinates coordinates;
-      volatile bool recording;
+      std::atomic<bool> recording;
       Replayable replayable;
     protected:
       mutable LocalLock template_lock;
@@ -1115,8 +1116,9 @@ namespace Legion {
     protected:
       RtUserEvent recording_done;
       RtEvent transitive_reduction_done;
-      std::vector<unsigned> *volatile pending_inv_topo_order;
-      std::vector<std::vector<unsigned> >*volatile pending_transitive_reduction;
+      std::atomic<std::vector<unsigned>*> pending_inv_topo_order;
+      std::atomic<
+        std::vector<std::vector<unsigned> >*> pending_transitive_reduction;
     private:
       std::map<TraceLocalID,ViewExprs> op_views;
       std::map<unsigned,ViewExprs>     copy_views;
@@ -1183,8 +1185,6 @@ namespace Legion {
         FIND_FRONTIER_RESPONSE,
         TEMPLATE_BARRIER_REFRESH,
         FRONTIER_BARRIER_REFRESH,
-        CREATE_COLLECTIVE_BARRIER_REQUEST,
-        CREATE_COLLECTIVE_BARRIER_RESPONSE,
       };
     public:
       struct DeferTraceUpdateArgs : public LgTaskArgs<DeferTraceUpdateArgs> {
@@ -1241,15 +1241,14 @@ namespace Legion {
       { free(ptr); }
       inline RtEvent chain_deferral_events(RtUserEvent deferral_event)
       {
-        volatile Realm::Event::id_t *ptr = &next_deferral_precondition.id;
         RtEvent continuation_pre;
-        do {
-          continuation_pre.id = *ptr;
-        } while (!__sync_bool_compare_and_swap(ptr,
-                  continuation_pre.id, deferral_event.id));
+        continuation_pre.id = 
+          next_deferral_precondition.exchange(deferral_event.id);
         return continuation_pre;
       }
     public:
+      virtual void initialize_replay(ApEvent fence_completion, bool recurrent,
+                                     bool need_lock = true);
       virtual void perform_replay(Runtime *runtime, 
                                   std::set<RtEvent> &replayed_events,
                                   RtEvent replay_precondition =
@@ -1261,8 +1260,8 @@ namespace Legion {
                             const std::set<ApEvent>& rhs, Memoizable *memo);
       virtual void record_merge_events(ApEvent &lhs, 
                             const std::vector<ApEvent>& rhs, Memoizable *memo);
-      virtual void record_collective_barrier(ShardID owner_shard, ApBarrier bar,
-                                             ApEvent pre, size_t arrival_count);
+      virtual void record_collective_barrier(ApBarrier bar, ApEvent pre,
+                    const std::pair<size_t,size_t> &key, size_t arrival_count);
       virtual void record_issue_copy(Memoizable *memo, ApEvent &lhs,
                              IndexSpaceExpression *expr,
                              const std::vector<CopySrcDstField>& src_fields,
@@ -1306,15 +1305,13 @@ namespace Legion {
     public:
       virtual void trigger_recording_done(void);
     public:
+      void prepare_collective_barrier_replay(
+                            const std::pair<size_t,size_t> &key, ApBarrier bar);
+    public:
       ApBarrier find_trace_shard_event(ApEvent event, ShardID remote_shard);
       void record_trace_shard_event(ApEvent event, ApBarrier result);
       void handle_trace_update(Deserializer &derez, AddressSpaceID source);
       static void handle_deferred_trace_update(const void *args, Runtime *rt);
-    protected:
-      // Create a collective barrier for this trace using the name
-      // from an external collective barrier
-      ApBarrier create_collective_barrier(ApBarrier bar, ShardID owner_shard);
-      void record_remote_collective_barrier(ApBarrier bar, ApBarrier result);
     protected:
       bool handle_update_view_user(InstanceView *view, IndexSpaceExpression *ex,
                             Deserializer &derez, std::set<RtEvent> &applied,
@@ -1368,16 +1365,18 @@ namespace Legion {
       static const unsigned NO_INDEX = UINT_MAX;
     protected:
       std::map<ApEvent,RtEvent> pending_event_requests;
-      std::map<ApBarrier,std::pair<ApBarrier,size_t> > 
-                                pending_collective_requests;
       // Barriers that need to send remote refreshes
       std::map<ApEvent,BarrierArrival*> remote_arrivals;
       // Barriers to receive refreshes
       std::map<ApEvent,BarrierAdvance*> local_advances;
-      // Collective barriers that need to send remote refreshes
-      std::map<ApEvent,BarrierArrival*> remote_collectives;
-      // Collective barriers that need to receive refreshes
-      std::map<ApEvent,BarrierArrival*> local_collectives;
+      // Collective barriers from application operations
+      // These will be updated by the application before each replay
+      // Key is <trace local id, unique barrier name for this op>
+      std::map<std::pair<size_t,size_t>,BarrierArrival*> collective_barriers;
+      // Buffer up barrier updates as we're running ahead so that we can
+      // apply them before we perform the trace replay
+      std::deque<
+            std::map<std::pair<size_t,size_t>,ApBarrier> > pending_collectives;
       std::map<AddressSpaceID,std::vector<ShardID> > did_shard_owners;
       std::map<unsigned/*Trace Local ID*/,ShardID> owner_shards;
       std::map<unsigned/*Trace Local ID*/,IndexSpace> local_spaces;
@@ -1392,7 +1391,7 @@ namespace Legion {
       // An event to signal when our advances are ready
       RtUserEvent update_advances_ready;
       // An event for chainging deferrals of update tasks
-      RtEvent next_deferral_precondition;
+      std::atomic<Realm::Event::id_t> next_deferral_precondition;
       // Barrier for signaliing when we are done recording our template
       RtBarrier recording_barrier;
     protected:
@@ -1921,7 +1920,7 @@ namespace Legion {
     public:
       BarrierArrival(PhysicalTemplate &tpl,
                      ApBarrier bar, unsigned lhs, unsigned rhs,
-                     size_t arrival_count = 1, size_t total_arrivals = 1);
+                     size_t arrival_count = 1, bool collective = false);
       virtual ~BarrierArrival(void);
       virtual void execute(std::vector<ApEvent> &events,
                            std::map<unsigned,ApUserEvent> &user_events,
@@ -1938,12 +1937,14 @@ namespace Legion {
       void refresh_barrier(ApEvent key,
           std::map<ShardID,std::map<ApEvent,ApBarrier> > &notifications);
       void remote_refresh_barrier(ApBarrier newbar);
+      void set_collective_barrier(ApBarrier newbar);
     private:
       friend class PhysicalTemplate;
       ApBarrier barrier;
       unsigned lhs, rhs;
       std::vector<ShardID> subscribed_shards;
-      size_t arrival_count, total_arrivals;
+      size_t arrival_count;
+      const bool collective;
     };
 
     /**

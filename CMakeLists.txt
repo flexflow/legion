@@ -110,25 +110,29 @@ endif()
 
 # Try -march first. On platforms that don't support it, GCC will issue
 # a hard error, so we'll know not to use it.
+# Default is "native", but explicitly setting BUILD_MARCH="" disables use of
+#  the flag
 if(BUILD_MARCH)
   set(INTERNAL_BUILD_MARCH ${BUILD_MARCH})
-else()
+elseif(NOT DEFINED BUILD_MARCH)
   set(INTERNAL_BUILD_MARCH "native")
 endif()
 
 include(CheckCXXCompilerFlag)
-check_cxx_compiler_flag("-march=${INTERNAL_BUILD_MARCH}" COMPILER_SUPPORTS_MARCH)
-if(COMPILER_SUPPORTS_MARCH)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=${INTERNAL_BUILD_MARCH}")
-elseif(BUILD_MARCH)
-  message(FATAL_ERROR "The flag -march=${INTERNAL_BUILD_MARCH} is not supported by the compiler")
-else()
-  unset(INTERNAL_BUILD_MARCH)
+if(INTERNAL_BUILD_MARCH)
+  check_cxx_compiler_flag("-march=${INTERNAL_BUILD_MARCH}" COMPILER_SUPPORTS_MARCH)
+  if(COMPILER_SUPPORTS_MARCH)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=${INTERNAL_BUILD_MARCH}")
+  elseif(BUILD_MARCH)
+    message(FATAL_ERROR "The flag -march=${INTERNAL_BUILD_MARCH} is not supported by the compiler")
+  else()
+    unset(INTERNAL_BUILD_MARCH)
+  endif()
 endif()
 
 # Try -mcpu. We do this second because it is deprecated on x86, but
 # GCC won't issue a hard error, so we can't tell if it worked or not.
-if (NOT INTERNAL_BUILD_MARCH)
+if (NOT INTERNAL_BUILD_MARCH AND NOT DEFINED BUILD_MARCH)
   if(BUILD_MCPU)
     set(INTERNAL_BUILD_MCPU ${BUILD_MCPU})
   else()
@@ -374,7 +378,7 @@ if(Legion_USE_HIP)
     install(FILES ${Legion_SOURCE_DIR}/cmake/FindHIP.cmake
       DESTINATION ${CMAKE_INSTALL_DATADIR}/Legion/cmake
     )
-    set(HIPCC_FLAGS "-D__CUDA_ARCH__=600 -fno-strict-aliasing")
+    set(HIPCC_FLAGS "-fno-strict-aliasing")
     if("${Legion_HIP_ARCH}" STREQUAL "")
       set(HIP_GENCODE "")
     else()
@@ -490,10 +494,6 @@ if(Legion_USE_LLVM)
   if(Legion_ALLOW_MISSING_LLVM_LIBS)
     set(REALM_ALLOW_MISSING_LLVM_LIBS ON)
   endif()
-  # just want REALM_LLVM_VERSION=<major><minor>
-  string(REPLACE "." ";" LLVM_VERSION_SPLIT ${LLVM_VERSION})
-  list(GET LLVM_VERSION_SPLIT 0 1 REALM_LLVM_VERSION_LIST)
-  string(REPLACE ";" "" REALM_LLVM_VERSION "${REALM_LLVM_VERSION_LIST}")
 endif()
 
 #------------------------------------------------------------------------------#
@@ -645,7 +645,7 @@ add_subdirectory(doc)
 #------------------------------------------------------------------------------#
 # Checking for all defines in the CXX Flags
 
-string(REPLACE " " ";" FLAGS_LIST ${CMAKE_CXX_FLAGS})
+string(REPLACE " " ";" FLAGS_LIST "${CMAKE_CXX_FLAGS}")
 FOREACH(FLAG ${FLAGS_LIST})
   string (FIND ${FLAG} "-D" START_STR)
   if (${START_STR} EQUAL "0")

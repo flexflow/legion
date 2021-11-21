@@ -282,12 +282,15 @@ extern "C" {
   } legion_logical_partition_t;
 
   /**
-   * @see Legion::TaskArgument
+   * @see Legion::UntypedBuffer
    */
-  typedef struct legion_task_argument_t {
+  typedef struct legion_untyped_buffer_t {
     void *args;
     size_t arglen;
-  } legion_task_argument_t;
+  } legion_untyped_buffer_t;
+  // This is for backwards compatibility when we used
+  // to call legion_untyped_buffer_t as legion_task_argument_t
+  typedef legion_untyped_buffer_t legion_task_argument_t;
 
   typedef struct legion_byte_offset_t {
     int offset;
@@ -1657,6 +1660,12 @@ extern "C" {
                                          legion_custom_serdez_id_t serdez);
 
   /**
+   * @see Legion::FieldSpace::NO_SPACE
+   */
+  legion_field_space_t
+  legion_field_space_no_space();
+
+  /**
    * @param handle Caller must have ownership of parameter `handle`.
    *
    * @see Legion::Runtime::create_shared_ownership
@@ -2403,7 +2412,7 @@ extern "C" {
   void
   legion_argument_map_set_point(legion_argument_map_t map,
                                 legion_domain_point_t dp,
-                                legion_task_argument_t arg,
+                                legion_untyped_buffer_t arg,
                                 bool replace /* = true */);
 
   /**
@@ -2741,13 +2750,15 @@ extern "C" {
    * @see Legion::Runtime::construct_future_map
    */
   legion_future_map_t
-  legion_construct_future_map(legion_runtime_t runtime,
-                              legion_context_t ctx,
-                              legion_domain_t domain,
-                              legion_domain_point_t *points,
-                              legion_task_argument_t *buffers,
-                              size_t num_points,
-                              bool collective);
+  legion_future_map_construct_from_buffers(legion_runtime_t runtime,
+                                           legion_context_t ctx,
+                                           legion_domain_t domain,
+                                           legion_domain_point_t *points,
+                                           legion_untyped_buffer_t *buffers,
+                                           size_t num_points,
+                                           bool collective,
+                                           legion_sharding_id_t sid,
+                                           bool implicit_sharding);
 
   /**
    * @return Caller takes ownership of return value
@@ -2755,13 +2766,15 @@ extern "C" {
    * @see Legion::Runtime::construct_future_map
    */
   legion_future_map_t
-  legion_future_map_construct(legion_runtime_t runtime,
-                              legion_context_t ctx,
-                              legion_domain_t domain,
-                              legion_domain_point_t *points,
-                              legion_future_t *futures,
-                              size_t num_futures,
-                              bool collective);
+  legion_future_map_construct_from_futures(legion_runtime_t runtime,
+                                           legion_context_t ctx,
+                                           legion_domain_t domain,
+                                           legion_domain_point_t *points,
+                                           legion_future_t *futures,
+                                           size_t num_futures,
+                                           bool collective,
+                                           legion_sharding_id_t sid,
+                                           bool implicit_sharding);
 
   // -----------------------------------------------------------------------
   // Deferred Buffer Operations
@@ -2814,7 +2827,7 @@ extern "C" {
   legion_task_launcher_t
   legion_task_launcher_create(
     legion_task_id_t tid,
-    legion_task_argument_t arg,
+    legion_untyped_buffer_t arg,
     legion_predicate_t pred /* = legion_predicate_true() */,
     legion_mapper_id_t id /* = 0 */,
     legion_mapping_tag_id_t tag /* = 0 */);
@@ -2996,7 +3009,7 @@ extern "C" {
    */
   void
   legion_task_launcher_set_argument(legion_task_launcher_t launcher,
-                                    legion_task_argument_t arg);
+                                    legion_untyped_buffer_t arg);
 
   /**
    * @see Legion::TaskLauncher::point
@@ -3024,7 +3037,7 @@ extern "C" {
    */
   void
   legion_task_launcher_set_predicate_false_result(legion_task_launcher_t launcher,
-                                                  legion_task_argument_t arg);
+                                                  legion_untyped_buffer_t arg);
 
   /**
    * @see Legion::TaskLauncher::map_id
@@ -3039,6 +3052,13 @@ extern "C" {
   void
   legion_task_launcher_set_mapping_tag(legion_task_launcher_t launcher,
                                        legion_mapping_tag_id_t tag);
+
+  /**
+   * @see Legion::TaskLauncher::map_arg
+   */
+  void
+  legion_task_launcher_set_mapper_arg(legion_task_launcher_t launcher,
+                                      legion_untyped_buffer_t arg);
 
   /**
    * @see Legion::TaskLauncher::enable_inlining
@@ -3070,7 +3090,7 @@ extern "C" {
   legion_index_launcher_create(
     legion_task_id_t tid,
     legion_domain_t domain,
-    legion_task_argument_t global_arg,
+    legion_untyped_buffer_t global_arg,
     legion_argument_map_t map,
     legion_predicate_t pred /* = legion_predicate_true() */,
     bool must /* = false */,
@@ -3346,7 +3366,7 @@ extern "C" {
    */
   void
   legion_index_launcher_set_global_arg(legion_index_launcher_t launcher,
-                                       legion_task_argument_t global_arg);
+                                       legion_untyped_buffer_t global_arg);
 
   /**
    * @see Legion::IndexTaskLauncher::sharding_space
@@ -3368,6 +3388,13 @@ extern "C" {
   void
   legion_index_launcher_set_mapping_tag(legion_index_launcher_t launcher,
                                         legion_mapping_tag_id_t tag);
+
+  /**
+   * @see Legion::IndexTaskLauncher::map_arg
+   */
+  void
+  legion_index_launcher_set_mapper_arg(legion_index_launcher_t launcher,
+                                       legion_untyped_buffer_t map_arg);
 
   /**
    * @see Legion::IndexTaskLauncher::elide_future_return
@@ -3423,6 +3450,13 @@ extern "C" {
                                    bool inst /* = true */);
 
   /**
+   * @see Legion::InlineLauncher::map_arg
+   */
+  void
+  legion_inline_launcher_set_mapper_arg(legion_inline_launcher_t launcher,
+                                        legion_untyped_buffer_t arg);
+
+  /**
    * @see Legion::Runtime::remap_region()
    */
   void
@@ -3443,7 +3477,7 @@ extern "C" {
    */
   void
   legion_runtime_unmap_all_regions(legion_runtime_t runtime,
-                                   legion_context_t ctx);
+                                   legion_context_t ctx); 
 
   // -----------------------------------------------------------------------
   // Fill Field Operations
@@ -3542,6 +3576,13 @@ extern "C" {
    */
   void legion_fill_launcher_set_sharding_space(legion_fill_launcher_t launcher,
                                                legion_index_space_t space);
+
+  /**
+   * @see Legion::FillLauncher::map_arg
+   */
+  void
+  legion_fill_launcher_set_mapper_arg(legion_fill_launcher_t launcher,
+                                      legion_untyped_buffer_t arg);
 
   // -----------------------------------------------------------------------
   // Index Fill Field Operations
@@ -3750,10 +3791,17 @@ extern "C" {
                                      legion_index_fill_launcher_t launcher);
 
   /**
-   * @see Legion::FillLauncher::sharding_space
+   * @see Legion::IndexFillLauncher::sharding_space
    */
   void legion_index_fill_launcher_set_sharding_space(legion_index_fill_launcher_t launcher,
                                                      legion_index_space_t space);
+
+  /**
+   * @see Legion::IndexFillLauncher::map_arg
+   */
+  void
+  legion_index_fill_launcher_set_mapper_arg(legion_index_fill_launcher_t launcher,
+                                            legion_untyped_buffer_t arg);
 
   /**
    * @return Caller does **NOT** take ownership of return value.
@@ -3966,6 +4014,13 @@ extern "C" {
    */
   void legion_copy_launcher_set_sharding_space(legion_copy_launcher_t launcher,
                                                legion_index_space_t space);
+
+  /**
+   * @see Legion::CopyLauncher::map_arg
+   */
+  void
+  legion_copy_launcher_set_mapper_arg(legion_copy_launcher_t launcher,
+                                      legion_untyped_buffer_t arg);
 
   /**
    * @return Caller does **NOT** take ownership of return value.
@@ -4209,6 +4264,13 @@ extern "C" {
   legion_index_copy_launcher_set_sharding_space(legion_index_copy_launcher_t launcher,
                                                 legion_index_space_t is);
 
+  /**
+   * @see Legion::IndexCopyLauncher::map_arg
+   */
+  void
+  legion_index_copy_launcher_set_mapper_arg(legion_index_copy_launcher_t launcher,
+                                            legion_untyped_buffer_t arg);
+
   // -----------------------------------------------------------------------
   // Acquire Operations
   // -----------------------------------------------------------------------
@@ -4266,6 +4328,20 @@ extern "C" {
     legion_acquire_launcher_t launcher,
     legion_phase_barrier_t bar);
 
+  /**
+   * @see Legion::AcquireLauncher::sharding_space
+   */
+  void 
+  legion_acquire_launcher_set_sharding_space(legion_acquire_launcher_t launcher,
+                                             legion_index_space_t space);
+
+  /**
+   * @see Legion::AcquireLauncher::map_arg
+   */
+  void
+  legion_acquire_launcher_set_mapper_arg(legion_acquire_launcher_t launcher,
+                                         legion_untyped_buffer_t arg);
+
   // -----------------------------------------------------------------------
   // Release Operations
   // -----------------------------------------------------------------------
@@ -4322,6 +4398,20 @@ extern "C" {
   legion_release_launcher_add_arrival_barrier(
     legion_release_launcher_t launcher,
     legion_phase_barrier_t bar);
+
+  /**
+   * @see Legion::ReleaseLauncher::sharding_space
+   */
+  void
+  legion_release_launcher_set_sharding_space(legion_release_launcher_t launcher,
+                                             legion_index_space_t space);
+
+  /**
+   * @see Legion::ReleaseLauncher::map_arg
+   */
+  void
+  legion_release_launcher_set_mapper_arg(legion_release_launcher_t launcher,
+                                         legion_untyped_buffer_t arg);
 
   // -----------------------------------------------------------------------
   // Attach/Detach Operations
@@ -4516,7 +4606,7 @@ extern "C" {
   legion_external_resources_t
   legion_attach_external_resources(legion_runtime_t runtime,
                                    legion_context_t ctx,
-                                   legion_attach_launcher_t launcher);
+                                   legion_index_attach_launcher_t launcher);
 
   /**
    * @return Caller takes ownership of return value
@@ -4666,10 +4756,22 @@ extern "C" {
   // -----------------------------------------------------------------------
 
   /**
+   * @see Legion::Runtime::has_runtime()
+   */
+  bool
+  legion_runtime_has_runtime(void);
+
+  /**
    * @see Legion::Runtime::get_runtime()
    */
   legion_runtime_t
   legion_runtime_get_runtime(void);
+
+  /**
+   * @see Legion::Runtime::has_context()
+   */
+  bool
+  legion_runtime_has_context(void);
 
   /**
    * @return Caller takes ownership of return value.
@@ -4714,6 +4816,40 @@ extern "C" {
    */
   size_t
   legion_runtime_total_shards(legion_runtime_t runtime, legion_context_t ctx);
+
+  /**
+   * @param sid Must correspond to a previously registered sharding functor.
+   *
+   * @see Legion::ShardingFunctor::shard()
+   */
+  legion_shard_id_t
+  legion_sharding_functor_shard(legion_sharding_id_t sid,
+                                legion_domain_point_t point,
+                                legion_domain_t full_space,
+                                size_t total_shards);
+
+  /**
+   * @param sid Must correspond to a previously registered sharding functor.
+   *            This functor must be invertible.
+   * @param points Pre-allocated array to fill in with the points returned by
+   *               the `invert` call. This array must be large enough to fit the
+   *               output of any call to this functor's `invert`. A safe limit
+   *               that will work for any functor is
+   *               `legion_domain_get_volume(full_domain)`.
+   * @param points_size At entry this must be the capacity of the `points`
+   *                    array. At exit this value has been updated to the actual
+   *                    number of returned points.
+   *
+   * @see Legion::ShardingFunctor::invert()
+   */
+  void
+  legion_sharding_functor_invert(legion_sharding_id_t sid,
+                                 legion_shard_id_t shard,
+                                 legion_domain_t shard_domain,
+                                 legion_domain_t full_domain,
+                                 size_t total_shards,
+                                 legion_domain_point_t *points,
+                                 size_t *points_size);
 
   void
   legion_runtime_enable_scheduler_lock(void);

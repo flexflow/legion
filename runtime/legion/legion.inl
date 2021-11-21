@@ -18,6 +18,8 @@
 // Useful for IDEs 
 #include "legion.h"
 
+#include <limits>
+
 namespace Legion {
 
     /**
@@ -684,7 +686,7 @@ namespace Legion {
         __CUDA_HD__
         AffineRefHelper(FT &r,FieldID fid,const DomainPoint &pt,PrivilegeMode p)
           : ref(r),
-#ifndef __CUDA_ARCH__
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
             point(pt), field(fid), 
 #endif
             privilege(p) { }
@@ -693,7 +695,7 @@ namespace Legion {
         __CUDA_HD__
         inline operator const FT&(void) const
           {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
             assert(privilege & LEGION_READ_PRIV);
 #else
             if ((privilege & LEGION_READ_PRIV) == 0)
@@ -705,7 +707,7 @@ namespace Legion {
         __CUDA_HD__
         inline AffineRefHelper<FT>& operator=(const FT &newval)
           { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
             assert(privilege & LEGION_WRITE_PRIV);
 #else
             if ((privilege & LEGION_WRITE_PRIV) == 0)
@@ -717,7 +719,7 @@ namespace Legion {
         __CUDA_HD__
         inline AffineRefHelper<FT>& operator=(const AffineRefHelper<FT> &rhs)
           {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
             assert(privilege & LEGION_WRITE_PRIV);
 #else
             if ((privilege & LEGION_WRITE_PRIV) == 0)
@@ -728,7 +730,7 @@ namespace Legion {
           }
       protected:
         FT &ref;
-#ifndef __CUDA_ARCH__
+#if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
         DomainPoint point;
         FieldID field;
 #endif
@@ -2169,7 +2171,7 @@ namespace Legion {
         {
           if (has_source && !source.contains(p))
             return false;
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           check_gpu_warning();
           // Note that in CUDA this function is likely being inlined
           // everywhere and we can't afford to instantiate templates
@@ -2211,7 +2213,7 @@ namespace Legion {
         {
           if (has_source && !source.contains(r))
             return false;
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           check_gpu_warning();
           // Note that in CUDA this function is likely being inlined
           // everywhere and we can't afford to instantiate templates
@@ -2262,7 +2264,7 @@ namespace Legion {
         inline void check_gpu_warning(void) const
         {
 #if 0
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           bool need_warning = !bounds.dense();
           if (need_warning)
             printf("WARNING: GPU bounds check is imprecise!\n");
@@ -2366,6 +2368,325 @@ namespace Legion {
         return true;
       }
     }
+
+    ////////////////////////////////////////////////////////////
+    // Macros UntypedDeferredValue/UntypedDeferredBuffer 
+    // Constructors with Affine Accessors
+    ////////////////////////////////////////////////////////////
+
+#define DEFERRED_VALUE_BUFFER_CONSTRUCTORS(DIM, FIELD_CHECK)                  \
+      FieldAccessor(const UntypedDeferredValue &value,                        \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        Realm::Rect<DIM,T> source_bounds;                                     \
+        /* Anything in range works for these bounds since we're */            \
+        /* going to remap them to the origin */                               \
+        for (int i = 0; i < DIM; i++)                                         \
+        {                                                                     \
+          source_bounds.lo[i] = std::numeric_limits<T>::min();                \
+          source_bounds.hi[i] = std::numeric_limits<T>::max();                \
+        }                                                                     \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform, origin, 0/*field id*/, source_bounds))               \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<FT,DIM,T>(instance, transform,       \
+                          origin, 0/*field id*/, source_bounds, offset);      \
+      }                                                                       \
+      FieldAccessor(const UntypedDeferredValue &value,                        \
+                    const Rect<DIM,T> &source_bounds,                         \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform, origin, 0/*field id*/, source_bounds))               \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<FT,DIM,T>(instance, transform,       \
+                          origin, 0/*field id*/, source_bounds, offset);      \
+      }                                                                       \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+                                            0/*field id*/, is.bounds))        \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<FT,DIM,T>(instance, 0/*field id*/,            \
+                                          is.bounds, offset);                 \
+      }                                                                       \
+      /* With explicit bounds */                                              \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    const Rect<DIM,T> &source_bounds,                         \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+                                        0/*field id*/, source_bounds))        \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<FT,DIM,T>(instance, 0/*field id*/,            \
+                                          source_bounds, offset);             \
+      }                                                                       \
+      /* With explicit transform */                                           \
+      template<int M>                                                         \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    const AffineTransform<M,DIM,T> &transform,                \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform.transform, transform.offset, 0/*field id*/))          \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<FT,DIM,T>(instance,                  \
+            transform.transform, transform.offset, 0/*field id*/, offset);    \
+      }                                                                       \
+      /* With explicit transform and bounds */                                \
+      template<int M>                                                         \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    const AffineTransform<M,DIM,T> &transform,                \
+                    const Rect<DIM,T> &source_bounds,                         \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform.transform, transform.offset, 0/*fid*/, source_bounds))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<FT,DIM,T>(instance, transform.transform,      \
+                      transform.offset, 0/*fid*/, source_bounds, offset);     \
+      }
+
+#define DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(DIM, FIELD_CHECK)      \
+      FieldAccessor(const UntypedDeferredValue &value,                        \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        Realm::Rect<DIM,T> source_bounds;                                     \
+        /* Anything in range works for these bounds since we're */            \
+        /* going to remap them to the origin */                               \
+        for (int i = 0; i < DIM; i++)                                         \
+        {                                                                     \
+          source_bounds.lo[i] = std::numeric_limits<T>::min();                \
+          source_bounds.hi[i] = std::numeric_limits<T>::max();                \
+        }                                                                     \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform, origin, 0/*field id*/, source_bounds))               \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<FT,DIM,T>(instance, transform,       \
+                          origin, 0/*field id*/, source_bounds, offset);      \
+        DomainT<1,T> is;                                                      \
+        is.bounds.lo[0] = 0;                                                  \
+        is.bounds.hi[0] = 0;                                                  \
+        is.sparsity.id = 0;                                                   \
+        AffineTransform<1,DIM,T> affine(transform, origin);                   \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds, affine);      \
+      }                                                                       \
+      FieldAccessor(const UntypedDeferredValue &value,                        \
+                    const Rect<DIM,T> &source_bounds,                         \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform, origin, 0/*field id*/, source_bounds))               \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<FT,DIM,T>(instance, transform,       \
+                          origin, 0/*field id*/, source_bounds, offset);      \
+        DomainT<1,T> is;                                                      \
+        is.bounds.lo[0] = 0;                                                  \
+        is.bounds.hi[0] = 0;                                                  \
+        is.sparsity.id = 0;                                                   \
+        AffineTransform<1,DIM,T> affine(transform, origin);                   \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds, affine);      \
+      }                                                                       \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+                                            0/*field id*/, is.bounds))        \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<FT,DIM,T>(instance, 0/*field id*/,            \
+                                          is.bounds, offset);                 \
+        bounds = AffineBounds::Tester<DIM,T>(is);                             \
+      }                                                                       \
+      /* With explicit bounds */                                              \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    const Rect<DIM,T> &source_bounds,                         \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+                                        0/*field id*/, source_bounds))        \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<FT,DIM,T>(instance, 0/*field id*/,            \
+                                          source_bounds, offset);             \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds);              \
+      }                                                                       \
+      /* With explicit transform */                                           \
+      template<int M>                                                         \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    const AffineTransform<M,DIM,T> &transform,                \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform.transform, transform.offset, 0/*field id*/))          \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<FT,DIM,T>(instance,                  \
+            transform.transform, transform.offset, 0/*field id*/, offset);    \
+        bounds = AffineBounds::Tester<DIM,T>(is, transform);                  \
+      }                                                                       \
+      /* With explicit transform and bounds */                                \
+      template<int M>                                                         \
+      FieldAccessor(const UntypedDeferredBuffer<T> &buffer,                   \
+                    const AffineTransform<M,DIM,T> &transform,                \
+                    const Rect<DIM,T> &source_bounds,                         \
+                    size_t actual_field_size = sizeof(FT),                    \
+                    bool check_field_size = FIELD_CHECK,                      \
+                    bool silence_warnings = false,                            \
+                    const char *warning_string = NULL,                        \
+                    size_t offset = 0)                                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance,         \
+              transform.transform, transform.offset, 0/*fid*/, source_bounds))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<FT,DIM,T>(instance, transform.transform,      \
+                      transform.offset, 0/*fid*/, source_bounds, offset);     \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds, transform);   \
+      }
 
     ////////////////////////////////////////////////////////////
     // Specializations for Affine Accessors
@@ -2541,6 +2862,12 @@ namespace Legion {
                                         0/*field id*/, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, true) 
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const 
         { 
@@ -2555,7 +2882,7 @@ namespace Legion {
       inline const FT* ptr(const Rect<N,T>& r, 
                            size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -2795,10 +3122,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<N,T>(is, source_bounds, affine);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const 
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -2810,7 +3143,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -2823,7 +3156,7 @@ namespace Legion {
       inline const FT* ptr(const Rect<N,T>& r, 
                            size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -2847,7 +3180,7 @@ namespace Legion {
       inline const FT* ptr(const Rect<N,T>& r, size_t strides[N],
                            size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -2861,7 +3194,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3058,6 +3391,12 @@ namespace Legion {
                                         0/*field id*/, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const 
         { 
@@ -3072,7 +3411,7 @@ namespace Legion {
       inline const FT* ptr(const Rect<1,T>& r, 
                            size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -3295,10 +3634,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<1,T>(is, source_bounds, affine);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const 
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3310,7 +3655,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3323,7 +3668,7 @@ namespace Legion {
       inline const FT* ptr(const Rect<1,T>& r,
                            size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -3347,7 +3692,7 @@ namespace Legion {
       inline const FT* ptr(const Rect<1,T>& r, size_t strides[1],
                            size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -3360,7 +3705,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3485,6 +3830,12 @@ namespace Legion {
             transform.offset, fid, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, true) 
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const
         { 
@@ -3503,7 +3854,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<N,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -3672,10 +4023,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<N,T>(is, source_bounds, transform);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3687,7 +4044,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<N,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3699,7 +4056,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3711,7 +4068,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<N,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -3735,7 +4092,7 @@ namespace Legion {
       inline FT* ptr(const Rect<N,T>& r, size_t strides[N],
                      size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -3749,7 +4106,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3773,7 +4130,7 @@ namespace Legion {
       inline void reduce(const Point<N,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -3899,6 +4256,12 @@ namespace Legion {
             transform.offset, fid, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const
         { 
@@ -3917,7 +4280,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<1,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -4074,10 +4437,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<1,T>(is, source_bounds, transform);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4089,7 +4458,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<1,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4101,7 +4470,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4113,7 +4482,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<1,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -4137,7 +4506,7 @@ namespace Legion {
       inline FT* ptr(const Rect<1,T>& r, size_t strides[1],
                      size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -4150,7 +4519,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4163,7 +4532,7 @@ namespace Legion {
       inline void reduce(const Point<1,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4288,6 +4657,12 @@ namespace Legion {
             transform.offset, fid, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const
         { 
@@ -4306,7 +4681,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<N,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -4469,10 +4844,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<N,T>(is, source_bounds, transform);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4484,7 +4865,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<N,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4496,7 +4877,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4508,7 +4889,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<N,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -4532,7 +4913,7 @@ namespace Legion {
       inline FT* ptr(const Rect<N,T>& r, size_t strides[N],
                      size_t field_size = sizeof(FT)) const 
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -4546,7 +4927,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4683,6 +5064,12 @@ namespace Legion {
             transform.offset, fid, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const
         { 
@@ -4701,7 +5088,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<1,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -4852,10 +5239,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<1,T>(is, source_bounds, transform);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4867,7 +5260,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<1,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4879,7 +5272,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -4891,7 +5284,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<1,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -4915,7 +5308,7 @@ namespace Legion {
       inline FT* ptr(const Rect<1,T>& r, size_t strides[1],
                      size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -4928,7 +5321,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5053,6 +5446,12 @@ namespace Legion {
             transform.offset, fid, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline void write(const Point<N,T>& p, FT val) const
         { 
@@ -5066,7 +5465,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<N,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -5226,10 +5625,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<N,T>(is, source_bounds, transform);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(N, false)
+#endif
+    public:
       __CUDA_HD__
       inline void write(const Point<N,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5241,7 +5646,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5253,7 +5658,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<N,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -5277,7 +5682,7 @@ namespace Legion {
       inline FT* ptr(const Rect<N,T>& r, size_t strides[N],
                      size_t field_size = sizeof(FT)) const 
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -5291,7 +5696,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5428,6 +5833,12 @@ namespace Legion {
             transform.offset, fid, source_bounds, offset);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline void write(const Point<1,T>& p, FT val) const
         { 
@@ -5441,7 +5852,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<1,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -5592,10 +6003,16 @@ namespace Legion {
         bounds = AffineBounds::Tester<1,T>(is, source_bounds, transform);
       }
     public:
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS(1, false)
+#endif
+    public:
       __CUDA_HD__
       inline void write(const Point<1,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5607,7 +6024,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5619,7 +6036,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<1,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -5643,7 +6060,7 @@ namespace Legion {
       inline FT* ptr(const Rect<1,T>& r, size_t strides[1],
                      size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -5656,7 +6073,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5676,6 +6093,327 @@ namespace Legion {
       static const int dim = 1;
     };
 
+#undef DEFERRED_VALUE_BUFFER_CONSTRUCTORS
+#undef DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS
+
+#define DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(DIM)                     \
+      ReductionAccessor(const UntypedDeferredValue &value,                    \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        Realm::Rect<DIM,T> source_bounds;                                     \
+        /* Anything in range works for these bounds since we're */            \
+        /* going to remap them to the origin */                               \
+        for (int i = 0; i < DIM; i++)                                         \
+        {                                                                     \
+          source_bounds.lo[i] = std::numeric_limits<T>::min();                \
+          source_bounds.hi[i] = std::numeric_limits<T>::max();                \
+        }                                                                     \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform, origin, 0/*field id*/, source_bounds))     \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(          \
+          instance, transform, origin, 0/*field id*/, source_bounds, offset); \
+      }                                                                       \
+      ReductionAccessor(const UntypedDeferredValue &value,                    \
+                        const Rect<DIM,T> &source_bounds,                     \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform, origin, 0/*field id*/, source_bounds))     \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance, \
+            transform, origin, 0/*field id*/, source_bounds, offset);         \
+      }                                                                       \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+                                          instance, 0/*field id*/, is.bounds))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance,          \
+                                  0/*field id*/, is.bounds, offset);          \
+      }                                                                       \
+      /* With explicit bounds */                                              \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        const Rect<DIM,T> &source_bounds,                     \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+                                      instance, 0/*field id*/, source_bounds))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance,          \
+                              0/*field id*/, source_bounds, offset);          \
+      }                                                                       \
+      /* With explicit transform */                                           \
+      template<int M>                                                         \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        const AffineTransform<M,DIM,T> &transform,            \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform.transform, transform.offset, 0/*field id*/))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance, \
+            transform.transform, transform.offset, 0/*field id*/, offset);    \
+      }                                                                       \
+      /* With explicit transform and bounds */                                \
+      template<int M>                                                         \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        const AffineTransform<M,DIM,T> &transform,            \
+                        const Rect<DIM,T> &source_bounds,                     \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform.transform, transform.offset,                \
+              0/*field id*/, source_bounds))                                  \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance,          \
+              transform.transform, transform.offset, 0/*field id*/,           \
+              source_bounds, offset);                                         \
+      }
+
+#define DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(DIM)         \
+      ReductionAccessor(const UntypedDeferredValue &value,                    \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        Realm::Rect<DIM,T> source_bounds;                                     \
+        /* Anything in range works for these bounds since we're */            \
+        /* going to remap them to the origin */                               \
+        for (int i = 0; i < DIM; i++)                                         \
+        {                                                                     \
+          source_bounds.lo[i] = std::numeric_limits<T>::min();                \
+          source_bounds.hi[i] = std::numeric_limits<T>::max();                \
+        }                                                                     \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform, origin, 0/*field id*/, source_bounds))     \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance, \
+            transform, origin, 0/*field id*/, source_bounds, offset);         \
+        DomainT<1,T> is;                                                      \
+        is.bounds.lo[0] = 0;                                                  \
+        is.bounds.hi[0] = 0;                                                  \
+        is.sparsity.id = 0;                                                   \
+        AffineTransform<1,DIM,T> affine(transform, origin);                   \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds, affine);      \
+      }                                                                       \
+      ReductionAccessor(const UntypedDeferredValue &value,                    \
+                        const Rect<DIM,T> &source_bounds,                     \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        assert(!check_field_size || (actual_field_size == value.field_size)); \
+        const Realm::RegionInstance instance = value.instance;                \
+        /* This mapping ignores the input points and sends */                 \
+        /* everything to the 1-D origin */                                    \
+        Realm::Matrix<1,DIM,T> transform;                                     \
+        for (int i = 0; i < DIM; i++)                                         \
+          transform[0][i] = 0;                                                \
+        Realm::Point<1,T> origin(0);                                          \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform, origin, 0/*field id*/, source_bounds))     \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredValue\n");      \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance, \
+            transform, origin, 0/*field id*/, source_bounds, offset);         \
+        DomainT<1,T> is;                                                      \
+        is.bounds.lo[0] = 0;                                                  \
+        is.bounds.hi[0] = 0;                                                  \
+        is.sparsity.id = 0;                                                   \
+        AffineTransform<1,DIM,T> affine(transform, origin);                   \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds, affine);      \
+      }                                                                       \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+                                          instance, 0/*field id*/, is.bounds))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance,          \
+                                  0/*field id*/, is.bounds, offset);          \
+        bounds = AffineBounds::Tester<DIM,T>(is);                             \
+      }                                                                       \
+      /* With explicit bounds */                                              \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        const Rect<DIM,T> &source_bounds,                     \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+                                      instance, 0/*field id*/, source_bounds))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance,          \
+                              0/*field id*/, source_bounds, offset);          \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds);              \
+      }                                                                       \
+      /* With explicit transform */                                           \
+      template<int M>                                                         \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        const AffineTransform<M,DIM,T> &transform,            \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform.transform, transform.offset, 0/*field id*/))\
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor = Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance, \
+            transform.transform, transform.offset, 0/*field id*/, offset);    \
+        bounds = AffineBounds::Tester<DIM,T>(is, transform);                  \
+      }                                                                       \
+      /* With explicit transform and bounds */                                \
+      template<int M>                                                         \
+      ReductionAccessor(const UntypedDeferredBuffer<T> &buffer,               \
+                        const AffineTransform<M,DIM,T> &transform,            \
+                        const Rect<DIM,T> &source_bounds,                     \
+                        bool silence_warnings = false,                        \
+                        const char *warning_string = NULL,                    \
+                        size_t offset = 0,                                    \
+                        size_t actual_field_size=sizeof(typename REDOP::RHS), \
+                        bool check_field_size = false)                        \
+      {                                                                       \
+        const Realm::RegionInstance instance = buffer.instance;               \
+        const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
+        if (!Realm::AffineAccessor<typename REDOP::RHS,DIM,T>::is_compatible( \
+              instance, transform.transform, transform.offset,                \
+              0/*field id*/, source_bounds))                                  \
+        {                                                                     \
+          fprintf(stderr,                                                     \
+              "Incompatible AffineAccessor for UntypedDeferredBuffer\n");     \
+          assert(false);                                                      \
+        }                                                                     \
+        accessor =                                                            \
+          Realm::AffineAccessor<typename REDOP::RHS,DIM,T>(instance,          \
+              transform.transform, transform.offset, 0/*field id*/,           \
+              source_bounds, offset);                                         \
+        bounds = AffineBounds::Tester<DIM,T>(is, source_bounds, transform);   \
+      }
+
     // Reduce FieldAccessor specialization
     template<typename REDOP, bool EXCLUSIVE, int N, typename T, bool CB>
     class ReductionAccessor<REDOP,EXCLUSIVE,N,T,
@@ -5687,7 +6425,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<N,T> is;
@@ -5709,7 +6447,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<N,T> is;
@@ -5732,7 +6470,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<M,T> is;
@@ -5756,7 +6494,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<M,T> is;
@@ -5771,6 +6509,8 @@ namespace Legion {
         accessor = Realm::AffineAccessor<typename REDOP::RHS,N,T>(instance, 
             transform.transform, transform.offset, fid, source_bounds, offset);
       }
+    public:
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(N)
     public:
       __CUDA_HD__
       inline void reduce(const Point<N,T>& p, 
@@ -5787,7 +6527,7 @@ namespace Legion {
       inline typename REDOP::RHS* ptr(const Rect<N,T>& r,
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -5852,7 +6592,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -5876,7 +6616,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -5901,7 +6641,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -5927,7 +6667,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -5945,11 +6685,13 @@ namespace Legion {
         bounds = AffineBounds::Tester<N,T>(is, source_bounds, transform);
       }
     public:
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(N)
+    public:
       __CUDA_HD__ 
       inline void reduce(const Point<N,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5961,7 +6703,7 @@ namespace Legion {
       __CUDA_HD__
       inline typename REDOP::RHS* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -5974,7 +6716,7 @@ namespace Legion {
       inline typename REDOP::RHS* ptr(const Rect<N,T>& r,
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -5999,7 +6741,7 @@ namespace Legion {
               size_t strides[N],
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -6054,7 +6796,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<1,T> is;
@@ -6076,7 +6818,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<1,T> is;
@@ -6099,7 +6841,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<M,T> is;
@@ -6123,7 +6865,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<M,T> is;
@@ -6138,6 +6880,8 @@ namespace Legion {
         accessor = Realm::AffineAccessor<typename REDOP::RHS,1,T>(instance, 
             transform.transform, transform.offset, fid, source_bounds, offset);
       }
+    public:
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(1)
     public:
       __CUDA_HD__
       inline void reduce(const Point<1,T>& p, 
@@ -6154,7 +6898,7 @@ namespace Legion {
       inline typename REDOP::RHS* ptr(const Rect<1,T>& r,
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -6209,7 +6953,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -6233,7 +6977,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -6258,7 +7002,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -6284,7 +7028,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -6302,11 +7046,13 @@ namespace Legion {
         bounds = AffineBounds::Tester<1,T>(is, source_bounds, transform);
       }
     public:
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(1)
+    public:
       __CUDA_HD__
       inline void reduce(const Point<1,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -6318,7 +7064,7 @@ namespace Legion {
       __CUDA_HD__
       inline typename REDOP::RHS* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -6331,7 +7077,7 @@ namespace Legion {
       inline typename REDOP::RHS* ptr(const Rect<1,T>& r,
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
@@ -6355,7 +7101,7 @@ namespace Legion {
               size_t strides[1],
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
 #else
           if (!bounds.contains_all(r)) 
@@ -6461,7 +7207,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -6493,7 +7239,7 @@ namespace Legion {
                            size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -6600,7 +7346,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const 
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -6612,7 +7358,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -6627,7 +7373,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -6663,7 +7409,7 @@ namespace Legion {
                            size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.prt(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -6688,7 +7434,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -6792,7 +7538,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -6824,7 +7570,7 @@ namespace Legion {
                            size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -6919,7 +7665,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const 
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -6931,7 +7677,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -6946,7 +7692,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -6982,7 +7728,7 @@ namespace Legion {
                            size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -7006,7 +7752,7 @@ namespace Legion {
       __CUDA_HD__
       inline const FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7102,7 +7848,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -7134,7 +7880,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -7247,7 +7993,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7259,7 +8005,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<N,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7271,7 +8017,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7285,7 +8031,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -7321,7 +8067,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -7346,7 +8092,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7370,7 +8116,7 @@ namespace Legion {
       inline void reduce(const Point<N,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7467,7 +8213,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -7499,7 +8245,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -7600,7 +8346,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7612,7 +8358,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<1,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7624,7 +8370,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7638,7 +8384,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -7674,7 +8420,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -7698,7 +8444,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7711,7 +8457,7 @@ namespace Legion {
       inline void reduce(const Point<1,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7807,7 +8553,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -7839,7 +8585,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -7946,7 +8692,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT read(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7958,7 +8704,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<N,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7970,7 +8716,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -7984,7 +8730,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -8020,7 +8766,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const 
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -8045,7 +8791,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8153,7 +8899,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -8185,7 +8931,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -8280,7 +9026,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT read(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8292,7 +9038,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<1,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8304,7 +9050,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8318,7 +9064,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -8354,7 +9100,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -8378,7 +9124,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8469,7 +9215,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -8501,7 +9247,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -8608,7 +9354,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<N,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8620,7 +9366,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8634,7 +9380,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -8670,7 +9416,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const 
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -8695,7 +9441,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8798,7 +9544,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -8830,7 +9576,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -8925,7 +9671,7 @@ namespace Legion {
       __CUDA_HD__
       inline void write(const Point<1,T>& p, FT val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8937,7 +9683,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -8951,7 +9697,7 @@ namespace Legion {
         {
           size_t strides[1];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -8987,7 +9733,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -9011,7 +9757,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT& operator[](const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -9042,7 +9788,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<N,T> is;
@@ -9065,7 +9811,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<N,T> is;
@@ -9099,7 +9845,7 @@ namespace Legion {
         {
           size_t strides[N];
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -9132,7 +9878,7 @@ namespace Legion {
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -9191,7 +9937,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -9216,7 +9962,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -9239,7 +9985,7 @@ namespace Legion {
       inline void reduce(const Point<N,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -9251,7 +9997,7 @@ namespace Legion {
       __CUDA_HD__
       inline typename REDOP::RHS* ptr(const Point<N,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -9266,7 +10012,7 @@ namespace Legion {
         {
           size_t strides[N];
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -9303,7 +10049,7 @@ namespace Legion {
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -9369,7 +10115,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<1,T> is;
@@ -9392,7 +10138,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
       {
         DomainT<1,T> is;
@@ -9426,7 +10172,7 @@ namespace Legion {
         {
           size_t strides[1];
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -9459,7 +10205,7 @@ namespace Legion {
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -9507,7 +10253,7 @@ namespace Legion {
                         ReductionOpID redop, bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -9532,7 +10278,7 @@ namespace Legion {
                         bool silence_warnings = false,
                         const char *warning_string = NULL,
                         size_t offset = 0,
-                        size_t actual_field_size = sizeof(typename REDOP::LHS),
+                        size_t actual_field_size = sizeof(typename REDOP::RHS),
                         bool check_field_size = false)
         : field(fid)
       {
@@ -9555,7 +10301,7 @@ namespace Legion {
       inline void reduce(const Point<1,T>& p, 
                          typename REDOP::RHS val) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -9567,7 +10313,7 @@ namespace Legion {
       __CUDA_HD__
       inline typename REDOP::RHS* ptr(const Point<1,T>& p) const
         { 
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains(p));
 #else
           if (!bounds.contains(p)) 
@@ -9582,7 +10328,7 @@ namespace Legion {
         {
           size_t strides[1];
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
@@ -9618,7 +10364,7 @@ namespace Legion {
               size_t field_size = sizeof(typename REDOP::RHS)) const
         {
           typename REDOP::RHS *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(bounds.contains_all(r));
           assert(result != NULL);
 #else
@@ -10929,7 +11675,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_READ_ONLY) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -10941,7 +11687,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -10960,7 +11706,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_WRITE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -10972,7 +11718,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -10993,7 +11739,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -11023,7 +11769,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_REDUCE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -11035,7 +11781,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -11439,7 +12185,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_READ_ONLY) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -11451,7 +12197,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -11470,7 +12216,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_WRITE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -11482,7 +12228,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -11503,7 +12249,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -11524,7 +12270,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_REDUCE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -11536,7 +12282,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -11942,7 +12688,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -11962,7 +12708,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -11982,7 +12728,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -12013,7 +12759,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -12419,7 +13165,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -12439,7 +13185,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -12459,7 +13205,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -12480,7 +13226,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -13433,7 +14179,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_READ_ONLY) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -13445,7 +14191,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -13464,7 +14210,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_WRITE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -13476,7 +14222,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -13497,7 +14243,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -13527,7 +14273,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_REDUCE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -13539,7 +14285,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -13761,7 +14507,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_READ_ONLY) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -13773,7 +14519,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -13792,7 +14538,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_WRITE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -13804,7 +14550,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -13825,7 +14571,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -13846,7 +14592,7 @@ namespace Legion {
               continue;
             if ((region_privileges[idx] & LEGION_REDUCE_PRIV) == 0)
             {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
               // bounds checks are not precise for CUDA so keep going to 
               // see if there is another region that has it with the privileges
               continue;
@@ -13858,7 +14604,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -14084,7 +14830,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -14104,7 +14850,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -14124,7 +14870,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -14155,7 +14901,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -14377,7 +15123,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -14397,7 +15143,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -14417,7 +15163,7 @@ namespace Legion {
             index = idx;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(index >= 0);
 #else
           if (index < 0)
@@ -14438,7 +15184,7 @@ namespace Legion {
             found = true;
             break;
           }
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(found);
 #else
           if (!found)
@@ -15072,7 +15818,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<N,T>& r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -15219,7 +15965,7 @@ namespace Legion {
       __CUDA_HD__
       inline FT* ptr(const Rect<1,T> &r, size_t field_size = sizeof(FT)) const
         {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(Internal::is_dense_layout(r, accessor.strides, field_size));
 #else
           if (!Internal::is_dense_layout(r, accessor.strides, field_size))
@@ -15319,7 +16065,7 @@ namespace Legion {
         {
           size_t strides[N];
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
           assert(Internal::is_dense_layout(r, strides, field_size));
 #else
@@ -15351,7 +16097,7 @@ namespace Legion {
                      size_t field_size = sizeof(FT)) const
         {
           FT *result = accessor.ptr(r, strides);
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
           assert(result != NULL);
 #else
           if (result == NULL)
@@ -15668,6 +16414,14 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<typename T>
+    inline DeferredValue<T>::DeferredValue(void)
+      : instance(Realm::RegionInstance::NO_INST)
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
     inline DeferredValue<T>::DeferredValue(T initial_value, size_t alignment)
     //--------------------------------------------------------------------------
     {
@@ -15765,13 +16519,13 @@ namespace Legion {
     {
       Runtime::legion_task_postamble(runtime, ctx,
                     accessor.ptr(Point<1,coord_t>(0)), sizeof(T),
-                    true/*owner*/, instance);
+                    true/*owner*/, instance, instance.get_location().kind());
     }
 
     //--------------------------------------------------------------------------
     template<typename REDOP, bool EXCLUSIVE>
     inline DeferredReduction<REDOP,EXCLUSIVE>::DeferredReduction(size_t align)
-      : DeferredValue<typename REDOP::LHS>(REDOP::identity, align)
+      : DeferredValue<typename REDOP::RHS>(REDOP::identity, align)
     //--------------------------------------------------------------------------
     {
     }
@@ -15794,6 +16548,69 @@ namespace Legion {
     {
       REDOP::template fold<EXCLUSIVE>(
           this->accessor[Point<1,coord_t>(0)], value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    inline UntypedDeferredValue::UntypedDeferredValue(
+                                                    const DeferredValue<T> &rhs)
+      : instance(rhs.instance), field_size(sizeof(T))
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename REDOP, bool EXCLUSIVE>
+    inline UntypedDeferredValue::UntypedDeferredValue(
+                                  const DeferredReduction<REDOP,EXCLUSIVE> &rhs)
+      : instance(rhs.instance), field_size(sizeof(REDOP::RHS))
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    inline UntypedDeferredValue::operator DeferredValue<T>(void) const
+    //--------------------------------------------------------------------------
+    {
+      assert(field_size == sizeof(T));
+      DeferredValue<T> result;
+      result.instance = instance;
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
+      const bool is_compatible = 
+        Realm::AffineAccessor<T,1,coord_t>::is_compatible(instance, 0); 
+#endif
+      assert(is_compatible);
+#endif
+      // We can make the accessor
+      result.accessor =
+        Realm::AffineAccessor<T,1,coord_t>(instance, 0/*field id*/);
+      return result;
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename REDOP, bool EXCLUSIVE>
+    inline UntypedDeferredValue::operator 
+                                  DeferredReduction<REDOP,EXCLUSIVE>(void) const
+    //--------------------------------------------------------------------------
+    {
+      assert(field_size == sizeof(REDOP::RHS));
+      DeferredReduction<typename REDOP::RHS,EXCLUSIVE> result;
+      result.instance = instance;
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
+      const bool is_compatible = 
+        Realm::AffineAccessor<typename REDOP::RHS,1,coord_t>::is_compatible(
+                                                    instance, 0/*field id*/); 
+#endif
+      assert(is_compatible);
+#endif
+      // We can make the accessor
+      result.accessor =
+        Realm::AffineAccessor<typename REDOP::RHS,1,coord_t>(instance,
+                                                             0/*field id*/);
+      return result;
     }
 
 #ifdef LEGION_BOUNDS_CHECKS
@@ -16571,7 +17388,7 @@ namespace Legion {
               >::ptr(const Rect<N,T> &r) const
     //--------------------------------------------------------------------------
     {
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
       assert(Internal::is_dense_layout(r, accessor.strides, sizeof(FT)));
 #else
       if (!Internal::is_dense_layout(r, accessor.strides, sizeof(FT)))
@@ -17242,7 +18059,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       assert(instance.exists());
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
       assert(bounds.bounds.contains(p));
 #else
       assert(bounds.contains(p));
@@ -17266,7 +18083,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       assert(instance.exists());
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
       assert(bounds.bounds.contains(p));
 #else
       assert(bounds.contains(p));
@@ -17290,7 +18107,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       assert(instance.exists());
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
       assert(bounds.bounds.contains(p));
 #else
       assert(bounds.contains(p));
@@ -17314,7 +18131,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       assert(instance.exists());
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
       assert(bounds.bounds.contains(r));
       assert(Internal::is_dense_layout(r, accessor.strides, sizeof(FT)));
 #else
@@ -17349,7 +18166,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       assert(instance.exists());
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
       assert(bounds.bounds.contains(r));
 #else
       assert(bounds.contains_all(r));
@@ -17375,7 +18192,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       assert(instance.exists());
-#ifdef __CUDA_ARCH__
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
       assert(bounds.bounds.contains(p));
 #else
       assert(bounds.contains(p));
@@ -17419,6 +18236,420 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       return instance;
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    UntypedDeferredBuffer<T>::UntypedDeferredBuffer(void)
+      : instance(Realm::RegionInstance::NO_INST), field_size(0), dims(0)
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
+                                                    Memory::Kind memkind,
+                                                    const Domain &space,
+                                                    const void *initial_value,
+                                                    size_t alignment,
+                                                    bool fortran_order_dims)
+      : field_size(fs), dims(d)
+    //--------------------------------------------------------------------------
+    {
+      assert(dims > 0);
+      assert(dims <= LEGION_MAX_DIM);
+      Machine machine = Realm::Machine::get_machine();
+      Machine::MemoryQuery finder(machine);
+      const Processor exec_proc = Processor::get_executing_processor();
+      finder.best_affinity_to(exec_proc);
+      finder.only_kind(memkind);
+      if (finder.count() == 0)
+      {
+        finder = Machine::MemoryQuery(machine);
+        finder.has_affinity_to(exec_proc);
+        finder.only_kind(memkind);
+      }
+      Runtime *runtime = Runtime::get_runtime();
+      if (finder.count() == 0)
+      {
+        const char *mem_names[] = {
+#define MEM_NAMES(name, desc) desc,
+          REALM_MEMORY_KINDS(MEM_NAMES) 
+#undef MEM_NAMES
+        };
+        const char *proc_names[] = {
+#define PROC_NAMES(name, desc) desc,
+          REALM_PROCESSOR_KINDS(PROC_NAMES)
+#undef PROC_NAMES
+        };
+        Context ctx = Runtime::get_context();
+        const Task *task = runtime->get_local_task(ctx);
+        fprintf(stderr,
+            "Unable to find associated %s memory for %s processor when "
+            "performing an UntypedBuffer creation in task %s (UID %lld)",
+            mem_names[memkind], proc_names[exec_proc.kind()],
+            task->get_task_name(), task->get_unique_id());
+        assert(false);
+      }
+      const Memory memory = finder.first();
+      const std::vector<size_t> field_sizes(1, field_size);
+      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
+      Realm::InstanceLayoutGeneric *layout = NULL;
+      switch (dims)
+      {
+#define DIMFUNC(DIM)                                                        \
+        case DIM:                                                           \
+          {                                                                 \
+            const DomainT<DIM,T> bounds =                                   \
+                      runtime->get_index_space_domain<DIM,T>(               \
+                          IndexSpaceT<DIM,T>(space));                       \
+            int dim_order[DIM];                                             \
+            if (fortran_order_dims)                                         \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = i;                                           \
+            }                                                               \
+            else                                                            \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = DIM - (i+1);                                 \
+            }                                                               \
+            layout = Realm::InstanceLayoutGeneric::choose_instance_layout(  \
+                bounds, constraints, dim_order);                            \
+            break;                                                          \
+          }
+        LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+        default:
+          assert(false);
+      }
+      layout->alignment_reqd = alignment;
+      instance = runtime->create_task_local_instance(memory, layout);
+      if (initial_value != NULL)
+      {
+        Realm::ProfilingRequestSet no_requests; 
+        std::vector<Realm::CopySrcDstField> dsts(1);
+        dsts[0].set_field(instance, 0/*field id*/, field_size);
+        Internal::LgEvent wait_on;
+        switch (dims)
+        {
+#define DIMFUNC(DIM)                                                      \
+          case DIM:                                                       \
+            {                                                             \
+              const DomainT<DIM,T> bounds =                               \
+                      runtime->get_index_space_domain<DIM,T>(             \
+                          IndexSpaceT<DIM,T>(space));                     \
+              wait_on = Internal::LgEvent(                                \
+              bounds.fill(dsts, no_requests, initial_value, field_size)); \
+              break;                                                      \
+            }
+          LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+          default:
+            assert(false);
+        }
+        if (wait_on.exists())
+          wait_on.wait();
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
+                                                    Memory::Kind memkind,
+                                                    IndexSpace space,
+                                                    const void *initial_value,
+                                                    size_t alignment,
+                                                    bool fortran_order_dims)
+      : field_size(fs), dims(d)
+    //--------------------------------------------------------------------------
+    {
+      assert(dims > 0);
+      assert(dims <= LEGION_MAX_DIM);
+      Machine machine = Realm::Machine::get_machine();
+      Machine::MemoryQuery finder(machine);
+      const Processor exec_proc = Processor::get_executing_processor();
+      finder.best_affinity_to(exec_proc);
+      finder.only_kind(memkind);
+      if (finder.count() == 0)
+      {
+        finder = Machine::MemoryQuery(machine);
+        finder.has_affinity_to(exec_proc);
+        finder.only_kind(memkind);
+      }
+      Runtime *runtime = Runtime::get_runtime();
+      if (finder.count() == 0)
+      {
+        const char *mem_names[] = {
+#define MEM_NAMES(name, desc) desc,
+          REALM_MEMORY_KINDS(MEM_NAMES) 
+#undef MEM_NAMES
+        };
+        const char *proc_names[] = {
+#define PROC_NAMES(name, desc) desc,
+          REALM_PROCESSOR_KINDS(PROC_NAMES)
+#undef PROC_NAMES
+        };
+        Context ctx = Runtime::get_context();
+        const Task *task = runtime->get_local_task(ctx);
+        fprintf(stderr,
+            "Unable to find associated %s memory for %s processor when "
+            "performing an UntypedBuffer creation in task %s (UID %lld)",
+            mem_names[memkind], proc_names[exec_proc.kind()],
+            task->get_task_name(), task->get_unique_id());
+        assert(false);
+      }
+      const Memory memory = finder.first();
+      const std::vector<size_t> field_sizes(1, field_size);
+      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
+      Realm::InstanceLayoutGeneric *layout = NULL;
+      switch (dims)
+      {
+#define DIMFUNC(DIM)                                                        \
+        case DIM:                                                           \
+          {                                                                 \
+            const DomainT<DIM,T> bounds = space;                            \
+            int dim_order[DIM];                                             \
+            if (fortran_order_dims)                                         \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = i;                                           \
+            }                                                               \
+            else                                                            \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = DIM - (i+1);                                 \
+            }                                                               \
+            layout = Realm::InstanceLayoutGeneric::choose_instance_layout(  \
+                bounds, constraints, dim_order);                            \
+            break;                                                          \
+          }
+        LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+        default:
+          assert(false);
+      }
+      layout->alignment_reqd = alignment;
+      instance = runtime->create_task_local_instance(memory, layout);
+      if (initial_value != NULL)
+      {
+        Realm::ProfilingRequestSet no_requests; 
+        std::vector<Realm::CopySrcDstField> dsts(1);
+        dsts[0].set_field(instance, 0/*field id*/, field_size);
+        Internal::LgEvent wait_on;
+        switch (dims)
+        {
+#define DIMFUNC(DIM)                                                      \
+          case DIM:                                                       \
+            {                                                             \
+              const DomainT<DIM,T> bounds = space;                        \
+              wait_on = Internal::LgEvent(                                \
+              bounds.fill(dsts, no_requests, initial_value, field_size)); \
+              break;                                                      \
+            }
+          LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+          default:
+            assert(false);
+        }
+        if (wait_on.exists())
+          wait_on.wait();
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
+                                                    Memory memory,
+                                                    const Domain &space,
+                                                    const void *initial_value,
+                                                    size_t alignment,
+                                                    bool fortran_order_dims)
+      : field_size(fs), dims(d)
+    //--------------------------------------------------------------------------
+    {
+      assert(dims > 0);
+      assert(dims <= LEGION_MAX_DIM);
+      const std::vector<size_t> field_sizes(1, field_size);
+      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
+      Runtime *runtime = Runtime::get_runtime();
+      Realm::InstanceLayoutGeneric *layout = NULL;
+      switch (dims)
+      {
+#define DIMFUNC(DIM)                                                        \
+        case DIM:                                                           \
+          {                                                                 \
+            const DomainT<DIM,T> bounds =                                   \
+                      runtime->get_index_space_domain<DIM,T>(               \
+                          IndexSpaceT<DIM,T>(space));                       \
+            int dim_order[DIM];                                             \
+            if (fortran_order_dims)                                         \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = i;                                           \
+            }                                                               \
+            else                                                            \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = DIM - (i+1);                                 \
+            }                                                               \
+            layout = Realm::InstanceLayoutGeneric::choose_instance_layout(  \
+                bounds, constraints, dim_order);                            \
+            break;                                                          \
+          }
+        LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+        default:
+          assert(false);
+      }
+      layout->alignment_reqd = alignment;
+      instance = runtime->create_task_local_instance(memory, layout);
+      if (initial_value != NULL)
+      {
+        Realm::ProfilingRequestSet no_requests; 
+        std::vector<Realm::CopySrcDstField> dsts(1);
+        dsts[0].set_field(instance, 0/*field id*/, field_size);
+        Internal::LgEvent wait_on;
+        switch (dims)
+        {
+#define DIMFUNC(DIM)                                                      \
+          case DIM:                                                       \
+            {                                                             \
+              const DomainT<DIM,T> bounds =                               \
+                      runtime->get_index_space_domain<DIM,T>(             \
+                          IndexSpaceT<DIM,T>(space));                     \
+              wait_on = Internal::LgEvent(                                \
+              bounds.fill(dsts, no_requests, initial_value, field_size)); \
+              break;                                                      \
+            }
+          LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+          default:
+            assert(false);
+        }
+        if (wait_on.exists())
+          wait_on.wait();
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
+                                                    Memory memory,
+                                                    IndexSpace space,
+                                                    const void *initial_value,
+                                                    size_t alignment,
+                                                    bool fortran_order_dims)
+      : field_size(fs), dims(d)
+    //--------------------------------------------------------------------------
+    {
+      assert(dims > 0);
+      assert(dims <= LEGION_MAX_DIM);
+      const std::vector<size_t> field_sizes(1, field_size);
+      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
+      Runtime *runtime = Runtime::get_runtime();
+      Realm::InstanceLayoutGeneric *layout = NULL;
+      switch (dims)
+      {
+#define DIMFUNC(DIM)                                                        \
+        case DIM:                                                           \
+          {                                                                 \
+            const DomainT<DIM,T> bounds = space;                            \
+            int dim_order[DIM];                                             \
+            if (fortran_order_dims)                                         \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = i;                                           \
+            }                                                               \
+            else                                                            \
+            {                                                               \
+              for (int i = 0; i < DIM; i++)                                 \
+                dim_order[i] = DIM - (i+1);                                 \
+            }                                                               \
+            layout = Realm::InstanceLayoutGeneric::choose_instance_layout(  \
+                bounds, constraints, dim_order);                            \
+            break;                                                          \
+          }
+        LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+        default:
+          assert(false);
+      }
+      layout->alignment_reqd = alignment;
+      instance = runtime->create_task_local_instance(memory, layout);
+      if (initial_value != NULL)
+      {
+        Realm::ProfilingRequestSet no_requests; 
+        std::vector<Realm::CopySrcDstField> dsts(1);
+        dsts[0].set_field(instance, 0/*field id*/, field_size);
+        Internal::LgEvent wait_on;
+        switch (dims)
+        {
+#define DIMFUNC(DIM)                                                      \
+          case DIM:                                                       \
+            {                                                             \
+              const DomainT<DIM,T> bounds = space;                        \
+              wait_on = Internal::LgEvent(                                \
+              bounds.fill(dsts, no_requests, initial_value, field_size)); \
+              break;                                                      \
+            }
+          LEGION_FOREACH_N(DIMFUNC)
+#undef DIMFUNC
+          default:
+            assert(false);
+        }
+        if (wait_on.exists())
+          wait_on.wait();
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T> template<typename FT, int DIM>
+    UntypedDeferredBuffer<T>::UntypedDeferredBuffer(
+                                            const DeferredBuffer<FT,DIM,T> &rhs)
+      : instance(rhs.instance), field_size(sizeof(FT)), dims(DIM)
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T> template<typename FT, int DIM, bool BC>
+    inline UntypedDeferredBuffer<T>::operator 
+                                         DeferredBuffer<FT,DIM,T,BC>(void) const
+    //--------------------------------------------------------------------------
+    {
+      static_assert(0 < DIM, "Only positive dimensions allowed");
+      static_assert(DIM <= LEGION_MAX_DIM, "Exceeded LEGION_MAX_DIM");
+      assert(field_size == sizeof(FT));
+      assert(dims == DIM);
+      DeferredBuffer<FT,DIM,T> result;
+      result.instance = instance;
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
+      const bool is_compatible = 
+        Realm::AffineAccessor<FT,DIM,T>::is_compatible(instance, 0/*field id*/);
+#endif
+      assert(is_compatible);
+#endif
+      // We can make the accessor
+      result.accessor = Realm::AffineAccessor<FT,DIM,T>(instance,0/*field id*/);
+#ifdef LEGION_BOUNDS_CHECKS
+      result.bounds = instance.template get_indexspace<DIM,T>();
+#endif
+      return result;
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T>
+    inline void UntypedDeferredBuffer<T>::destroy(void)
+    //--------------------------------------------------------------------------
+    {
+      Runtime *runtime = Runtime::get_runtime();
+      runtime->destroy_task_local_instance(instance);
+      instance = Realm::RegionInstance::NO_INST;
+      field_size = 0;
+      dims = 0;
     }
 
     //--------------------------------------------------------------------------
@@ -17818,7 +19049,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     template<typename PT, unsigned DIM>
     inline void ArgumentMap::set_point_arg(const PT point[DIM], 
-                                           const TaskArgument &arg, 
+                                           const UntypedBuffer &arg, 
                                            bool replace/*= false*/)
     //--------------------------------------------------------------------------
     {
@@ -18058,7 +19289,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    inline void TaskLauncher::set_predicate_false_result(TaskArgument arg)
+    inline void TaskLauncher::set_predicate_false_result(UntypedBuffer arg)
     //--------------------------------------------------------------------------
     {
       predicate_false_result = arg;
@@ -18152,7 +19383,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    inline void IndexTaskLauncher::set_predicate_false_result(TaskArgument arg)
+    inline void IndexTaskLauncher::set_predicate_false_result(UntypedBuffer arg)
     //--------------------------------------------------------------------------
     {
       predicate_false_result = arg;
@@ -18526,7 +19757,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    inline void FillLauncher::set_argument(TaskArgument arg)
+    inline void FillLauncher::set_argument(UntypedBuffer arg)
     //--------------------------------------------------------------------------
     {
       argument = arg;
@@ -18584,7 +19815,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    inline void IndexFillLauncher::set_argument(TaskArgument arg)
+    inline void IndexFillLauncher::set_argument(UntypedBuffer arg)
     //--------------------------------------------------------------------------
     {
       argument = arg;
@@ -20123,11 +21354,12 @@ namespace Legion {
                                      LogicalRegionT<DIM1,T1> domain_parent,
                                      FieldID domain_fid,
                                      IndexSpaceT<DIM2,T2> range,
-                                     MapperID id, MappingTagID tag)
+                                     MapperID id, MappingTagID tag,
+                                     UntypedBuffer marg)
     //--------------------------------------------------------------------------
     {
       create_association(ctx, LogicalRegion(domain), 
-          LogicalRegion(domain_parent), domain_fid, IndexSpace(range), id, tag);
+         LogicalRegion(domain_parent),domain_fid,IndexSpace(range),id,tag,marg);
     }
 
     //--------------------------------------------------------------------------
@@ -20139,14 +21371,15 @@ namespace Legion {
                                       LogicalRegionT<DIM2,T2> range,
                                       LogicalRegionT<DIM2,T2> range_parent,
                                       FieldID range_fid,
-                                      MapperID id, MappingTagID tag)
+                                      MapperID id, MappingTagID tag,
+                                      UntypedBuffer marg)
     //--------------------------------------------------------------------------
     {
       create_bidirectional_association(ctx, LogicalRegion(domain),
                                        LogicalRegion(domain_parent), domain_fid,
                                        LogicalRegion(range),
                                        LogicalRegion(range_parent), 
-                                       range_fid, id, tag);
+                                       range_fid, id, tag, marg);
     }
 
     //--------------------------------------------------------------------------
@@ -20266,12 +21499,12 @@ namespace Legion {
                                     FieldID fid,
                                     IndexSpaceT<COLOR_DIM,COLOR_T> color_space,
                                     Color color, MapperID id, MappingTagID tag,
-                                    PartitionKind part_kind)
+                                    PartitionKind part_kind, UntypedBuffer marg)
     //--------------------------------------------------------------------------
     {
       return IndexPartitionT<DIM,T>(create_partition_by_field(ctx,
             LogicalRegion(handle), LogicalRegion(parent), fid, 
-            IndexSpace(color_space), color, id, tag, part_kind));
+            IndexSpace(color_space), color, id, tag, part_kind, marg));
     }
 
     //--------------------------------------------------------------------------
@@ -20284,13 +21517,13 @@ namespace Legion {
                               FieldID fid, // type: Point<DIM2,COORD_T2>
                               IndexSpaceT<COLOR_DIM,COLOR_T> color_space,
                               PartitionKind part_kind, Color color,
-                              MapperID id, MappingTagID tag)
+                              MapperID id, MappingTagID tag, UntypedBuffer marg)
     //--------------------------------------------------------------------------
     {
       return IndexPartitionT<DIM2,T2>(create_partition_by_image(ctx,
         IndexSpace(handle), LogicalPartition(projection),
         LogicalRegion(parent), fid, IndexSpace(color_space), part_kind, 
-        color, id, tag));
+        color, id, tag, marg));
     }
 
     //--------------------------------------------------------------------------
@@ -20304,13 +21537,13 @@ namespace Legion {
                               FieldID fid, // type: Point<DIM2,COORD_T2>
                               IndexSpaceT<COLOR_DIM,COLOR_T> color_space,
                               PartitionKind part_kind, Color color,
-                              MapperID id, MappingTagID tag)
+                              MapperID id, MappingTagID tag, UntypedBuffer marg)
     //--------------------------------------------------------------------------
     {
       return IndexPartitionT<DIM2,T2>(create_partition_by_image_range(ctx,
         IndexSpace(handle), LogicalPartition(projection),
         LogicalRegion(parent), fid, IndexSpace(color_space), part_kind, 
-        color, id, tag));
+        color, id, tag, marg));
     }
 
     //--------------------------------------------------------------------------
@@ -20323,13 +21556,13 @@ namespace Legion {
                               FieldID fid, // type: Point<DIM2,COORD_T2>
                               IndexSpaceT<COLOR_DIM,COLOR_T> color_space,
                               PartitionKind part_kind, Color color,
-                              MapperID id, MappingTagID tag)
+                              MapperID id, MappingTagID tag, UntypedBuffer marg)
     //--------------------------------------------------------------------------
     {
       return IndexPartitionT<DIM1,T1>(create_partition_by_preimage(ctx, 
         IndexPartition(projection), LogicalRegion(handle),
         LogicalRegion(parent), fid, IndexSpace(color_space), part_kind, 
-        color, id, tag));
+        color, id, tag, marg));
     }
 
     //--------------------------------------------------------------------------
@@ -20343,13 +21576,13 @@ namespace Legion {
                               FieldID fid, // type: Rect<DIM2,COORD_T2>
                               IndexSpaceT<COLOR_DIM,COLOR_T> color_space,
                               PartitionKind part_kind, Color color,
-                              MapperID id, MappingTagID tag)
+                              MapperID id, MappingTagID tag, UntypedBuffer marg)
     //--------------------------------------------------------------------------
     {
       return IndexPartitionT<DIM1,T1>(create_partition_by_preimage_range(ctx,
         IndexPartition(projection), LogicalRegion(handle), 
         LogicalRegion(parent), fid, IndexSpace(color_space), part_kind, 
-        color, id, tag));
+        color, id, tag, marg));
     } 
 
     //--------------------------------------------------------------------------
@@ -21865,7 +23098,7 @@ namespace LegionRuntime {
     LEGION_DEPRECATED("Use the Legion namespace instance instead.")
     typedef Legion::FieldAllocator FieldAllocator;
     LEGION_DEPRECATED("Use the Legion namespace instance instead.")
-    typedef Legion::TaskArgument TaskArgument;
+    typedef Legion::UntypedBuffer TaskArgument;
     LEGION_DEPRECATED("Use the Legion namespace instance instead.")
     typedef Legion::ArgumentMap ArgumentMap;
     LEGION_DEPRECATED("Use the Legion namespace instance instead.")

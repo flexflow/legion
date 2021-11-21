@@ -45,6 +45,7 @@ namespace Realm {
     HIDX_COMPREPLY_BASE = GEX_AM_INDEX_BASE,
     HIDX_COMPREPLY_MAX = HIDX_COMPREPLY_BASE + 16,
     HIDX_LONG_AS_GET,
+    HIDX_PUT_HEADER,
     HIDX_SHORTREQ_BASE,
     HIDX_SHORTREQ_MAX = HIDX_SHORTREQ_BASE + 16,
     HIDX_MEDREQ_BASE,
@@ -674,7 +675,7 @@ namespace Realm {
       (void) pair;
       (void) nargs;
 #endif
-      return gex_AM_MaxRequestMedium(pair, tgt_ep_index,
+      return gex_AM_MaxRequestMedium(pair, tgt_rank,
 				     lc_opt, flags, nargs);
     }
 
@@ -1158,7 +1159,7 @@ namespace Realm {
       (void) pair;
       (void) nargs;
 #endif
-      return gex_AM_MaxRequestLong(pair, tgt_ep_index,
+      return gex_AM_MaxRequestLong(pair, tgt_rank,
 				   lc_opt, flags, nargs);
     }
 
@@ -1576,6 +1577,71 @@ namespace Realm {
 
   ////////////////////////////////////////////////////////////////////////
   //
+  // put header
+  //
+
+  namespace GASNetEXHandlers {
+
+    // send the header of a long after the payload has been delivered via
+    //  an RMA put: header is sent as a medium
+    int send_request_put_header(gex_EP_t src_ep,
+                                gex_Rank_t tgt_rank,
+                                gex_EP_Index_t tgt_ep_index,
+                                gex_AM_Arg_t arg0,
+                                const void *hdr, size_t hdr_bytes,
+                                uintptr_t dest_addr, size_t payload_bytes,
+                                gex_Event_t *lc_opt, gex_Flags_t flags)
+    {
+#ifdef DEBUG_REALM
+      if(((flags & GEX_FLAG_IMMEDIATE) != 0) &&
+	 check_artificial_backpressure())
+	return 1;
+#endif
+
+      gex_TM_t pair = gex_TM_Pair(src_ep, tgt_ep_index);
+
+      return gex_AM_RequestMedium5(pair, tgt_rank,
+				   HIDX_PUT_HEADER,
+				   const_cast<void *>(hdr), hdr_bytes,
+				   lc_opt,
+				   flags,
+				   arg0,
+                                   ARG_LO(dest_addr),
+                                   ARG_HI(dest_addr),
+				   ARG_LO(payload_bytes),
+				   ARG_HI(payload_bytes));
+    }
+
+  }
+
+  static void handle_request_put_header(gex_Token_t token,
+                                        const void *buf, size_t nbytes,
+                                        gex_AM_Arg_t arg0, gex_AM_Arg_t arg1,
+                                        gex_AM_Arg_t arg2, gex_AM_Arg_t arg3,
+                                        gex_AM_Arg_t arg4)
+  {
+    gex_Token_Info_t info;
+    // ask for srcrank and ep - both are required, so no need to check result
+    gex_Token_Info(token, &info, (GEX_TI_SRCRANK | GEX_TI_EP));
+
+    // ask the ep for the 'internal' pointer
+    void *cdata = gex_EP_QueryCData(info.gex_ep);
+    GASNetEXInternal *internal = static_cast<GASNetEXInternal *>(cdata);
+
+    uintptr_t payload_ptr = ARG_COMBINE(arg1, arg2);
+    size_t payload_bytes = ARG_COMBINE(arg3, arg4);
+
+    gex_AM_Arg_t comp = internal->handle_long(info.gex_srcrank, arg0,
+                                              buf, nbytes,
+                                              reinterpret_cast<const void *>(payload_ptr),
+                                              payload_bytes);
+    if(comp != 0)
+      gex_AM_ReplyShort1(token, HIDX_COMPREPLY(1), 0/*flags*/, comp);
+  }
+
+
+  ////////////////////////////////////////////////////////////////////////
+  //
   // batched requests
   //
 
@@ -1602,7 +1668,7 @@ namespace Realm {
       //  nonconst?
       void *ncdata = const_cast<void *>(data);
 
-      unsigned nargs = 1;
+      unsigned nargs = 2;
 
       return gex_AM_PrepareRequestMedium(pair, tgt_rank,
 					 ncdata,
@@ -1611,18 +1677,18 @@ namespace Realm {
     }
 
     void commit_request_batch(gex_AM_SrcDesc_t srcdesc,
-			      gex_AM_Arg_t arg0,
+			      gex_AM_Arg_t arg0, gex_AM_Arg_t cksum,
 			      size_t data_bytes)
     {
-      gex_AM_CommitRequestMedium1(srcdesc, HIDX_BATCHREQ,
-				  data_bytes, arg0);
+      gex_AM_CommitRequestMedium2(srcdesc, HIDX_BATCHREQ,
+				  data_bytes, arg0, cksum);
     }
 
   };
 
   void handle_request_batch(gex_Token_t token,
 			    const void *buf, size_t nbytes,
-			    gex_AM_Arg_t arg0)
+			    gex_AM_Arg_t arg0, gex_AM_Arg_t cksum)
   {
     gex_Token_Info_t info;
     // ask for srcrank and ep - both are required, so no need to check result
@@ -1636,7 +1702,7 @@ namespace Realm {
     assert(arg0 <= MAX_BATCH_SIZE);
     gex_AM_Arg_t comps[MAX_BATCH_SIZE];
 
-    size_t ncomp = internal->handle_batch(info.gex_srcrank, arg0,
+    size_t ncomp = internal->handle_batch(info.gex_srcrank, arg0, cksum,
 					  buf, nbytes, comps);
 
     switch(ncomp) {
@@ -1825,9 +1891,14 @@ namespace Realm {
 	GEX_FLAG_AM_REQUEST|GEX_FLAG_AM_MEDIUM, 9,
 	nullptr, "handle_request_rget" },
 
+      { HIDX_PUT_HEADER,
+	reinterpret_cast<void(*)()>(handle_request_put_header),
+	GEX_FLAG_AM_REQUEST|GEX_FLAG_AM_MEDIUM, 5,
+	nullptr, "handle_request_put_header" },
+
       { HIDX_BATCHREQ,
 	reinterpret_cast<void(*)()>(handle_request_batch),
-	GEX_FLAG_AM_REQUEST|GEX_FLAG_AM_MEDIUM, 1,
+	GEX_FLAG_AM_REQUEST|GEX_FLAG_AM_MEDIUM, 2,
 	nullptr, "handle_request_batch" }
     };
 
