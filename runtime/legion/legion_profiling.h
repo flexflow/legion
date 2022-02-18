@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,6 +76,8 @@ namespace Legion {
       struct MetaDesc {
       public:
         unsigned kind;
+        bool message;
+        bool ordered_vc;
         const char *name;
       };
       struct OpDesc {

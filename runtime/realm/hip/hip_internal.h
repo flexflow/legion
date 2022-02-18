@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *                Los Alamos National Laboratory
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,7 @@
 #include <hip/hip_runtime.h>
 #ifdef __HIP_PLATFORM_NVCC__
 #define hipDeviceScheduleBlockingSync CU_CTX_SCHED_BLOCKING_SYNC 
-typedef CUdeviceptr hipDeviceCharptr_t;
+typedef char* hipDeviceCharptr_t;
 #else
 typedef char* hipDeviceCharptr_t;
 #endif
@@ -34,6 +34,7 @@ typedef char* hipDeviceCharptr_t;
 #include "realm/mem_impl.h"
 #include "realm/bgwork.h"
 #include "realm/transfer/channel.h"
+#include "realm/transfer/ib_memory.h"
 
 #define CHECK_CUDART(cmd) do { \
   hipError_t ret = (cmd); \
@@ -63,15 +64,21 @@ namespace Realm {
   
   namespace Hip {
 
-    struct GPUInfo {
+    struct GPUInfo 
+#ifdef REALM_USE_HIP_HIJACK
+      : public hipDeviceProp_t
+#endif
+    {
       int index;  // index used by HIP runtime
       hipDevice_t device;
 
+#ifdef REALM_USE_HIP_HIJACK
       static const size_t MAX_NAME_LEN = 64;
       char name[MAX_NAME_LEN];
 
-      int compute_major, compute_minor;
-      size_t total_mem;
+      int major, minor;
+      size_t totalGlobalMem;
+#endif
       std::set<hipDevice_t> peers;  // other GPUs we can do p2p copies with
     };
 
@@ -88,8 +95,11 @@ namespace Realm {
     class GPUStream;
     class GPUFBMemory;
     class GPUZCMemory;
+    class GPUFBIBMemory;
     class GPU;
     class HipModule;
+
+    extern HipModule *hip_module_singleton;
 
     // an interface for receiving completion notification for a GPU operation
     //  (right now, just copies)
@@ -315,7 +325,7 @@ namespace Realm {
     //  with when async work needs doing
     class GPUStream {
     public:
-      GPUStream(GPU *_gpu, GPUWorker *_worker);
+      GPUStream(GPU *_gpu, GPUWorker *_worker, int rel_priority = 0);
       ~GPUStream(void);
 
       GPU *get_gpu(void) const;
@@ -403,7 +413,7 @@ namespace Realm {
       bool process_streams(bool sleep_on_empty);
       
       Mutex lock;
-      CondVar condvar;
+      Mutex::CondVar condvar;
       
       typedef CircularQueue<GPUStream *, 16> ActiveStreamQueue;
       ActiveStreamQueue active_streams;
@@ -459,7 +469,7 @@ namespace Realm {
       int device_id;
       int max_threads;
       Mutex mutex;
-      CondVar condvar;
+      Mutex::CondVar condvar;
       bool shutdown_flag;
       GPUWorkFence::FenceList fences;
       int total_threads, sleeping_threads, syncing_threads;
@@ -477,8 +487,7 @@ namespace Realm {
     class GPU {
     public:
       GPU(HipModule *_module, GPUInfo *_info, GPUWorker *worker,
-	        int _device_id,
-          int num_streams);
+	  int _device_id);
       ~GPU(void);
 
       void push_context(void);
@@ -494,7 +503,7 @@ namespace Realm {
 #endif
 
       void create_processor(RuntimeImpl *runtime, size_t stack_size);
-      void create_fb_memory(RuntimeImpl *runtime, size_t size);
+      void create_fb_memory(RuntimeImpl *runtime, size_t size, size_t ib_size);
 
       void create_dma_channels(Realm::RuntimeImpl *r);
 
@@ -585,6 +594,7 @@ namespace Realm {
       GPUStream *find_stream(hipStream_t stream) const;
       GPUStream *get_null_task_stream(void) const;
       GPUStream *get_next_task_stream(bool create = false);
+      GPUStream *get_next_d2d_stream();
     protected:
       hipModule_t load_hip_module(const void *data);
 
@@ -594,10 +604,11 @@ namespace Realm {
       GPUWorker *worker;
       GPUProcessor *proc;
       GPUFBMemory *fbmem;
+      GPUFBIBMemory *fb_ibmem;
 
       //hipCtx_t context;
       int device_id;
-      hipDeviceCharptr_t fbmem_base;
+      hipDeviceCharptr_t fbmem_base, fb_ibmem_base;
 
       // which system memories have been registered and can be used for cuMemcpyAsync
       std::set<Memory> pinned_sysmems;
@@ -609,11 +620,27 @@ namespace Realm {
       GPUStream *host_to_device_stream;
       GPUStream *device_to_host_stream;
       GPUStream *device_to_device_stream;
+      std::vector<GPUStream *> device_to_device_streams;
       std::vector<GPUStream *> peer_to_peer_streams; // indexed by target
       std::vector<GPUStream *> task_streams;
-      atomic<unsigned> next_stream;
+      atomic<unsigned> next_task_stream, next_d2d_stream;
 
       GPUEventPool event_pool;
+
+      // this can technically be different in each context (but probably isn't
+      //  in practice)
+      int least_stream_priority, greatest_stream_priority;
+
+      struct HipIpcMapping {
+        NodeID owner;
+        Memory mem;
+        uintptr_t local_base;
+        uintptr_t address_offset; // add to convert from original to local base
+      };
+      std::vector<HipIpcMapping> hipipc_mappings;
+      std::map<NodeID, GPUStream *> hipipc_streams;
+
+      const HipIpcMapping *find_ipc_mapping(Memory mem) const;
 
 #ifdef REALM_USE_HIP_HIJACK
       std::map<const FatBin *, hipModule_t> device_modules;
@@ -748,6 +775,16 @@ namespace Realm {
       NetworkSegment local_segment;
     };
     
+    class GPUFBIBMemory : public IBMemory {
+    public:
+      GPUFBIBMemory(Memory _me, GPU *_gpu, hipDeviceCharptr_t _base, size_t _size);
+
+    public:
+      GPU *gpu;
+      hipDeviceCharptr_t base;
+      NetworkSegment local_segment;
+    };
+    
     class GPURequest;
 
     class GPUCompletionEvent : public GPUCompletionNotification {
@@ -798,7 +835,8 @@ namespace Realm {
       bool progress_xd(GPUChannel *channel, TimeLimit work_until);
 
     private:
-      std::vector<GPU *> src_gpus, dst_gpus;;
+      std::vector<GPU *> src_gpus, dst_gpus;
+      std::vector<bool> dst_is_ipc;
     };
 
     class GPUChannel : public SingleXDQChannel<GPUChannel, GPUXferDes> {
@@ -868,6 +906,30 @@ namespace Realm {
       friend class GPUfillXferDes;
 
       GPU* gpu;
+    };
+
+    // active messages for establishing cuda ipc mappings
+
+    struct HipIpcRequest {
+#ifdef REALM_ON_LINUX
+      long hostid;  // POSIX hostid
+#endif
+
+      static void handle_message(NodeID sender, const HipIpcRequest& args,
+                                 const void *data, size_t datalen);
+    };
+
+    struct HipIpcResponse {
+      unsigned count;
+
+      static void handle_message(NodeID sender, const HipIpcResponse& args,
+                                 const void *data, size_t datalen);
+    };
+
+    struct HipIpcRelease {
+
+      static void handle_message(NodeID sender, const HipIpcRelease& args,
+                                 const void *data, size_t datalen);
     };
 
   }; // namespace Hip

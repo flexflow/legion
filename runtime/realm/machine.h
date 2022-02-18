@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -219,6 +219,9 @@ namespace Realm {
       // restrict to those whose best affinity is to the given processor or memory
       MemoryQuery& best_affinity_to(Processor p, int bandwidth_weight = 1, int latency_weight = 0);
       MemoryQuery& best_affinity_to(Memory m, int bandwidth_weight = 1, int latency_weight = 0);
+
+      // restrict to those whose total capacity is at least 'min_size' bytes
+      MemoryQuery& has_capacity(size_t min_bytes);
 
       // results - a query may be executed multiple times - when the machine model is
       //  dynamic, there is no guarantee that the results of any two executions will be consistent

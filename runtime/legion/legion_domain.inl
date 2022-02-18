@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -227,11 +227,25 @@ namespace Legion {
     : dim(DIM)
   //----------------------------------------------------------------------------
   {
+    static_assert(std::is_integral<T>::value, "must be integral type");
     for (int i = 0; i < DIM; i++)
-      point_data[i] = rhs[i];
+      point_data[i] = check_for_overflow<T>(rhs[i]);
     // Zero out the rest of the buffer to avoid uninitialized warnings
     for (int i = DIM; i < MAX_POINT_DIM; i++)
       point_data[i] = 0;
+  }
+
+  //----------------------------------------------------------------------------
+  template<typename T> __CUDA_HD__
+  /*static*/ inline coord_t DomainPoint::check_for_overflow(const T &value)
+  //----------------------------------------------------------------------------
+  {
+    static_assert(std::is_same<coord_t,long long>::value,"coord_t changed");
+    constexpr bool CHECK =
+      std::is_unsigned<T>::value && (sizeof(T) >= sizeof(coord_t));
+    assert(!CHECK || 
+        (((unsigned long long)value) <= ((unsigned long long)LLONG_MAX)));
+    return coord_t(value);
   }
 
   //----------------------------------------------------------------------------
@@ -250,6 +264,7 @@ namespace Legion {
   inline DomainPoint::operator Point<DIM,T>(void) const
   //----------------------------------------------------------------------------
   {
+    static_assert(std::is_integral<T>::value, "must be integral type");
     assert(DIM == dim);
     Point<DIM,T> result;
     for (int i = 0; i < DIM; i++)
@@ -264,6 +279,18 @@ namespace Legion {
     dim = rhs.dim;
     for (int i = 0; i < dim; i++)
       point_data[i] = rhs.point_data[i];
+    return *this;
+  }
+
+  //----------------------------------------------------------------------------
+  template<int DIM, typename T> __CUDA_HD__
+  inline DomainPoint& DomainPoint::operator=(const Point<DIM,T> &rhs)
+  //----------------------------------------------------------------------------
+  {
+    static_assert(std::is_integral<T>::value, "must be integral type");
+    dim = DIM;
+    for (int i = 0; i < DIM; i++)
+      point_data[i] = check_for_overflow<T>(rhs[i]);
     return *this;
   }
 
@@ -669,25 +696,25 @@ namespace Legion {
 
   //----------------------------------------------------------------------------
   __CUDA_HD__ inline Domain::Domain(void)
-    : is_id(0), dim(0)
+    : is_id(0), is_type(0), dim(0)
   //----------------------------------------------------------------------------
   {
-    for (int i = 0; i < MAX_RECT_DIM*2; i++)
+    for (int i = 0; i < 2*MAX_RECT_DIM; i++)
       rect_data[i] = 0;
   }
 
   //----------------------------------------------------------------------------
   __CUDA_HD__ inline Domain::Domain(const Domain &other)
-    : is_id(other.is_id), dim(other.dim)
+    : is_id(other.is_id), is_type(is_id > 0 ? other.is_type : 0), dim(other.dim)
   //----------------------------------------------------------------------------
   {
-    for (int i = 0; i < MAX_RECT_DIM*2; i++)
+    for (int i = 0; i < 2*MAX_RECT_DIM; i++)
       rect_data[i] = other.rect_data[i];
   }
 
   //----------------------------------------------------------------------------
   __CUDA_HD__ inline Domain::Domain(const DomainPoint &lo,const DomainPoint &hi)
-    : is_id(0), dim(lo.dim)
+    : is_id(0), is_type(0), dim(lo.dim)
   //----------------------------------------------------------------------------
   {
     assert(lo.dim == hi.dim);
@@ -695,30 +722,57 @@ namespace Legion {
       rect_data[i] = lo[i];
     for (int i = 0; i < dim; i++)
       rect_data[i+dim] = hi[i];
+    // Zero-out the other values in rect data to keep compilers happy
+    for (int i = 2*dim; i < 2*MAX_RECT_DIM; i++)
+      rect_data[i] = 0;
   }
 
   //----------------------------------------------------------------------------
   template<int DIM, typename T> __CUDA_HD__
   inline Domain::Domain(const Rect<DIM,T> &other)
-    : is_id(0), dim(DIM)
+    : is_id(0), is_type(0), dim(DIM)
   //----------------------------------------------------------------------------
   {
+    static_assert(std::is_integral<T>::value, "must be integral type");
     for (int i = 0; i < DIM; i++)
-      rect_data[i] = other.lo[i];
+      rect_data[i] = check_for_overflow<T>(other.lo[i]);
     for (int i = 0; i < DIM; i++)
-      rect_data[DIM+i] = other.hi[i];
+      rect_data[DIM+i] = check_for_overflow<T>(other.hi[i]);
+    // Zero-out the other values in rect data to keep compilers happy
+    for (int i = 2*DIM; i < 2*MAX_RECT_DIM; i++)
+      rect_data[i] = 0;
+  }
+
+  //----------------------------------------------------------------------------
+  template<typename T> __CUDA_HD__
+  /*static*/ inline coord_t Domain::check_for_overflow(const T &value)
+  //----------------------------------------------------------------------------
+  {
+    static_assert(std::is_same<coord_t,long long>::value, "coord_t changed");
+    constexpr bool CHECK =
+      std::is_unsigned<T>::value && (sizeof(T) >= sizeof(coord_t));
+    assert(!CHECK ||
+        (((unsigned long long)value) <= ((unsigned long long)LLONG_MAX)));
+    return coord_t(value);
   }
 
   //----------------------------------------------------------------------------
   template<int DIM, typename T> __CUDA_HD__
   inline Domain::Domain(const DomainT<DIM,T> &other)
-    : is_id(other.sparsity.id), dim(DIM)
+    : is_id(other.sparsity.id),
+      is_type((is_id > 0) ? 
+          Internal::NT_TemplateHelper::template encode_tag<DIM,T>() : 0),
+      dim(DIM)
   //----------------------------------------------------------------------------
   {
+    static_assert(std::is_integral<T>::value, "must be integral type");
     for (int i = 0; i < DIM; i++)
-      rect_data[i] = other.bounds.lo[i];
+      rect_data[i] = check_for_overflow<T>(other.bounds.lo[i]);
     for (int i = 0; i < DIM; i++)
-      rect_data[DIM+i] = other.bounds.hi[i];
+      rect_data[DIM+i] = check_for_overflow<T>(other.bounds.hi[i]);
+    // Zero-out the other values in rect data to keep compilers happy
+    for (int i = 2*DIM; i < 2*MAX_RECT_DIM; i++)
+      rect_data[i] = 0;
   }
 
   //----------------------------------------------------------------------------
@@ -726,9 +780,46 @@ namespace Legion {
   //----------------------------------------------------------------------------
   {
     is_id = other.is_id;
+    // Like this for backwards compatibility
+    is_type = (is_id > 0) ? other.is_type : 0;
     dim = other.dim;
-    for(int i = 0; i < MAX_RECT_DIM*2; i++)
+    for(int i = 0; i < 2*dim; i++)
       rect_data[i] = other.rect_data[i];
+    return *this;
+  }
+
+  //----------------------------------------------------------------------------
+  template<int DIM, typename T> __CUDA_HD__
+  inline Domain& Domain::operator=(const Rect<DIM,T> &other)
+  //----------------------------------------------------------------------------
+  {
+    static_assert(std::is_integral<T>::value, "must be integral type");
+    is_id = 0;
+    is_type = 0;
+    dim = DIM;
+    for (int i = 0; i < DIM; i++)
+      rect_data[i] = check_for_overflow<T>(other.lo[i]);
+    for (int i = 0; i < DIM; i++)
+      rect_data[DIM+i] = check_for_overflow<T>(other.hi[i]);
+    return *this;
+  }
+
+  //----------------------------------------------------------------------------
+  template<int DIM, typename T> __CUDA_HD__
+  inline Domain& Domain::operator=(const DomainT<DIM,T> &other)
+  //----------------------------------------------------------------------------
+  {
+    static_assert(std::is_integral<T>::value, "must be integral type");
+    dim = DIM;
+    is_id = other.sparsity.id;
+    if (is_id > 0)
+      is_type = Internal::NT_TemplateHelper::template encode_tag<DIM,T>();
+    else
+      is_type = 0;
+    for (int i = 0; i < DIM; i++)
+      rect_data[i] = check_for_overflow<T>(other.bounds.lo[i]);
+    for (int i = 0; i < DIM; i++)
+      rect_data[DIM+i] = check_for_overflow<T>(other.bounds.hi[i]);
     return *this;
   }
 
@@ -737,6 +828,7 @@ namespace Legion {
   //----------------------------------------------------------------------------
   {
     if(is_id != rhs.is_id) return false;
+    // No need to check type tag, equivalence subsumed by sparsity id test
     if(dim != rhs.dim) return false;
     for(int i = 0; i < dim; i++) {
       if(rect_data[i*2] != rhs.rect_data[i*2]) return false;
@@ -758,6 +850,7 @@ namespace Legion {
   {
     if(is_id < rhs.is_id) return true;
     if(is_id > rhs.is_id) return false;
+    // No need to check type tag, subsumed by sparsity id test
     if(dim < rhs.dim) return true;
     if(dim > rhs.dim) return false;
     for(int i = 0; i < 2*dim; i++) {
@@ -834,6 +927,7 @@ namespace Legion {
   inline Rect<DIM,T> Domain::bounds(void) const
   //----------------------------------------------------------------------------
   {
+    static_assert(std::is_integral<T>::value, "must be integral type");
     assert(DIM == dim);
     Rect<DIM,T> result;
     for (int i = 0; i < DIM; i++)
@@ -890,6 +984,7 @@ namespace Legion {
   inline Domain::operator Rect<DIM,T>(void) const
   //----------------------------------------------------------------------------
   {
+    static_assert(std::is_integral<T>::value, "must be integral type");
     assert(DIM == dim);
 #if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
     if (is_id != 0)
@@ -909,9 +1004,17 @@ namespace Legion {
   inline Domain::operator DomainT<DIM,T>(void) const
   //----------------------------------------------------------------------------
   {
+    static_assert(std::is_integral<T>::value, "must be integral type");
     assert(DIM == dim);
     DomainT<DIM,T> result;
-    result.sparsity.id = is_id;
+    if (is_id > 0)
+    {
+      TypeTag type = Internal::NT_TemplateHelper::template encode_tag<DIM,T>();
+      assert(is_type == type); 
+      result.sparsity.id = is_id;
+    }
+    else
+      result.sparsity.id = 0;
     for (int i = 0; i < DIM; i++)
       result.bounds.lo[i] = rect_data[i];
     for (int i = 0; i < DIM; i++)
@@ -945,31 +1048,41 @@ namespace Legion {
   }
 
   //----------------------------------------------------------------------------
-  inline bool Domain::contains(DomainPoint point) const
+  inline bool Domain::contains(const DomainPoint &point) const
   //----------------------------------------------------------------------------
   {
     assert(point.get_dim() == dim);
     bool result = false;
-    switch (dim)
+    if (is_id > 0)
     {
+      ContainsFunctor functor(*this, point, result);
+      Internal::NT_TemplateHelper::demux<ContainsFunctor>(is_type, &functor);
+      return result;
+    }
+    else
+    {
+      switch (dim)
+      {
 #define DIMFUNC(DIM) \
-      case DIM: \
-        { \
-          Point<DIM,coord_t> p1 = point; \
-          DomainT<DIM,coord_t> is1 = *this; \
-          result = is1.contains(p1); \
-          break; \
-        }
-      LEGION_FOREACH_N(DIMFUNC)
+        case DIM: \
+          { \
+            Point<DIM,coord_t> p1 = point; \
+            Rect<DIM,coord_t> rect = *this; \
+            result = rect.contains(p1); \
+            break; \
+          }
+        LEGION_FOREACH_N(DIMFUNC)
 #undef DIMFUNC
-      default:
-        assert(false);
+        default:
+          assert(false);
+      }
     }
     return result;
   }
 
   //----------------------------------------------------------------------------
-  __CUDA_HD__ inline bool Domain::contains_bounds_only(DomainPoint point) const
+  __CUDA_HD__ inline bool Domain::contains_bounds_only(
+                                                 const DomainPoint &point) const
   //----------------------------------------------------------------------------
   {
     assert(point.get_dim() == dim);
@@ -999,20 +1112,30 @@ namespace Legion {
   inline size_t Domain::get_volume(void) const
   //----------------------------------------------------------------------------
   {
-    switch (dim)
+    if (dense())
     {
+      switch (dim)
+      {
 #define DIMFUNC(DIM) \
-      case DIM: \
-        { \
-          DomainT<DIM,coord_t> is = *this; \
-          return is.volume(); \
-        }
-      LEGION_FOREACH_N(DIMFUNC)
+        case DIM: \
+          { \
+            Rect<DIM,coord_t> rect = *this; \
+            return rect.volume(); \
+          }
+        LEGION_FOREACH_N(DIMFUNC)
 #undef DIMFUNC
-      default:
-        assert(false);
+        default:
+          assert(false);
+      }
+      return 0;
     }
-    return 0;
+    else
+    {
+      size_t result = 0;
+      VolumeFunctor functor(*this, result);
+      Internal::NT_TemplateHelper::demux<VolumeFunctor>(is_type, &functor);
+      return result;
+    }
   }
 
   //----------------------------------------------------------------------------
@@ -1042,28 +1165,33 @@ namespace Legion {
   //----------------------------------------------------------------------------
   {
     assert(dim == other.dim);
-    Realm::ProfilingRequestSet dummy_requests;
-    switch (dim)
+    if ((is_id > 0) || (other.is_id > 0))
     {
+      assert((is_type == other.is_type) ||
+              (is_type == 0) || (other.is_type == 0));
+      Domain result;
+      IntersectionFunctor functor(*this, other, result);
+      Internal::NT_TemplateHelper::demux<IntersectionFunctor>(
+          (is_id > 0) ? is_type : other.is_type, &functor); 
+      return result;
+    }
+    else
+    {
+      switch (dim)
+      {
 #define DIMFUNC(DIM) \
-      case DIM: \
-        { \
-          DomainT<DIM,coord_t> is1 = *this; \
-          DomainT<DIM,coord_t> is2 = other; \
-          DomainT<DIM,coord_t> temp; \
-          Internal::LgEvent wait_on( \
-            DomainT<DIM,coord_t>::compute_intersection(is1,is2, \
-                                                  temp,dummy_requests)); \
-          if (wait_on.exists()) \
-            wait_on.wait(); \
-          DomainT<DIM,coord_t> result = temp.tighten(); \
-          temp.destroy(); \
-          return Domain(result); \
-        }
-      LEGION_FOREACH_N(DIMFUNC)
+        case DIM: \
+          { \
+            Rect<DIM,coord_t> rect1 = *this; \
+            Rect<DIM,coord_t> rect2 = other; \
+            Rect<DIM,coord_t> result = rect1.intersection(rect2); \
+            return Domain(result); \
+          }
+        LEGION_FOREACH_N(DIMFUNC)
 #undef DIMFUNC
-      default:
-        assert(false);
+        default:
+          assert(false);
+      }
     }
     return Domain::NO_DOMAIN;
   }
@@ -1079,9 +1207,9 @@ namespace Legion {
 #define DIMFUNC(DIM) \
       case DIM: \
         { \
-          Rect<DIM,coord_t> is1 = *this; \
-          Rect<DIM,coord_t> is2(p, p); \
-          Rect<DIM,coord_t> result = is1.union_bbox(is2); \
+          Rect<DIM,coord_t> rect1 = *this; \
+          Rect<DIM,coord_t> rect2(p, p); \
+          Rect<DIM,coord_t> result = rect1.union_bbox(rect2); \
           return Domain(result); \
         }
       LEGION_FOREACH_N(DIMFUNC)
@@ -1107,38 +1235,47 @@ namespace Legion {
 
   //----------------------------------------------------------------------------
   inline Domain::DomainPointIterator::DomainPointIterator(const Domain &d)
+    : is_type(d.is_type)
   //----------------------------------------------------------------------------
   {
     p.dim = d.get_dim();
-    switch(p.get_dim()) {
+    if (d.dense())
+    {
+      // We've just got a rect so we can do the dumb thing
+      switch (p.get_dim()) {
 #define DIMFUNC(DIM) \
-    case DIM: \
-      { \
-        Realm::IndexSpaceIterator<DIM,coord_t> *is_itr = \
-          new (is_iterator) Realm::IndexSpaceIterator<DIM,coord_t>(d); \
-        is_valid = is_itr->valid; \
-        if (is_valid) { \
-          Realm::PointInRectIterator<DIM,coord_t> *rect_itr = \
-            new (rect_iterator) \
-              Realm::PointInRectIterator<DIM,coord_t>(is_itr->rect); \
-          rect_valid = rect_itr->valid; \
-          p = Point<DIM,coord_t>(rect_itr->p); \
-        } else { \
-          rect_valid = false; \
-        } \
-        break; \
-      }
-    LEGION_FOREACH_N(DIMFUNC)
+      case DIM: \
+        { \
+          Rect<DIM,coord_t> rect = d; \
+          Realm::PointInRectIterator<DIM,coord_t> rect_itr(rect); \
+          static_assert(sizeof(rect_itr) <= sizeof(rect_iterator), "very bad");\
+          rect_valid = rect_itr.valid; \
+          if (rect_valid) { \
+            is_valid = true; \
+            p = rect_itr.p; \
+            memcpy(rect_iterator, &rect_itr, sizeof(rect_itr)); \
+          } \
+          break; \
+        }
+      LEGION_FOREACH_N(DIMFUNC)
 #undef DIMFUNC
-    default:
-      assert(0);
-    };
+      default:
+        assert(0);
+      };
+    }
+    else
+    {
+      IteratorInitFunctor functor(d, *this);
+      Internal::NT_TemplateHelper::demux<IteratorInitFunctor>(d.is_type, 
+                                                              &functor);
+    }
   }
 
   //----------------------------------------------------------------------------
   inline Domain::DomainPointIterator::DomainPointIterator(
                                                 const DomainPointIterator &rhs)
-    : p(rhs.p), is_valid(rhs.is_valid), rect_valid(rhs.rect_valid)
+    : p(rhs.p), is_type(rhs.is_type), is_valid(rhs.is_valid),
+      rect_valid(rhs.rect_valid)
   //----------------------------------------------------------------------------
   {
     memcpy(is_iterator, rhs.is_iterator,
@@ -1152,36 +1289,35 @@ namespace Legion {
   //----------------------------------------------------------------------------
   {
     assert(is_valid && rect_valid);
-    switch(p.get_dim()) {
+    // Step the rect iterator first and see if we can just get a new point
+    // from the rect iterator without needing to demux
+    switch (p.get_dim()) 
+    {
 #define DIMFUNC(DIM) \
-    case DIM: \
-      { \
-        Realm::PointInRectIterator<DIM,coord_t> *rect_itr = \
-          (Realm::PointInRectIterator<DIM,coord_t>*)(void *)rect_iterator; \
-        rect_itr->step(); \
-        rect_valid = rect_itr->valid; \
-        if (!rect_valid) { \
-          Realm::IndexSpaceIterator<DIM,coord_t> *is_itr = \
-            (Realm::IndexSpaceIterator<DIM,coord_t>*)(void *)is_iterator; \
-          is_itr->step(); \
-          is_valid = is_itr->valid; \
-          if (is_valid) { \
-            new (rect_itr) \
-              Realm::PointInRectIterator<DIM,coord_t>(is_itr->rect); \
-            p = Point<DIM,coord_t>(rect_itr->p); \
-            rect_valid = rect_itr->valid; \
-          } else { \
-            rect_valid = false; \
+      case DIM: \
+        { \
+          Realm::PointInRectIterator<DIM,coord_t> rect_itr; \
+          memcpy(&rect_itr, rect_iterator, sizeof(rect_itr)); \
+          rect_itr.step(); \
+          rect_valid = rect_itr.valid; \
+          if (rect_valid) { \
+            p = rect_itr.p; \
+            memcpy(rect_iterator, &rect_itr, sizeof(rect_itr)); \
           } \
-        } else { \
-          p = Point<DIM,coord_t>(rect_itr->p); \
-        } \
-        break; \
-      }
-      LEGION_FOREACH_N(DIMFUNC)
+          break; \
+        }
+        LEGION_FOREACH_N(DIMFUNC)
 #undef DIMFUNC
-    default:
-      assert(0);
+      default:
+        assert(0);
+    }
+    if (!rect_valid && (is_type > 0))
+    {
+      // If we had a sparsity map, try to step the index space iterator
+      // to the next rectangle using a demux
+      IteratorStepFunctor functor(*this);
+      Internal::NT_TemplateHelper::demux<IteratorStepFunctor>(is_type,
+                                                              &functor);
     }
     return is_valid && rect_valid;
   }
@@ -1210,6 +1346,7 @@ namespace Legion {
       sizeof(Realm::IndexSpaceIterator<MAX_RECT_DIM,coord_t>));
     memcpy(rect_iterator, rhs.rect_iterator,
       sizeof(Realm::PointInRectIterator<MAX_RECT_DIM,coord_t>));
+    is_type = rhs.is_type;
     is_valid = rhs.is_valid;
     rect_valid = rhs.rect_valid;
     return *this;
@@ -1235,7 +1372,7 @@ namespace Legion {
   }
 
   //----------------------------------------------------------------------------
-  inline std::ostream& operator<<(std::ostream &os, Domain d)
+  inline std::ostream& operator<<(std::ostream &os, const Domain &d)
   //----------------------------------------------------------------------------
   {
     switch(d.get_dim()) {

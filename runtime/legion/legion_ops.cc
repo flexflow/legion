@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -5570,7 +5570,7 @@ namespace Legion {
       // Trigger our local completion event contingent upon 
       // the copy/reduce across being done
       ApEvent copy_post, copy_pre;
-      LegionVector<IndirectRecord>::aligned src_records, dst_records;
+      LegionVector<IndirectRecord> src_records, dst_records;
       ApUserEvent indirect_done, indirect_pre;
       if (gather_targets != NULL)
       {
@@ -5799,7 +5799,7 @@ namespace Legion {
         const unsigned index, const ApEvent local_pre, const ApEvent local_post,
         const PhysicalTraceInfo &trace_info, const InstanceSet &insts,
         const IndexSpace space, const DomainPoint &key,
-        LegionVector<IndirectRecord>::aligned &records, const bool sources)
+        LegionVector<IndirectRecord> &records, const bool sources)
     //--------------------------------------------------------------------------
     {
       IndexSpaceNode *node = runtime->forest->get_node(space);
@@ -7507,10 +7507,13 @@ namespace Legion {
                                                       unsigned idx2)
     //--------------------------------------------------------------------------
     {
+#ifdef DEBUG_LEGION
       bool is_src1 = idx1 < src_requirements.size();
       bool is_src2 = idx2 < src_requirements.size();
       unsigned actual_idx1 = is_src1 ? idx1 : (idx1 - src_requirements.size());
       unsigned actual_idx2 = is_src2 ? idx2 : (idx2 - src_requirements.size());
+      // For now we only issue this warning in debug mode, eventually we'll
+      // turn this on only when users request it when we do our debug refactor
       REPORT_LEGION_WARNING(LEGION_WARNING_REGION_REQUIREMENTS_INDEX,
                       "Region requirements %d and %d of index copy %lld in "
                       "parent task %s (UID %lld) are potentially interfering. "
@@ -7523,6 +7526,7 @@ namespace Legion {
                       "for this index task launch then everything is good.",
                       actual_idx1, actual_idx2, unique_op_id, 
                       parent_ctx->get_task_name(), parent_ctx->get_unique_id());
+#endif
       interfering_requirements.insert(std::pair<unsigned,unsigned>(idx1,idx2));
     }
 
@@ -7531,7 +7535,7 @@ namespace Legion {
         const unsigned index, const ApEvent local_pre, const ApEvent local_post,
         const PhysicalTraceInfo &trace_info, const InstanceSet &insts,
         const IndexSpace space, const DomainPoint &key,
-        LegionVector<IndirectRecord>::aligned &records, const bool sources)
+        LegionVector<IndirectRecord> &records, const bool sources)
     //--------------------------------------------------------------------------
     {
       if (sources && !collective_src_indirect_points)
@@ -7951,7 +7955,7 @@ namespace Legion {
         const unsigned index, const ApEvent local_pre, const ApEvent local_post,
         const PhysicalTraceInfo &trace_info, const InstanceSet &insts,
         const IndexSpace space, const DomainPoint &key,
-        LegionVector<IndirectRecord>::aligned &records, const bool sources)
+        LegionVector<IndirectRecord> &records, const bool sources)
     //--------------------------------------------------------------------------
     {
       // Exchange via the owner
@@ -8974,7 +8978,10 @@ namespace Legion {
       // We can remove the reference to the allocator once we are
       // done with all of our free operations
       if ((allocator != NULL) && allocator->remove_reference())
+      {
+        allocator->free_from_runtime();
         delete allocator;
+      }
       deactivate_operation();
       sub_partitions.clear();
       free_fields.clear();
@@ -9193,7 +9200,8 @@ namespace Legion {
 #ifdef DEBUG_LEGION
             assert(deletion_req_indexes.empty());
 #endif
-            runtime->forest->destroy_index_space(index_space, preconditions);
+            runtime->forest->destroy_index_space(index_space, 
+                        runtime->address_space, preconditions);
             if (!sub_partitions.empty())
             {
               for (std::vector<IndexPartition>::const_iterator it = 
@@ -10488,7 +10496,7 @@ namespace Legion {
       if (!projections.empty())
       {
         for (LegionMap<RegionTreeNode*,FieldMaskSet<RefProjectionSummary> >::
-              aligned::const_iterator pit = projections.begin(); pit !=
+              const_iterator pit = projections.begin(); pit !=
               projections.end(); pit++)
         {
           for (FieldMaskSet<RefProjectionSummary>::const_iterator it =
@@ -19450,11 +19458,42 @@ namespace Legion {
 #ifdef DEBUG_LEGION
             assert(pointer.is_valid);
 #endif
-            result = node->create_external_instance(pointer.memory, pointer.ptr,
-                                                    ilg, ready_event);
+            Realm::ExternalMemoryResource res(pointer.ptr, ilg->bytes_used,
+                                              false /*!read_only*/);
+
+            const Memory memory = res.suggested_memory();
+            if ((memory != pointer.memory) && pointer.memory.exists())
+            {
+              const char *mem_names[] = {
+#define MEM_NAMES(name, desc) desc,
+                REALM_MEMORY_KINDS(MEM_NAMES) 
+#undef MEM_NAMES
+              };
+              REPORT_LEGION_WARNING(LEGION_WARNING_IMPRECISE_ATTACH_MEMORY,
+                  "WARNING: %s memory " IDFMT " in pointer constraint for "
+                  "attach operation %lld in parent task %s (UID %lld) differs "
+                  "from the Realm-suggested %s memory " IDFMT " for the "
+                  "external instance. Legion is going to use the more precise "
+                  "Realm-specified memory. Please make sure that you do not "
+                  "have any code in your application or your mapper that "
+                  "relies on the instance being in the originally specified "
+                  "memory. To silence this warning you can pass in a NO_MEMORY "
+                  "to the pointer constraint.",
+                  mem_names[pointer.memory.kind()], pointer.memory.id,
+                  unique_op_id, parent_ctx->get_task_name(),
+                  parent_ctx->get_unique_id(), mem_names[memory.kind()],
+                  memory.id);
+            }
+            // No profiling for these kinds of instances currently
+            Realm::ProfilingRequestSet requests;
+            ready_event = ApEvent(PhysicalInstance::create_external_instance(
+                                          result, memory, ilg, res, requests));
             constraints = layout_constraint_set;
-            constraints.specialized_constraint = 
+            constraints.specialized_constraint =
               SpecializedConstraint(LEGION_AFFINE_SPECIALIZE);
+            constraints.memory_constraint = MemoryConstraint(memory.kind());
+            constraints.pointer_constraint = 
+              PointerConstraint(memory, pointer.ptr);
             break;
           }
         default:
@@ -20448,8 +20487,6 @@ namespace Legion {
                   parent_ctx->get_task_name(), parent_ctx->get_unique_id(),
                   launcher.handles.size(), launcher.pointers.size())
             layout_constraint_set.pointer_constraint = launcher.pointers[index];
-            layout_constraint_set.memory_constraint = MemoryConstraint(
-                layout_constraint_set.pointer_constraint.memory.kind());
             // Construct the region requirement for this task
             requirement = RegionRequirement(launcher.handles[index], 
                 LEGION_WRITE_DISCARD, LEGION_EXCLUSIVE, launcher.parent);

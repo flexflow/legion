@@ -1,4 +1,4 @@
--- Copyright 2021 Stanford University
+-- Copyright 2022 Stanford University
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
@@ -13,8 +13,6 @@
 -- limitations under the License.
 
 import "regent"
-
-local c = terralib.includec("stdio.h")
 
 -- A field space (fspace) is a collection of fields, similar to a
 -- C struct.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2021 Stanford University
+# Copyright 2022 Stanford University
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -390,7 +390,8 @@ def run_test_external1(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, 
     makefile = os.path.join(root_dir, 'apps/Makefile.template')
     cmd([make_exe, '-f', makefile, '-C', stencil_dir, '-j', str(thread_count)], env=stencil_env)
     stencil = os.path.join(stencil_dir, 'stencil')
-    cmd([stencil, '4', '10', '1000'], timelimit=timelimit)
+    # HACK: work around stencil mapper issue with -ll:ext_sysmem 0
+    cmd([stencil, '4', '10', '1000', '-ll:ext_sysmem', '0'], timelimit=timelimit)
 
     # SNAP
     # Contact: Mike Bauer <mbauer@nvidia.com>
@@ -767,6 +768,7 @@ def build_cmake(root_dir, tmp_dir, env, thread_count,
 
 def build_legion_prof_rs(root_dir, tmp_dir, env):
     cmd(['cargo', 'install',
+         '--locked',
          '--path', os.path.join(root_dir, 'tools', 'legion_prof_rs'),
          '--root', tmp_dir],
         env=env)

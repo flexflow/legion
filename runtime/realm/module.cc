@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -142,6 +142,11 @@ namespace Realm {
   void Module::create_code_translators(RuntimeImpl *runtime)
   {
     log_module.debug() << "module " << name << " create_code_translators";
+  }
+
+  void Module::pre_detach_cleanup(void)
+  {
+    log_module.debug() << "module " << name << " pre-detach cleanup";
   }
 
   void Module::cleanup(void)

@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -798,6 +798,18 @@ namespace Realm {
     //  to deal with the case where 'import threading' never got called
     (interpreter->api->PyRun_SimpleString)("__import__('threading').current_thread()");
 
+    // Python > 3.9.7 requires the main thread to collapse the threading module,
+    // but we're in a non-master thread when tearing down the interpreter here,
+    // which leads to a hang caused by bpo-1596321. As a workaround, we forcibly
+    // unlock the master thread's shutdown lock, so that when Python's threading
+    // module tries to lock and unlock it to emulate the thread join, there won't
+    // be a deadlock. See this GitHub issue for the detail:
+    //   https://github.com/nv-legate/cunumeric/issues/187
+    (interpreter->api->PyRun_SimpleString)(
+      "[__import__('threading').main_thread()._tstate_lock.release() "
+      "if v.major >= 3 and (v.minor > 9 or (v.minor == 9 and v.micro > 7)) else None "
+      "for v in (__import__('sys').version_info,)]");
+
     delete interpreter;
     interpreter = 0;
     master_thread = 0;
@@ -912,7 +924,7 @@ namespace Realm {
     sched->remove_task_queue(&group->task_queue);
   }
 
-  void LocalPythonProcessor::register_task(Processor::TaskFuncID func_id,
+  bool LocalPythonProcessor::register_task(Processor::TaskFuncID func_id,
                                            CodeDescriptor& codedesc,
                                            const ByteArrayRef& user_data)
   {
@@ -922,6 +934,8 @@ namespace Realm {
     treg->codedesc = new CodeDescriptor(codedesc);
     treg->user_data = user_data;
     sched->add_internal_task(treg);
+    // TODO: failure wouldn't be detected until later...
+    return true;
   }
 
   void LocalPythonProcessor::execute_task(Processor::TaskFuncID func_id,

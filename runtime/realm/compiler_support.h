@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 // REALM_COMPILER_IS_GCC   - defined if compiler is really gcc
 // REALM_COMPILER_IS_CLANG - defined if compiler is clang
 // REALM_COMPILER_IS_ICC   - defined if compiler is icc
+// REALM_COMPILER_IS_PGI   - defined if compiler is pgcc/nvcc
 // REALM_COMPILER_IS_MSVC  - defined if compiler is MSVC
 // REALM_COMPILER_IS_NVCC  - defined if compiler is really nvcc
 // REALM_COMPILER_IS_HIPCC - defined if compiler is hipcc
@@ -34,6 +35,8 @@
   #define REALM_COMPILER_IS_NVCC
 #elif defined(__ICC)
   #define REALM_COMPILER_IS_ICC
+#elif defined(__PGIC__)
+  #define REALM_COMPILER_IS_PGI
 #elif defined(__clang__)
   #define REALM_COMPILER_IS_CLANG
 #elif defined(_MSC_VER)

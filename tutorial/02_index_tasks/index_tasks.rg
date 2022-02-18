@@ -1,4 +1,4 @@
--- Copyright 2021 Stanford University
+-- Copyright 2022 Stanford University
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
@@ -14,11 +14,11 @@
 
 import "regent"
 
-local c = terralib.includec("stdio.h")
+local format = require("std/format")
 
 -- Return types may be inferred. The following task returns an int.
 task double_of(i : int, x : int)
-  c.printf("Hello world from task %d!\n", i)
+  format.println("Hello world from task {}!", i)
   return 2*x
 end
 

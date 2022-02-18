@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -294,6 +294,9 @@ namespace Realm {
     ExternalMemoryResource(uintptr_t _base, size_t _size_in_bytes, bool _read_only);
     ExternalMemoryResource(void *_base, size_t _size_in_bytes);
     ExternalMemoryResource(const void *_base, size_t _size_in_bytes);
+
+    // returns the suggested memory in which this resource should be created
+    Memory suggested_memory() const;
 
     virtual ExternalInstanceResource *clone(void) const;
 

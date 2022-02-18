@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,10 +46,8 @@ namespace Realm {
     };
 
     class RegionInstanceImpl {
-    protected:
+    public:
       // RegionInstanceImpl creation/deletion is handled by MemoryImpl
-      friend class MemoryImpl;
-      friend class LocalManagedMemory;
       RegionInstanceImpl(RegionInstance _me, Memory _memory);
       ~RegionInstanceImpl(void);
 

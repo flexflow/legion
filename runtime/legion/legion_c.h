@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University
+/* Copyright 2022 Stanford University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -152,6 +152,7 @@ extern "C" {
    */
   typedef struct legion_domain_t {
     realm_id_t is_id;
+    legion_type_tag_t is_type;
     int dim;
 // Hack: Python CFFI isn't smart enough to do constant folding so we
 // have to do this by hand here. To avoid this bitrotting, at least

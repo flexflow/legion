@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -177,6 +177,19 @@ namespace Realm {
       typedef IntrusiveList<InternalTask, REALM_PMTA_USE(InternalTask,tl_link), Mutex> TaskList;
     };
 
+    // a common extension for processors is to provide some context for
+    //  running tasks - this can be done by subclassing and overriding
+    //  `execute_task`, but simple cases can be handled with
+    //  TaskContextManagers
+    class TaskContextManager {
+    public:
+      // create a context for the specified task - the value returned will
+      //  be provided to the call to destroy_context
+      virtual void *create_context(Task *task) const = 0;
+
+      virtual void destroy_context(Task *task, void *context) const = 0;
+    };
+
     // a task scheduler in which one or more worker threads execute tasks from one
     //  or more task queues
     // once given a task, a worker must complete it before taking on new work
@@ -196,6 +209,10 @@ namespace Realm {
       virtual void configure_bgworker(BackgroundWorkManager *manager,
 				      long long max_timeslice,
 				      int numa_domain);
+
+      // add a context manager - each new one "wraps" the previous ones,
+      //  constructing its context after them and destroying before
+      void add_task_context(const TaskContextManager *_manager);
 
       virtual void start(void) = 0;
       virtual void shutdown(void) = 0;
@@ -236,6 +253,8 @@ namespace Realm {
       // threads that block while holding a scheduler lock go here instead
       std::set<Thread *> spinning_workers;
 
+      std::vector<const TaskContextManager *> context_managers;
+
       // internal task list is NOT guarded by the main mutex
       InternalTask::TaskList internal_tasks;
 
@@ -267,28 +286,32 @@ namespace Realm {
 	// called whenever new work is available
 	void increment_counter(void);
 
-	long long read_counter(void) const;
+	uint64_t read_counter(void) const;
 
 	// returns true if there is new work since the old_counter value was read
 	// this is non-blocking, and may be called while holding another lock
-	bool check_for_work(long long old_counter);
+	bool check_for_work(uint64_t old_counter);
 
-	// waits until new work arrives - this will possibly take the counter lock and 
-	// sleep, so should not be called while holding another lock
-	void wait_for_work(long long old_counter);
+	// waits until new work arrives - this will possibly go to sleep,
+	//  so should not be called while holding another lock
+	void wait_for_work(uint64_t old_counter);
 
       protected:
-	// 64-bit counters are used to avoid dealing with wrap-around cases
-	// consider trying to fit in 32 to use futexes?
-	atomic<long long> counter, wait_value;
+	// 64-bit counter is used to avoid dealing with wrap-around cases
+        // bottom bits count the number of sleepers, but a max of 2^56 operations
+        //   is still a lot
+        static const unsigned SLEEPER_BITS = 8;
+	atomic<uint64_t> counter;
 	atomic<bool> *interrupt_flag;
-	Mutex mutex;
-	CondVar condvar;
+
+        // doorbell list popping is protected with a lock-free delegating mutex
+        DelegatingMutex db_mutex;
+        DoorbellList db_list;
       };
 	
       WorkCounter work_counter;
 
-      virtual void wait_for_work(long long old_work_counter);
+      virtual void wait_for_work(uint64_t old_work_counter);
 
       // most of our work counter updates are going to come from priority queues, so a little
       //  template-fu here...
@@ -330,18 +353,18 @@ namespace Realm {
       int cfg_max_active_workers;
     };
 
-    inline long long ThreadedTaskScheduler::WorkCounter::read_counter(void) const
+    inline uint64_t ThreadedTaskScheduler::WorkCounter::read_counter(void) const
     {
-      // just return the counter value
-      return counter.load_acquire();
+      // just return the counter value with the sleeper bits removed
+      return (counter.load_acquire() >> SLEEPER_BITS);
     }
 
     // returns true if there is new work since the old_counter value was read
     // this is non-blocking, and may be called while holding another lock
-    inline bool ThreadedTaskScheduler::WorkCounter::check_for_work(long long old_counter)
+    inline bool ThreadedTaskScheduler::WorkCounter::check_for_work(uint64_t old_counter)
     {
       // test the counter value without synchronization
-      return (counter.load_acquire() > old_counter);
+      return (read_counter() != old_counter);
     }
 
 
@@ -375,7 +398,7 @@ namespace Realm {
       virtual void worker_wake(Thread *to_wake);
       virtual void worker_terminate(Thread *switch_to);
 
-      virtual void wait_for_work(long long old_work_counter);
+      virtual void wait_for_work(uint64_t old_work_counter);
 
       Processor proc;
       CoreReservation &core_rsrv;
@@ -383,8 +406,8 @@ namespace Realm {
       std::set<Thread *> all_workers;
       std::set<Thread *> active_workers;
       std::set<Thread *> terminating_workers;
-      std::map<Thread *, CondVar *> sleeping_threads;
-      CondVar shutdown_condvar;
+      std::map<Thread *, Mutex::CondVar *> sleeping_threads;
+      Mutex::CondVar shutdown_condvar;
     };
 
 #ifdef REALM_USE_USER_THREADS
@@ -424,7 +447,7 @@ namespace Realm {
       virtual void worker_wake(Thread *to_wake);
       virtual void worker_terminate(Thread *switch_to);
 
-      virtual void wait_for_work(long long old_work_counter);
+      virtual void wait_for_work(uint64_t old_work_counter);
 
       Processor proc;
       CoreReservation &core_rsrv;
@@ -433,7 +456,7 @@ namespace Realm {
       std::set<Thread *> all_workers;
 
       int host_startups_remaining;
-      CondVar host_startup_condvar;
+      Mutex::CondVar host_startup_condvar;
 
     public:
       int cfg_num_host_threads;

@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,9 +42,7 @@
 #include "mathtypes/half.h"
 #endif
 
-template<typename T>
-
-using complex = COMPLEX_NAMESPACE::complex<T>;
+using COMPLEX_NAMESPACE::complex;
 
 #ifdef LEGION_USE_CUDA
 // We need fabs for situations where we process complex, floating point, and

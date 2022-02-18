@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -131,6 +131,10 @@ void find_memories(Processor cpu, Processor gpu,
   for (std::set<Memory>::const_iterator it = visible_mems.begin();
         it != visible_mems.end(); it++)
   {
+    // skip memories with no capacity for creating instances
+    if(it->capacity() == 0)
+      continue;
+
     Memory::Kind kind = it->kind();
     switch (kind)
     {

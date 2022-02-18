@@ -1,4 +1,4 @@
--- Copyright 2021 Stanford University
+-- Copyright 2022 Stanford University
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
@@ -91,6 +91,8 @@ local default_options = {
   ["cuda-2d-launch"] = true,
   ["cuda-licm"] = true,
   ["cuda-generate-cubin"] = false,
+  ["cuda-pretty-kernels"] = false,
+  ["cuda-dump-ptx"] = false,
 
   -- Miscellaneous, internal or special-purpose flags:
   ["aligned-instances"] = false,
@@ -104,6 +106,7 @@ local default_options = {
   ["override-demand-cuda"] = false,
   ["pretty"] = false,
   ["pretty-verbose"] = false,
+  ["no-debuginfo"] = false,
   ["layout-constraints"] = true,
   ["trace"] = true,
   ["validate"] = true,

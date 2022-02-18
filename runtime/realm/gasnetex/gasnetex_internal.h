@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -569,9 +569,9 @@ namespace Realm {
     GASNetEXInternal *internal;
     Mutex mutex;
     atomic<bool> shutdown_flag;  // set/cleared inside mutex, but tested outside
-    CondVar shutdown_cond;
+    Mutex::CondVar shutdown_cond;
     atomic<bool> pollwait_flag;  // set/cleared inside mutex, but tested outside
-    CondVar pollwait_cond;
+    Mutex::CondVar pollwait_cond;
     XmitSrcDestPair::XmitPairList critical_xpairs;
     GASNetEXEvent::EventList pending_events;
   };

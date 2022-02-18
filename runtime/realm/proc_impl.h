@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -70,7 +70,7 @@ namespace Realm {
 
       virtual void remove_from_group(ProcessorGroupImpl *group) = 0;
 
-      virtual void register_task(Processor::TaskFuncID func_id,
+      virtual bool register_task(Processor::TaskFuncID func_id,
 				 CodeDescriptor& codedesc,
 				 const ByteArrayRef& user_data);
 
@@ -134,7 +134,7 @@ namespace Realm {
 			      EventImpl::gen_t finish_gen,
                               int priority);
 
-      virtual void register_task(Processor::TaskFuncID func_id,
+      virtual bool register_task(Processor::TaskFuncID func_id,
 				 CodeDescriptor& codedesc,
 				 const ByteArrayRef& user_data);
 

@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -213,7 +213,7 @@ namespace Realm {
     PartitioningOperation::OpList op_list;
     PartitioningMicroOp::MicroOpList uop_list;
     Mutex mutex;
-    CondVar condvar;
+    Mutex::CondVar condvar;
     std::vector<Thread *> workers;
     bool work_advertised;
   };

@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -294,21 +294,20 @@ namespace Legion {
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
     void IndexSpaceExpression::construct_indirections_internal(
-                                     const std::vector<unsigned> &field_indexes,
-                                     const FieldID indirect_field,
-                                     const TypeTag indirect_type,
-                                     const bool is_range, 
-                                     const PhysicalInstance indirect_instance,
-                                     const LegionVector<
-                                            IndirectRecord>::aligned &records,
-                                     std::vector<CopyIndirection*> &indirects,
-                                     std::vector<unsigned> &indirect_indexes,
+                                    const std::vector<unsigned> &field_indexes,
+                                    const FieldID indirect_field,
+                                    const TypeTag indirect_type,
+                                    const bool is_range, 
+                                    const PhysicalInstance indirect_instance,
+                                    const LegionVector<IndirectRecord> &records,
+                                    std::vector<CopyIndirection*> &indirects,
+                                    std::vector<unsigned> &indirect_indexes,
 #ifdef LEGION_SPY
-                                     unsigned unique_indirections_identifier,
-                                     const ApEvent indirect_inst_event,
+                                    unsigned unique_indirections_identifier,
+                                    const ApEvent indirect_inst_event,
 #endif
-                                     const bool possible_out_of_range,
-                                     const bool possible_aliasing)
+                                    const bool possible_out_of_range,
+                                    const bool possible_aliasing)
     //--------------------------------------------------------------------------
     {
       // Sort instances into field sets and
@@ -322,13 +321,13 @@ namespace Legion {
               field_indexes.size());
 #endif
       // construct indirections for each field set
-      LegionList<FieldSet<IndirectRecord*> >::aligned field_sets;
+      LegionList<FieldSet<IndirectRecord*> > field_sets;
       record_sets.compute_field_sets(FieldMask(), field_sets);
       // Note that we might be appending to some existing indirections
       const unsigned offset = indirects.size();
       indirects.resize(offset+field_sets.size());
       unsigned index = 0;
-      for (LegionList<FieldSet<IndirectRecord*> >::aligned::const_iterator it =
+      for (LegionList<FieldSet<IndirectRecord*> >::const_iterator it =
             field_sets.begin(); it != field_sets.end(); it++, index++)
       {
         UnstructuredIndirectionHelper<DIM,T> helper(indirect_field, is_range,
@@ -357,7 +356,7 @@ namespace Legion {
         // Search through the set of indirections and find the one that is
         // set for this field
         index = 0;
-        for (LegionList<FieldSet<IndirectRecord*> >::aligned::const_iterator
+        for (LegionList<FieldSet<IndirectRecord*> >::const_iterator
               it = field_sets.begin(); it != field_sets.end(); it++, index++)
         {
           if (!it->set_mask.is_set(fidx))
@@ -392,7 +391,7 @@ namespace Legion {
         size_t num_records;
         derez.deserialize(num_records);
         std::set<IndirectRecord*> records;
-        LegionVector<IndirectRecord>::aligned record_allocs(num_records);
+        LegionVector<IndirectRecord> record_allocs(num_records);
         for (unsigned idx2 = 0; idx2 < num_records; idx2++)
         {
           IndirectRecord &record = record_allocs[idx2];
@@ -1126,11 +1125,11 @@ namespace Legion {
     {
       if (rects == NULL)
       {
-        if (!space.dense())
+        if (space.dense())
+          return this;
+        else
           // Make a new expression for the bounding box
           return new InstanceExpression<DIM,T>(&space.bounds,1/*size*/,context);
-        else // if we're dense we can just use ourselves
-          return this;
       }
       else
       {
@@ -1238,12 +1237,19 @@ namespace Legion {
       // No need to wait for the event, we know it is already triggered
       // because we called get_volume on this before we got here
       get_expr_index_space(&local_space, type_tag, true/*need tight result*/);
+      const DistributedID local_did = get_distributed_id();
+      size_t local_rect_count = 0;
+      KDNode<DIM,T,void> *local_tree = NULL;
       for (std::set<IndexSpaceExpression*>::const_iterator it =
             expressions.begin(); it != expressions.end(); it++)
       {
         // We can get duplicates here
         if ((*it) == this)
+        {
+          if (local_tree != NULL)
+            delete local_tree;
           return this;
+        }
         Realm::IndexSpace<DIM,T> other_space;
         // No need to wait for the event here either, we know that if it is
         // in the 'expressions' data structure then wait has already been
@@ -1258,8 +1264,12 @@ namespace Legion {
           // We know that things are the same here
           // Try to add the expression reference, we can race with deletions
           // here though so handle the case we're we can't add a reference
-          if ((*it)->try_add_canonical_reference())
+          if ((*it)->try_add_canonical_reference(local_did))
+          {
+            if (local_tree != NULL)
+              delete local_tree;
             return (*it);
+          }
           else
             continue;
         }
@@ -1282,110 +1292,106 @@ namespace Legion {
           // We know something important though here: we know that both
           // these sparsity maps contain the same number of points
           // Build lists of both sets of rectangles
-          std::vector<Rect<DIM,T> > local_rects, other_rects;
-          for (Realm::IndexSpaceIterator<DIM,T> itr(local_space);
-                itr.valid; itr.step())
-            local_rects.push_back(itr.rect);
-          for (Realm::IndexSpaceIterator<DIM,T> itr(other_space);
-                itr.valid; itr.step())
-            other_rects.push_back(itr.rect);
-          // We'll assume that the vector with more rectangles has
-          // smaller ones and will therefore test the small ones
-          // against the bigger ones, we might consider putting in
-          // an acceleration data strucutre here if these vectors
-          // are big enough
-          if (local_rects.size() <= other_rects.size())
+          KDNode<DIM,T> *other_tree = 
+            (*it)->get_sparsity_map_kd_tree()->as_kdnode<DIM,T>();
+          size_t other_rect_count = other_tree->count_rectangles();
+          if (local_rect_count == 0)
           {
-            std::vector<size_t> remaining_local(local_rects.size());
-            for (unsigned idx = 0; idx < local_rects.size(); idx++)
-              remaining_local[idx] = local_rects[idx].volume();
-            bool congruent = true;
-            for (typename std::vector<Rect<DIM,T> >::const_iterator it =
-                  other_rects.begin(); it != other_rects.end(); it++)
-            {
-              size_t remaining = it->volume();
-              for (unsigned idx = 0; idx < local_rects.size(); idx++)
-              {
-                // Can skip local rects that are fully covered
-                if (remaining_local[idx] == 0)
-                  continue;
-                const Rect<DIM,T> overlap = it->intersection(local_rects[idx]);
-                const size_t volume = overlap.volume();
-                if (volume == 0)
-                  continue;
+            // Count the number of rectangles in our sparsity map
+            for (Realm::IndexSpaceIterator<DIM,T> itr(local_space);
+                  itr.valid; itr.step())
+              local_rect_count++;
 #ifdef DEBUG_LEGION
-                assert(volume <= remaining);
-                assert(volume <= remaining_local[idx]);
+            assert(local_rect_count > 0);
 #endif
-                remaining_local[idx] -= volume;
-                remaining -= volume;
-                if (remaining == 0)
-                  break;
-              }
-              if (remaining != 0)
-              {
-                congruent = false;
-                break;
-              }
+          }
+          if (other_rect_count < local_rect_count)
+          {
+            // Build our KD tree if we haven't already
+            if (local_tree == NULL)
+            {
+              std::vector<Rect<DIM,T> > local_rects;
+              for (Realm::IndexSpaceIterator<DIM,T> itr(local_space);
+                    itr.valid; itr.step())
+                local_rects.push_back(itr.rect);
+              local_tree = new KDNode<DIM,T>(local_space.bounds, local_rects);
+            }
+            // Iterate the other rectangles and see if they are covered
+            bool congruent = true; 
+            for (Realm::IndexSpaceIterator<DIM,T> itr(other_space);
+                  itr.valid; itr.step())
+            {
+              const size_t intersecting_points = 
+                local_tree->count_intersecting_points(itr.rect);
+              if (intersecting_points == itr.rect.volume())
+                continue;
+              congruent = false;
+              break;
             }
             if (!congruent)
               continue;
-#ifdef DEBUG_LEGION
-            for (unsigned idx = 0; idx < local_rects.size(); idx++)
-              assert(remaining_local[idx] == 0);
-#endif
           }
           else
           {
-            std::vector<size_t> remaining_other(other_rects.size());
-            for (unsigned idx = 0; idx < other_rects.size(); idx++)
-              remaining_other[idx] = other_rects[idx].volume();
-            bool congruent = true;
-            for (typename std::vector<Rect<DIM,T> >::const_iterator it =
-                  local_rects.begin(); it != local_rects.end(); it++)
+            // Iterate our rectangles and see if they are all covered
+            bool congruent = true; 
+            for (Realm::IndexSpaceIterator<DIM,T> itr(local_space);
+                  itr.valid; itr.step())
             {
-              size_t remaining = it->volume();
-              for (unsigned idx = 0; idx < other_rects.size(); idx++)
-              {
-                // Can skip local rects that are fully covered
-                if (remaining_other[idx] == 0)
-                  continue;
-                const Rect<DIM,T> overlap = it->intersection(other_rects[idx]);
-                const size_t volume = overlap.volume();
-                if (volume == 0)
-                  continue;
-#ifdef DEBUG_LEGION
-                assert(volume <= remaining);
-                assert(volume <= remaining_other[idx]);
-#endif
-                remaining_other[idx] -= volume;
-                remaining -= volume;
-                if (remaining == 0)
-                  break;
-              }
-              if (remaining != 0)
-              {
-                congruent = false;
-                break;
-              }
+              const size_t intersecting_points = 
+                other_tree->count_intersecting_points(itr.rect);
+              if (intersecting_points == itr.rect.volume())
+                continue;
+              congruent = false;
+              break;
             }
             if (!congruent)
               continue;
-#ifdef DEBUG_LEGION
-            for (unsigned idx = 0; idx < other_rects.size(); idx++)
-              assert(remaining_other[idx] == 0);
-#endif
           }
-        }
+        }  
         // If we get here that means we are congruent
         // Try to add the expression reference, we can race with deletions
         // here though so handle the case we're we can't add a reference
-        if ((*it)->try_add_canonical_reference())
+        if ((*it)->try_add_canonical_reference(local_did))
+        {
+          if (local_tree != NULL)
+            delete local_tree;
           return (*it);
+        }
       }
       // Did not find any congruences so add ourself
       expressions.insert(this);
+      // If we have a KD tree we can save it for later congruence tests
+      if (local_tree != NULL)
+      {
+#ifdef DEBUG_LEGION
+        assert(sparsity_map_kd_tree == NULL); // should not have a kd tree yet
+#endif
+        sparsity_map_kd_tree = local_tree;
+      }
       return this;
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    inline KDTree* IndexSpaceExpression::get_sparsity_map_kd_tree_internal(void)
+    //--------------------------------------------------------------------------
+    {
+      if (sparsity_map_kd_tree != NULL)
+        return sparsity_map_kd_tree;
+      Realm::IndexSpace<DIM,T> local_space;
+      // No need to wait for the event, we know it is already triggered
+      // because we called get_volume on this before we got here
+      get_expr_index_space(&local_space, type_tag, true/*need tight result*/);
+#ifdef DEBUG_LEGION
+      assert(!local_space.dense());
+#endif
+      std::vector<Rect<DIM,T> > local_rects;
+      for (Realm::IndexSpaceIterator<DIM,T> itr(local_space);
+            itr.valid; itr.step())
+        local_rects.push_back(itr.rect);
+      sparsity_map_kd_tree = new KDNode<DIM,T>(local_space.bounds, local_rects);
+      return sparsity_map_kd_tree;
     }
 
     /////////////////////////////////////////////////////////////
@@ -1404,10 +1410,11 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    IndexSpaceOperationT<DIM,T>::IndexSpaceOperationT(OperationKind kind,
-                                  RegionTreeForest *ctx, Deserializer &derez)
-      : IndexSpaceOperation(NT_TemplateHelper::encode_tag<DIM,T>(),
-                            kind, ctx, derez), is_index_space_tight(false)
+    IndexSpaceOperationT<DIM,T>::IndexSpaceOperationT(RegionTreeForest *ctx, 
+        IndexSpaceExprID eid, DistributedID did, AddressSpaceID owner,
+        IndexSpaceOperation *origin, TypeTag tag, Deserializer &derez)
+      : IndexSpaceOperation(tag, ctx, eid, did, owner, origin),
+        is_index_space_tight(false)
     //--------------------------------------------------------------------------
     {
       // We can unpack the index space here directly
@@ -1424,7 +1431,7 @@ namespace Legion {
     IndexSpaceOperationT<DIM,T>::~IndexSpaceOperationT(void)
     //--------------------------------------------------------------------------
     {
-      if (this->origin_space == this->context->runtime->address_space)
+      if (this->owner_space == this->context->runtime->address_space)
       {
         this->realm_index_space.destroy(realm_index_space_ready);
         this->tight_index_space.destroy(tight_index_space_ready);
@@ -1535,15 +1542,22 @@ namespace Legion {
                                                       AddressSpaceID target)
     //--------------------------------------------------------------------------
     {
-      if (target == context->runtime->address_space)
+#ifdef DEBUG_LEGION
+      assert(this->is_valid());
+#endif
+      if (target == this->local_space)
       {
         rez.serialize<bool>(true/*local*/);
         rez.serialize(this);
+        this->add_base_expression_reference(LIVE_EXPR_REF);
       }
-      else if (target == origin_space)
+      else if (target == this->owner_space)
       {
         rez.serialize<bool>(true/*local*/);
         rez.serialize(origin_expr);
+        // Add a reference here that we'll remove after we've added a reference
+        // on the target space expression
+        this->add_base_expression_reference(REMOTE_DID_REF);
       }
       else
       {
@@ -1551,6 +1565,9 @@ namespace Legion {
         rez.serialize<bool>(false/*index space*/);
         rez.serialize(expr_id);
         rez.serialize(origin_expr);
+        // Add a reference here that we'll remove after we've added a reference
+        // on the target space expression
+        this->add_base_expression_reference(REMOTE_DID_REF);
       }
     }
 
@@ -1691,21 +1708,20 @@ namespace Legion {
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
     void IndexSpaceOperationT<DIM,T>::construct_indirections(
-                                     const std::vector<unsigned> &field_indexes,
-                                     const FieldID indirect_field,
-                                     const TypeTag indirect_type,
-                                     const bool is_range, 
-                                     const PhysicalInstance indirect_instance,
-                                     const LegionVector<
-                                            IndirectRecord>::aligned &records,
-                                     std::vector<CopyIndirection*> &indirects,
-                                     std::vector<unsigned> &indirect_indexes,
+                                    const std::vector<unsigned> &field_indexes,
+                                    const FieldID indirect_field,
+                                    const TypeTag indirect_type,
+                                    const bool is_range, 
+                                    const PhysicalInstance indirect_instance,
+                                    const LegionVector<IndirectRecord> &records,
+                                    std::vector<CopyIndirection*> &indirects,
+                                    std::vector<unsigned> &indirect_indexes,
 #ifdef LEGION_SPY
-                                     unsigned unique_indirections_identifier,
-                                     const ApEvent indirect_event,
+                                    unsigned unique_indirections_identifier,
+                                    const ApEvent indirect_event,
 #endif
-                                     const bool possible_out_of_range,
-                                     const bool possible_aliasing)
+                                    const bool possible_out_of_range,
+                                    const bool possible_aliasing)
     //--------------------------------------------------------------------------
     {
       construct_indirections_internal<DIM,T>(field_indexes, indirect_field,
@@ -1864,6 +1880,14 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
+    KDTree* IndexSpaceOperationT<DIM,T>::get_sparsity_map_kd_tree(void)
+    //--------------------------------------------------------------------------
+    {
+      return get_sparsity_map_kd_tree_internal<DIM,T>();
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
     IndexSpaceUnion<DIM,T>::IndexSpaceUnion(
                             const std::vector<IndexSpaceExpression*> &to_union,
                             RegionTreeForest *ctx)
@@ -1871,6 +1895,8 @@ namespace Legion {
         sub_expressions(to_union)
     //--------------------------------------------------------------------------
     {
+      // Add an resource ref that will be removed by the OperationCreator
+      this->add_base_resource_ref(REGION_TREE_REF);
       std::set<ApEvent> preconditions;
       std::vector<Realm::IndexSpace<DIM,T> > spaces(sub_expressions.size());
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
@@ -1880,8 +1906,8 @@ namespace Legion {
         assert(sub->get_canonical_expression(this->context) == sub);
 #endif
         // Add the parent and the reference
-        sub->add_parent_operation(this);
-        sub->add_expression_reference(1/*count*/, true/*expr tree*/);
+        sub->add_derived_operation(this);
+        sub->add_tree_expression_reference(this->did);
         // Then get the realm index space expression
         ApEvent precondition = sub->get_expr_index_space(
             &spaces[idx], this->type_tag, false/*need tight result*/);
@@ -1904,7 +1930,7 @@ namespace Legion {
       if (!this->realm_index_space_ready.has_triggered() || 
           !valid_event.has_triggered())
       {
-        IndexSpaceExpression::TightenIndexSpaceArgs args(this);
+        IndexSpaceExpression::TightenIndexSpaceArgs args(this, this);
         if (!this->realm_index_space_ready.has_triggered())
         {
           if (!valid_event.has_triggered())
@@ -1936,25 +1962,6 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    IndexSpaceUnion<DIM,T>::IndexSpaceUnion(
-                            const std::vector<IndexSpaceExpression*> &to_union,
-                            RegionTreeForest *ctx, Deserializer &derez)
-      : IndexSpaceOperationT<DIM,T>(IndexSpaceOperation::UNION_OP_KIND, 
-                                    ctx, derez), sub_expressions(to_union)
-    //--------------------------------------------------------------------------
-    {
-      // Just update the tree correctly with references
-      for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-      {
-        IndexSpaceExpression *sub = sub_expressions[idx];
-        // Add the parent and the reference
-        sub->add_parent_operation(this);
-        sub->add_expression_reference(1/*count*/, true/*expr tree*/);
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    template<int DIM, typename T>
     IndexSpaceUnion<DIM,T>::IndexSpaceUnion(const IndexSpaceUnion<DIM,T> &rhs)
       : IndexSpaceOperationT<DIM,T>(IndexSpaceOperation::UNION_OP_KIND, NULL)
     //--------------------------------------------------------------------------
@@ -1970,8 +1977,7 @@ namespace Legion {
     {
       // Remove references from our sub expressions
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-        if (sub_expressions[idx]->remove_expression_reference(1/*count*/,
-                                                        true/*exprtree*/))
+        if (sub_expressions[idx]->remove_tree_expression_reference(this->did))
           delete sub_expressions[idx];
     }
 
@@ -1995,41 +2001,41 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(target != this->context->runtime->address_space);
 #endif
-      this->record_remote_expression(target);
+      this->update_remote_instances(target);
       rez.serialize<bool>(false); // not an index space
-      if (target == this->origin_space)
-      {
-        rez.serialize<bool>(true); // local
-        rez.serialize(this->origin_expr);
-      }
-      else
-      {
-        rez.serialize<bool>(false); // not local
-        rez.serialize(this->type_tag); // unpacked by creator
-        rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
-        rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
-        // unpacked by IndexSpaceOperationT
-        Realm::IndexSpace<DIM,T> temp;
-        ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
-        rez.serialize(temp);
-        rez.serialize(ready);
-      }
+      rez.serialize(this->type_tag); // unpacked by creator
+      rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
+      rez.serialize(this->did); // unpacked by IndexSpaceOperation
+      rez.serialize(this->owner_space); // unpacked by IndexSpaceOperation
+      rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
+      // unpacked by IndexSpaceOperationT
+      Realm::IndexSpace<DIM,T> temp;
+      ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
+      rez.serialize(temp);
+      rez.serialize(ready);
     }
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    bool IndexSpaceUnion<DIM,T>::remove_operation(RegionTreeForest *forest)
+    bool IndexSpaceUnion<DIM,T>::invalidate_operation(void)
     //--------------------------------------------------------------------------
     {
+      // Make sure we only do this one time
+      if (this->invalidated.fetch_add(1) > 0)
+        return false;
       // Remove the parent operation from all the sub expressions
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-        sub_expressions[idx]->remove_parent_operation(this);
-      // Then remove ourselves from the tree
-      if (forest != NULL)
-        forest->remove_union_operation(this, sub_expressions);
-      // Remove our expression reference added by invalidate_operation
-      // and return true if we should be deleted
-      return this->remove_expression_reference(1/*count*/, true/*expr tree*/);
+        sub_expressions[idx]->remove_derived_operation(this);
+      // We were successfully removed
+      return true;
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    void IndexSpaceUnion<DIM,T>::remove_operation(void)
+    //--------------------------------------------------------------------------
+    {
+      this->context->remove_union_operation(this, sub_expressions);
     }
 
     //--------------------------------------------------------------------------
@@ -2041,6 +2047,8 @@ namespace Legion {
         sub_expressions(to_inter)
     //--------------------------------------------------------------------------
     {
+      // Add an resource ref that will be removed by the OperationCreator
+      this->add_base_resource_ref(REGION_TREE_REF);
       std::set<ApEvent> preconditions;
       std::vector<Realm::IndexSpace<DIM,T> > spaces(sub_expressions.size());
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
@@ -2050,8 +2058,8 @@ namespace Legion {
         assert(sub->get_canonical_expression(this->context) == sub);
 #endif
         // Add the parent and the reference
-        sub->add_parent_operation(this);
-        sub->add_expression_reference(1/*count*/, true/*expr tree*/);
+        sub->add_derived_operation(this);
+        sub->add_tree_expression_reference(this->did);
         ApEvent precondition = sub->get_expr_index_space(
             &spaces[idx], this->type_tag, false/*need tight result*/);
         if (precondition.exists())
@@ -2073,7 +2081,7 @@ namespace Legion {
       if (!this->realm_index_space_ready.has_triggered() || 
           !valid_event.has_triggered())
       {
-        IndexSpaceExpression::TightenIndexSpaceArgs args(this);
+        IndexSpaceExpression::TightenIndexSpaceArgs args(this, this);
         if (!this->realm_index_space_ready.has_triggered())
         {
           if (!valid_event.has_triggered())
@@ -2106,25 +2114,6 @@ namespace Legion {
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
     IndexSpaceIntersection<DIM,T>::IndexSpaceIntersection(
-                            const std::vector<IndexSpaceExpression*> &to_inter,
-                            RegionTreeForest *ctx, Deserializer &derez)
-      : IndexSpaceOperationT<DIM,T>(IndexSpaceOperation::INTERSECT_OP_KIND,
-                                    ctx, derez), sub_expressions(to_inter)
-    //--------------------------------------------------------------------------
-    {
-      // Just update the tree correctly with references
-      for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-      {
-        IndexSpaceExpression *sub = sub_expressions[idx];
-        // Add the parent and the reference
-        sub->add_parent_operation(this);
-        sub->add_expression_reference(1/*count*/, true/*expr tree*/);
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    template<int DIM, typename T>
-    IndexSpaceIntersection<DIM,T>::IndexSpaceIntersection(
                                       const IndexSpaceIntersection<DIM,T> &rhs)
       : IndexSpaceOperationT<DIM,T>(IndexSpaceOperation::INTERSECT_OP_KIND,NULL)
     //--------------------------------------------------------------------------
@@ -2140,8 +2129,7 @@ namespace Legion {
     {
       // Remove references from our sub expressions
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-        if (sub_expressions[idx]->remove_expression_reference(1/*count*/, 
-                                                        true/*exprtree*/))
+        if (sub_expressions[idx]->remove_tree_expression_reference(this->did))
           delete sub_expressions[idx];
     }
 
@@ -2165,42 +2153,41 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(target != this->context->runtime->address_space);
 #endif
-      this->record_remote_expression(target);
+      this->update_remote_instances(target);
       rez.serialize<bool>(false); // not an index space
-      if (target == this->origin_space)
-      {
-        rez.serialize<bool>(true); // local
-        rez.serialize(this->origin_expr);
-      }
-      else
-      {
-        rez.serialize<bool>(false); // not local
-        rez.serialize(this->type_tag); // unpacked by creator
-        rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
-        rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
-        // unpacked by IndexSpaceOperationT
-        Realm::IndexSpace<DIM,T> temp;
-        ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
-        rez.serialize(temp);
-        rez.serialize(ready);
-      }
+      rez.serialize(this->type_tag); // unpacked by creator
+      rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
+      rez.serialize(this->did); // unpacked by IndexSpaceOperation
+      rez.serialize(this->owner_space); // unpacked by IndexSpaceOperation
+      rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
+      // unpacked by IndexSpaceOperationT
+      Realm::IndexSpace<DIM,T> temp;
+      ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
+      rez.serialize(temp);
+      rez.serialize(ready);
     }
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    bool IndexSpaceIntersection<DIM,T>::remove_operation(
-                                                       RegionTreeForest *forest)
+    bool IndexSpaceIntersection<DIM,T>::invalidate_operation(void)
     //--------------------------------------------------------------------------
     {
+      // Make sure we only do this one time
+      if (this->invalidated.fetch_add(1) > 0)
+        return false;
       // Remove the parent operation from all the sub expressions
       for (unsigned idx = 0; idx < sub_expressions.size(); idx++)
-        sub_expressions[idx]->remove_parent_operation(this);
-      // Then remove ourselves from the tree
-      if (forest != NULL)
-        forest->remove_intersection_operation(this, sub_expressions);
-      // Remove our expression reference added by invalidate_operation
-      // and return true if we should be deleted
-      return this->remove_expression_reference(1/*count*/, true/*expr tree*/);
+        sub_expressions[idx]->remove_derived_operation(this);
+      // We were successfully removed
+      return true;
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    void IndexSpaceIntersection<DIM,T>::remove_operation(void)
+    //--------------------------------------------------------------------------
+    {
+      this->context->remove_intersection_operation(this, sub_expressions);
     }
 
     //--------------------------------------------------------------------------
@@ -2211,6 +2198,8 @@ namespace Legion {
         , lhs(l), rhs(r)
     //--------------------------------------------------------------------------
     {
+      // Add an resource ref that will be removed by the OperationCreator
+      this->add_base_resource_ref(REGION_TREE_REF);
 #ifdef DEBUG_LEGION
       assert(lhs->get_canonical_expression(this->context) == lhs);
       assert(rhs->get_canonical_expression(this->context) == rhs);
@@ -2218,8 +2207,8 @@ namespace Legion {
       if (lhs == rhs)
       {
         // Special case for when the expressions are the same
-        lhs->add_parent_operation(this);
-        lhs->add_expression_reference(1/*count*/, true/*expr tree*/);
+        lhs->add_derived_operation(this);
+        lhs->add_tree_expression_reference(this->did);
         this->realm_index_space = Realm::IndexSpace<DIM,T>::make_empty();
         this->tight_index_space = Realm::IndexSpace<DIM,T>::make_empty();
         this->realm_index_space_ready = ApEvent::NO_AP_EVENT;
@@ -2229,10 +2218,10 @@ namespace Legion {
       {
         Realm::IndexSpace<DIM,T> lhs_space, rhs_space;
         // Add the parent and the references
-        lhs->add_parent_operation(this);
-        rhs->add_parent_operation(this);
-        lhs->add_expression_reference(1/*count*/, true/*expr tree*/);
-        rhs->add_expression_reference(1/*count*/, true/*expr tree*/);
+        lhs->add_derived_operation(this);
+        rhs->add_derived_operation(this);
+        lhs->add_tree_expression_reference(this->did);
+        rhs->add_tree_expression_reference(this->did);
         ApEvent left_ready = 
           lhs->get_expr_index_space(&lhs_space, this->type_tag, false/*tight*/);
         ApEvent right_ready = 
@@ -2253,7 +2242,7 @@ namespace Legion {
         if (!this->realm_index_space_ready.has_triggered() || 
             !valid_event.has_triggered())
         {
-          IndexSpaceExpression::TightenIndexSpaceArgs args(this);
+          IndexSpaceExpression::TightenIndexSpaceArgs args(this, this);
           if (!this->realm_index_space_ready.has_triggered())
           {
             if (!valid_event.has_triggered())
@@ -2282,26 +2271,6 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    IndexSpaceDifference<DIM,T>::IndexSpaceDifference(IndexSpaceExpression *l,
-            IndexSpaceExpression *r, RegionTreeForest *ctx, Deserializer &derez) 
-      : IndexSpaceOperationT<DIM,T>(IndexSpaceOperation::DIFFERENCE_OP_KIND,
-                                    ctx, derez), lhs(l), rhs(r)
-    //--------------------------------------------------------------------------
-    {
-      if (lhs != NULL)
-      {
-        lhs->add_parent_operation(this);
-        lhs->add_expression_reference(1/*count*/, true/*expr tree*/);
-      }
-      if (rhs != NULL)
-      {
-        rhs->add_parent_operation(this);
-        rhs->add_expression_reference(1/*count*/, true/*expr tree*/);
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    template<int DIM, typename T>
     IndexSpaceDifference<DIM,T>::IndexSpaceDifference(
                                       const IndexSpaceDifference<DIM,T> &rhs)
      : IndexSpaceOperationT<DIM,T>(IndexSpaceOperation::DIFFERENCE_OP_KIND,
@@ -2318,10 +2287,9 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       if ((rhs != NULL) && (lhs != rhs) && 
-          rhs->remove_expression_reference(1/*count*/, true/*expr tree*/))
+          rhs->remove_tree_expression_reference(this->did))
         delete rhs;
-      if ((lhs != NULL) &&
-          lhs->remove_expression_reference(1/*count*/, true/*expr tree*/))
+      if ((lhs != NULL) && lhs->remove_tree_expression_reference(this->did))
         delete lhs;
     }
 
@@ -2345,43 +2313,44 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(target != this->context->runtime->address_space);
 #endif
-      this->record_remote_expression(target);
+      this->update_remote_instances(target);
       rez.serialize<bool>(false); // not an index space
-      if (target == this->origin_space)
-      {
-        rez.serialize<bool>(true); // local
-        rez.serialize(this->origin_expr);
-      }
-      else
-      {
-        rez.serialize<bool>(false); // not local
-        rez.serialize(this->type_tag); // unpacked by creator
-        rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
-        rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
-        // unpacked by IndexSpaceOperationT
-        Realm::IndexSpace<DIM,T> temp;
-        ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
-        rez.serialize(temp);
-        rez.serialize(ready);
-      }
+      rez.serialize(this->type_tag); // unpacked by creator
+      rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
+      rez.serialize(this->did); // unpacked by IndexSpaceOperation
+      rez.serialize(this->owner_space); // unpacked by IndexSpaceOperation
+      rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
+      // unpacked by IndexSpaceOperationT
+      Realm::IndexSpace<DIM,T> temp;
+      ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
+      rez.serialize(temp);
+      rez.serialize(ready);
     }
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    bool IndexSpaceDifference<DIM,T>::remove_operation(RegionTreeForest *forest)
+    bool IndexSpaceDifference<DIM,T>::invalidate_operation(void)
     //--------------------------------------------------------------------------
     {
+      // Make sure we only do this one time
+      if (this->invalidated.fetch_add(1) > 0)
+        return false;
       // Remove the parent operation from all the sub expressions
       if (lhs != NULL)
-        lhs->remove_parent_operation(this);
+        lhs->remove_derived_operation(this);
       if ((rhs != NULL) && (lhs != rhs))
-        rhs->remove_parent_operation(this);
-      // Then remove ourselves from the tree
-      if ((forest != NULL) && (lhs != NULL) && (rhs != NULL))
-        forest->remove_subtraction_operation(this, lhs, rhs);
-      // Remove our expression reference added by invalidate_operation
-      // and return true if we should be deleted
-      return this->remove_expression_reference(1/*count*/, true/*expr tree*/);
+        rhs->remove_derived_operation(this);
+      // We were successfully removed
+      return true;
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    void IndexSpaceDifference<DIM,T>::remove_operation(void)
+    //--------------------------------------------------------------------------
+    {
+       if ((lhs != NULL) && (rhs != NULL))
+        this->context->remove_subtraction_operation(this, lhs, rhs);
     }
 
     /////////////////////////////////////////////////////////////
@@ -2396,6 +2365,11 @@ namespace Legion {
           IndexSpaceOperation::INSTANCE_EXPRESSION_KIND, forest)
     //--------------------------------------------------------------------------
     {
+      // This is another kind of live expression made by the region tree
+      this->add_base_expression_reference(LIVE_EXPR_REF);
+      if (implicit_reference_tracker == NULL)
+        implicit_reference_tracker = new ImplicitReferenceTracker;
+      implicit_reference_tracker->record_live_expression(this);
 #ifdef DEBUG_LEGION
       assert(num_rects > 0);
 #endif
@@ -2408,7 +2382,7 @@ namespace Legion {
         const RtEvent valid_event(this->realm_index_space.make_valid());
         if (!valid_event.has_triggered())
         {
-          IndexSpaceExpression::TightenIndexSpaceArgs args(this);
+          IndexSpaceExpression::TightenIndexSpaceArgs args(this, this);
           this->tight_index_space_ready = 
             forest->runtime->issue_runtime_meta_task(args, 
                 LG_LATENCY_WORK_PRIORITY, valid_event);
@@ -2488,35 +2462,36 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(target != this->context->runtime->address_space);
 #endif
-      this->record_remote_expression(target);
+      this->update_remote_instances(target);
       rez.serialize<bool>(false); // not an index space
-      if (target == this->origin_space)
-      {
-        rez.serialize<bool>(true); // local
-        rez.serialize(this->origin_expr);
-      }
-      else
-      {
-        rez.serialize<bool>(false); // not local
-        rez.serialize(this->type_tag); // unpacked by creator
-        rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
-        rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
-        // unpacked by IndexSpaceOperationT
-        Realm::IndexSpace<DIM,T> temp;
-        ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
-        rez.serialize(temp);
-        rez.serialize(ready);
-      }
+      rez.serialize(this->type_tag); // unpacked by creator
+      rez.serialize(this->expr_id); // unpacked by IndexSpaceOperation
+      rez.serialize(this->did); // unpacked by IndexSpaceOperation
+      rez.serialize(this->owner_space); // unpacked by IndexSpaceOperation
+      rez.serialize(this->origin_expr); // unpacked by IndexSpaceOperation
+      // unpacked by IndexSpaceOperationT
+      Realm::IndexSpace<DIM,T> temp;
+      ApEvent ready = this->get_realm_index_space(temp, true/*tight*/);
+      rez.serialize(temp);
+      rez.serialize(ready);
     }
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    bool InstanceExpression<DIM,T>::remove_operation(RegionTreeForest *forest)
+    bool InstanceExpression<DIM,T>::invalidate_operation(void)
     //--------------------------------------------------------------------------
     {
       // should never be called
       assert(false);
       return false;
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    void InstanceExpression<DIM,T>::remove_operation(void)
+    //--------------------------------------------------------------------------
+    {
+      // Nothing to do here since we're not in the region tree
     }
 
     /////////////////////////////////////////////////////////////
@@ -2525,10 +2500,10 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    RemoteExpression<DIM,T>::RemoteExpression(Deserializer &derez,
-                                              RegionTreeForest *forest)
-      : IndexSpaceOperationT<DIM,T>(
-          IndexSpaceOperation::REMOTE_EXPRESSION_KIND, forest, derez)
+    RemoteExpression<DIM,T>::RemoteExpression(RegionTreeForest *forest,
+        IndexSpaceExprID eid, DistributedID did, AddressSpaceID owner,
+        IndexSpaceOperation *origin, TypeTag tag, Deserializer &derez)
+      : IndexSpaceOperationT<DIM,T>(forest, eid, did, owner, origin, tag, derez)
     //--------------------------------------------------------------------------
     {
     }
@@ -2574,12 +2549,20 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    bool RemoteExpression<DIM,T>::remove_operation(RegionTreeForest *forest)
+    bool RemoteExpression<DIM,T>::invalidate_operation(void)
     //--------------------------------------------------------------------------
     {
       // should never be called
       assert(false);
       return false;
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    void RemoteExpression<DIM,T>::remove_operation(void)
+    //--------------------------------------------------------------------------
+    {
+      // nothing to do here
     }
 
     /////////////////////////////////////////////////////////////
@@ -2815,7 +2798,7 @@ namespace Legion {
       if (!index_space_ready.has_triggered() || !valid_event.has_triggered())
       {
         // If this index space isn't ready yet, then we have to defer this 
-        TightenIndexSpaceArgs args(this);
+        TightenIndexSpaceArgs args(this, this);
         if (!index_space_ready.has_triggered())
         {
           if (!valid_event.has_triggered())
@@ -3221,20 +3204,64 @@ namespace Legion {
       return result;
     } 
 
+    // This is a small helper class for converting realm index spaces when
+    // the types don't naturally align with the underlying index space type
+    template<int DIM, typename TYPELIST>
+    struct RealmSpaceConverter {
+      static inline void convert_to(const Domain &domain, void *realm_is, 
+                                    const TypeTag type_tag, const char *context)
+      {
+        // Compute the type tag for this particular type with the same DIM
+        const TypeTag tag =
+          NT_TemplateHelper::encode_tag<DIM,typename TYPELIST::HEAD>();
+        if (tag == type_tag)
+        {
+          Realm::IndexSpace<DIM,typename TYPELIST::HEAD> *target =
+            static_cast<Realm::IndexSpace<DIM,typename TYPELIST::HEAD>*>(
+                                                                realm_is);
+          *target = domain;
+        }
+        else
+          RealmSpaceConverter<DIM,typename TYPELIST::TAIL>::convert_to(domain,
+                                                  realm_is, type_tag, context);
+      }
+    };
+
+    // Specialization for end-of-list cases
+    template<int DIM>
+    struct RealmSpaceConverter<DIM,Realm::DynamicTemplates::TypeListTerm> {
+      static inline void convert_to(const Domain &domain, void *realm_is, 
+                                    const TypeTag type_tag, const char *context)
+      {
+        REPORT_LEGION_ERROR(ERROR_DYNAMIC_TYPE_MISMATCH,
+          "Dynamic type mismatch in '%s'", context)
+      }
+    };
+
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
     void IndexSpaceNodeT<DIM,T>::get_index_space_domain(void *realm_is, 
                                                         TypeTag type_tag)
     //--------------------------------------------------------------------------
     {
-      if (type_tag != handle.get_type_tag())
-        REPORT_LEGION_ERROR(ERROR_DYNAMIC_TYPE_MISMATCH,
-            "Dynamic type mismatch in 'get_index_space_domain'")
-      Realm::IndexSpace<DIM,T> *target = 
-        static_cast<Realm::IndexSpace<DIM,T>*>(realm_is);
-      // No need to wait since we're waiting for it to be tight
-      // which implies that it will be ready
-      get_realm_index_space(*target, true/*tight*/);
+      if (type_tag == handle.get_type_tag())
+      {
+        Realm::IndexSpace<DIM,T> *target = 
+          static_cast<Realm::IndexSpace<DIM,T>*>(realm_is);
+        // No need to wait since we're waiting for it to be tight
+        // which implies that it will be ready
+        get_realm_index_space(*target, true/*tight*/);
+      }
+      else
+      {
+        Realm::IndexSpace<DIM,T> target;
+        // No need to wait since we're waiting for it to be tight
+        // which implies that it will be ready
+        get_realm_index_space(target, true/*tight*/);
+        const Domain domain(target);
+        RealmSpaceConverter<DIM,Realm::DIMTYPES>::convert_to(
+                  domain, realm_is, type_tag, "get_index_space_domain");
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -3260,21 +3287,86 @@ namespace Legion {
       return DIM;
     }
 
+    // This is a small helper class for converting realm points when the 
+    // types don't naturally align with the underling index space type
+    template<int DIM, typename TYPELIST>
+    struct RealmPointConverter {
+      // Convert To
+      static inline void convert_to(const DomainPoint &point, void *realm_point,
+                                    const TypeTag type_tag, const char *context)
+      {
+        // Compute the type tag for this particular type with the same DIM
+        const TypeTag tag =
+          NT_TemplateHelper::template encode_tag<DIM,typename TYPELIST::HEAD>();
+        if (tag == type_tag)
+        {
+          Realm::Point<DIM,typename TYPELIST::HEAD> *target =
+           static_cast<Realm::Point<DIM,typename TYPELIST::HEAD>*>(realm_point);
+          *target = point;
+        }
+        else
+          RealmPointConverter<DIM,typename TYPELIST::TAIL>::convert_to(point,
+                                               realm_point, type_tag, context);
+      } 
+      // Convert From
+      static inline void convert_from(const void *realm_point, TypeTag type_tag,
+                                      DomainPoint &point, const char *context)
+      {
+        // Compute the type tag for this particular type with the same DIM
+        const TypeTag tag =
+          NT_TemplateHelper::encode_tag<DIM,typename TYPELIST::HEAD>();
+        if (tag == type_tag)
+        {
+          const Realm::Point<DIM,typename TYPELIST::HEAD> *source =
+           static_cast<const Realm::Point<DIM,typename TYPELIST::HEAD>*>(
+                                                              realm_point);
+          point = *source;
+        }
+        else
+          RealmPointConverter<DIM,typename TYPELIST::TAIL>::convert_from(
+                                    realm_point, type_tag, point, context);
+      } 
+    };
+
+    // Specialization for the end-of-list cases
+    template<int DIM>
+    struct RealmPointConverter<DIM,Realm::DynamicTemplates::TypeListTerm> {
+      static inline void convert_to(const DomainPoint &point, void *realm_point,
+                                    const TypeTag type_tag, const char *context)
+      {
+        REPORT_LEGION_ERROR(ERROR_DYNAMIC_TYPE_MISMATCH,
+          "Dynamic type mismatch in '%s'", context)
+      }
+      static inline void convert_from(const void *realm_point, TypeTag type_tag,
+                                      DomainPoint &point, const char *context)
+      {
+        REPORT_LEGION_ERROR(ERROR_DYNAMIC_TYPE_MISMATCH,
+          "Dynamic type mismatch in '%s'", context)
+      }
+    };
+
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
     bool IndexSpaceNodeT<DIM,T>::contains_point(const void *realm_point, 
                                                 TypeTag type_tag)
     //--------------------------------------------------------------------------
     {
-      if (type_tag != handle.get_type_tag())
-        REPORT_LEGION_ERROR(ERROR_DYNAMIC_TYPE_MISMATCH,
-            "Dynamic type mismatch in 'safe_cast'")
-      const Realm::Point<DIM,T> *point = 
-        static_cast<const Realm::Point<DIM,T>*>(realm_point);
       Realm::IndexSpace<DIM,T> test_space;
       // Wait for a tight space on which to perform the test
       get_realm_index_space(test_space, true/*tight*/);
-      return test_space.contains(*point);
+      if (type_tag == handle.get_type_tag())
+      {
+        const Realm::Point<DIM,T> *point = 
+          static_cast<const Realm::Point<DIM,T>*>(realm_point);
+        return test_space.contains(*point);
+      }
+      else
+      {
+        DomainPoint point;
+        RealmPointConverter<DIM,Realm::DIMTYPES>::convert_from(
+            realm_point, type_tag, point, "safe_cast");
+        return test_space.contains(Point<DIM,T>(point));
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -3359,13 +3451,18 @@ namespace Legion {
                                                         TypeTag type_tag)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(type_tag == handle.get_type_tag());
-#endif
       if (!linearization_ready)
         compute_linearization_metadata();
-      Realm::Point<DIM,T> point = 
-        *(static_cast<const Realm::Point<DIM,T>*>(realm_color));
+      Realm::Point<DIM,T> point;
+      if (type_tag != handle.get_type_tag())
+      {
+        DomainPoint dp;
+        RealmPointConverter<DIM,Realm::DIMTYPES>::convert_from(
+            realm_color, type_tag, dp, "linearize_color");
+        point = dp;
+      }
+      else
+        point = *(static_cast<const Realm::Point<DIM,T>*>(realm_color));
       // First subtract the offset to get to the origin
       point -= offset;
       LegionColor color = 0;
@@ -3395,19 +3492,31 @@ namespace Legion {
                                             void *realm_color, TypeTag type_tag)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(type_tag == handle.get_type_tag());
-#endif
       if (!linearization_ready)
         compute_linearization_metadata();
-      Realm::Point<DIM,T> &point = 
-        *(static_cast<Realm::Point<DIM,T>*>(realm_color));
-      for (int idx = DIM-1; idx >= 0; idx--)
+      if (type_tag == handle.get_type_tag())
       {
-        point[idx] = color/strides[idx]; // truncates
-        color -= point[idx] * strides[idx];
+        Realm::Point<DIM,T> &point = 
+          *(static_cast<Realm::Point<DIM,T>*>(realm_color));
+        for (int idx = DIM-1; idx >= 0; idx--)
+        {
+          point[idx] = color/strides[idx]; // truncates
+          color -= point[idx] * strides[idx];
+        }
+        point += offset;
       }
-      point += offset;
+      else
+      {
+        Realm::Point<DIM,T> point;
+        for (int idx = DIM-1; idx >= 0; idx--)
+        {
+          point[idx] = color/strides[idx]; // truncates
+          color -= point[idx] * strides[idx];
+        }
+        point += offset;
+        RealmPointConverter<DIM,Realm::DIMTYPES>::convert_to(
+            DomainPoint(point), realm_color, type_tag, "delinearize_color");
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -6033,28 +6142,6 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
-    PhysicalInstance IndexSpaceNodeT<DIM,T>::create_external_instance(
-                                          Memory memory, uintptr_t base,
-                                          Realm::InstanceLayoutGeneric *ilg,
-                                          ApEvent &ready_event)
-    //--------------------------------------------------------------------------
-    {
-      DETAILED_PROFILER(context->runtime, REALM_CREATE_INSTANCE_CALL);
-      // Have to wait for the index space to be ready if necessary
-      Realm::IndexSpace<DIM,T> local_space;
-      get_realm_index_space(local_space, true/*tight*/);
-      // No profiling for these kinds of instances currently
-      Realm::ProfilingRequestSet requests;
-      PhysicalInstance result;
-      Realm::ExternalMemoryResource res(base, ilg->bytes_used,
-					false /*!read_only*/);
-      ready_event = ApEvent(PhysicalInstance::create_external_instance(result,
-                                        memory, ilg, res, requests));
-      return result;
-    }
-
-    //--------------------------------------------------------------------------
-    template<int DIM, typename T>
     ApEvent IndexSpaceNodeT<DIM,T>::issue_fill(
                                  const PhysicalTraceInfo &trace_info,
                                  const std::vector<CopySrcDstField> &dst_fields,
@@ -6136,21 +6223,20 @@ namespace Legion {
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
     void IndexSpaceNodeT<DIM,T>::construct_indirections(
-                                     const std::vector<unsigned> &field_indexes,
-                                     const FieldID indirect_field,
-                                     const TypeTag indirect_type,
-                                     const bool is_range,
-                                     const PhysicalInstance indirect_instance,
-                                     const LegionVector<
-                                            IndirectRecord>::aligned &records,
-                                     std::vector<CopyIndirection*> &indirects,
-                                     std::vector<unsigned> &indirect_indexes,
+                                    const std::vector<unsigned> &field_indexes,
+                                    const FieldID indirect_field,
+                                    const TypeTag indirect_type,
+                                    const bool is_range,
+                                    const PhysicalInstance indirect_instance,
+                                    const LegionVector<IndirectRecord> &records,
+                                    std::vector<CopyIndirection*> &indirects,
+                                    std::vector<unsigned> &indirect_indexes,
 #ifdef LEGION_SPY
-                                     unsigned unique_indirections_identifier,
-                                     const ApEvent indirect_event,
+                                    unsigned unique_indirections_identifier,
+                                    const ApEvent indirect_event,
 #endif
-                                     const bool possible_out_of_range,
-                                     const bool possible_aliasing)
+                                    const bool possible_out_of_range,
+                                    const bool possible_aliasing)
     //--------------------------------------------------------------------------
     {
       construct_indirections_internal<DIM,T>(field_indexes, indirect_field,
@@ -6305,6 +6391,14 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       return find_congruent_expression_internal<DIM,T>(expressions); 
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    KDTree* IndexSpaceNodeT<DIM,T>::get_sparsity_map_kd_tree(void)
+    //--------------------------------------------------------------------------
+    {
+      return get_sparsity_map_kd_tree_internal<DIM,T>();
     }
     
     //--------------------------------------------------------------------------
@@ -6474,10 +6568,23 @@ namespace Legion {
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    inline KDNode<DIM,T>* KDTree::as_kdnode(void)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      KDNode<DIM,T> *result = dynamic_cast<KDNode<DIM,T>*>(this);
+      assert(result != NULL);
+      return result;
+#else
+      return static_cast<KDNode<DIM,T>*>(this);
+#endif
+    }
+
+    //--------------------------------------------------------------------------
     template<int DIM, typename T, typename RT>
     KDNode<DIM,T,RT>::KDNode(const Rect<DIM,T> &b,
-                             std::vector<std::pair<Rect<DIM,T>,RT> > &subrects,
-                             const int consecutive_bad /* = 0*/)
+                             std::vector<std::pair<Rect<DIM,T>,RT> > &subrects)
       : bounds(b), left(NULL), right(NULL)
     //--------------------------------------------------------------------------
     {
@@ -6491,7 +6598,7 @@ namespace Legion {
       // so we can iterate through other dimensions to look for
       // better splitting planes
       int best_dim = -1;
-      float best_cost = 0.f;
+      float best_cost = 2.f; // worst possible cost
       Rect<DIM,T> best_left_bounds, best_right_bounds;
       std::vector<std::pair<Rect<DIM,T>,RT> > best_left_set, best_right_set;
       for (int d = 0; d < DIM; d++)
@@ -6503,6 +6610,187 @@ namespace Legion {
         for (unsigned idx = 0; idx < subrects.size(); idx++)
         {
           const Rect<DIM,T> &subset_bounds = subrects[idx].first;
+          lines.insert(KDLine(subset_bounds.lo[d], idx, true));
+          lines.insert(KDLine(subset_bounds.hi[d], idx, false));
+        }
+        // Construct two lists by scanning from left-to-right and
+        // from right-to-left of the number of rectangles that would
+        // be inlcuded on the left or right side by each splitting plane
+        std::map<coord_t,unsigned> left_exclusive, right_exclusive;
+        unsigned count = 0;
+        for (typename std::set<KDLine>::const_iterator it =
+              lines.begin(); it != lines.end(); it++)
+        {
+          // Always record the count for all splits
+          left_exclusive[it->value] = count;
+          // Only increment for new rectangles
+          if (it->start)
+            count++;
+        }
+        // If all the lines exist at the same value
+        // then we'll never have a splitting plane
+        if (left_exclusive.size() == 1)
+          continue;
+        count = 0;
+        for (typename std::set<KDLine>::const_reverse_iterator it =
+              lines.rbegin(); it != lines.rend(); it++)
+        {
+          // Always record the count for all splits
+          right_exclusive[it->value] = count;
+          // End of rectangles are the beginning in this direction
+          if (!it->start)
+            count++;
+        }
+#ifdef DEBUG_LEGION
+        assert(left_exclusive.size() == right_exclusive.size());
+#endif
+        // We want to take the mini-max of the two numbers in order
+        // to try to balance the splitting plane across the two sets
+        T split = 0;
+        unsigned split_max = subrects.size();
+        for (std::map<coord_t,unsigned>::const_iterator it =
+              left_exclusive.begin(); it != left_exclusive.end(); it++)
+        {
+          const unsigned left = it->second;
+          const unsigned right = right_exclusive[it->first];
+          const unsigned max = (left > right) ? left : right;
+          if (max < split_max)
+          {
+            split_max = max;
+            split = it->first;
+          }
+        }
+        // Check for the case where we can't find a splitting plane
+        if (split_max == subrects.size())
+          continue;
+        // Sort the subsets into left and right
+        Rect<DIM,T> left_bounds(bounds);
+        Rect<DIM,T> right_bounds(bounds);
+        left_bounds.hi[d] = split;
+        right_bounds.lo[d] = split+1;
+        std::vector<std::pair<Rect<DIM,T>,RT> > left_set, right_set;
+        for (typename std::vector<std::pair<Rect<DIM,T>,RT> >::const_iterator
+              it = subrects.begin(); it != subrects.end(); it++)
+        {
+          const Rect<DIM,T> left_rect = it->first.intersection(left_bounds);
+          if (!left_rect.empty())
+            left_set.push_back(std::make_pair(left_rect, it->second));
+          const Rect<DIM,T> right_rect = it->first.intersection(right_bounds);
+          if (!right_rect.empty())
+            right_set.push_back(std::make_pair(right_rect, it->second));
+        }
+#ifdef DEBUG_LEGION
+        assert(left_set.size() < subrects.size());
+        assert(right_set.size() < subrects.size());
+#endif
+        // Compute the cost of this refinement
+        // First get the percentage reductions of both sets
+        float cost_left = float(left_set.size()) / float(subrects.size());
+        float cost_right = float(right_set.size()) / float(subrects.size());
+        // We want to give better scores to sets that are closer together
+        // so we'll include the absolute value of the difference in the
+        // two costs as part of computing the average cost
+        // If the savings are identical then this will be zero extra cost
+        // Note this cost metric should always produce values between
+        // 1.0 and 2.0, with 1.0 being a perfect 50% reduction on each side
+        float cost_diff = (cost_left < cost_right) ? 
+          (cost_right - cost_left) : (cost_left - cost_right);
+        float total_cost = (cost_left + cost_right + cost_diff);
+#ifdef DEBUG_LEGION
+        assert((1.f <= total_cost) && (total_cost <= 2.f));
+#endif
+        // Check to see if the cost is considered to be a "good" refinement
+        // For now we'll say that this is a good cost if it is less than
+        // or equal to 1.5, halfway between the range of costs from 1.0 to 2.0
+        if ((total_cost <= 1.5f) && (total_cost < best_cost))
+        {
+          best_dim = d;
+          best_cost = total_cost;
+          best_left_set.swap(left_set);
+          best_right_set.swap(right_set);
+          best_left_bounds = left_bounds;
+          best_right_bounds = right_bounds;
+        }
+      }
+      // See if we had at least one good refinement
+      if (best_dim >= 0)
+      {
+        // Always clear the old-subrects before recursing to reduce memory usage
+        {
+          std::vector<std::pair<Rect<DIM,T>,RT> > empty;
+          empty.swap(subrects);
+        }
+        left = new KDNode<DIM,T,RT>(best_left_bounds, best_left_set); 
+        right = new KDNode<DIM,T,RT>(best_right_bounds, best_right_set);
+      }
+      else
+      {
+        REPORT_LEGION_WARNING(LEGION_WARNING_KDTREE_REFINEMENT_FAILED,
+            "Failed to find a refinement for KD tree with %d dimensions "
+            "and %zd rectangles. Please report your application to the "
+            "Legion developers' mailing list.", DIM, subrects.size())
+        // If we make it here then we couldn't find a splitting plane to refine
+        // anymore so just record all the subrects as our rects
+        rects.swap(subrects);
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T, typename RT>
+    KDNode<DIM,T,RT>::~KDNode(void)
+    //--------------------------------------------------------------------------
+    {
+      if (left != NULL)
+        delete left;
+      if (right != NULL)
+        delete right;
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T, typename RT>
+    void KDNode<DIM,T,RT>::find_interfering(const Rect<DIM,T> &test,
+                                            std::set<RT> &interfering) const
+    //--------------------------------------------------------------------------
+    {
+      if ((left != NULL) && left->bounds.overlaps(test))
+        left->find_interfering(test, interfering);
+      if ((right != NULL) && right->bounds.overlaps(test))
+        right->find_interfering(test, interfering);
+      for (typename std::vector<std::pair<Rect<DIM,T>,RT> >::
+            const_iterator it = rects.begin(); it != rects.end(); it++)
+        if (it->first.overlaps(test))
+          interfering.insert(it->second);
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    KDNode<DIM,T,void>::KDNode(const Rect<DIM,T> &b,
+                               std::vector<Rect<DIM,T> > &subrects)
+      : bounds(b), left(NULL), right(NULL)
+    //--------------------------------------------------------------------------
+    {
+      // This is the base case
+      if (subrects.size() <= LEGION_MAX_BVH_FANOUT)
+      {
+        rects.swap(subrects);
+        return;
+      }
+      // If we have sub-optimal bad sets we will track them here
+      // so we can iterate through other dimensions to look for
+      // better splitting planes
+      int best_dim = -1;
+      float best_cost = 2.f; // worst possible cost
+      Rect<DIM,T> best_left_bounds, best_right_bounds;
+      std::vector<Rect<DIM,T> > best_left_set, best_right_set;
+      for (int d = 0; d < DIM; d++)
+      {
+        // Try to compute a splitting plane for this dimension
+        // Sort the start and end of each equivalence set bounding rectangle
+        // along the splitting dimension
+        std::set<KDLine> lines;
+        for (unsigned idx = 0; idx < subrects.size(); idx++)
+        {
+          const Rect<DIM,T> &subset_bounds = subrects[idx];
           lines.insert(KDLine(subset_bounds.lo[d], idx, true));
           lines.insert(KDLine(subset_bounds.hi[d], idx, false));
         }
@@ -6561,16 +6849,16 @@ namespace Legion {
         Rect<DIM,T> right_bounds(bounds);
         left_bounds.hi[d] = split;
         right_bounds.lo[d] = split+1;
-        std::vector<std::pair<Rect<DIM,T>,RT> > left_set, right_set;
-        for (typename std::vector<std::pair<Rect<DIM,T>,RT> >::const_iterator
-              it = subrects.begin(); it != subrects.end(); it++)
+        std::vector<Rect<DIM,T> > left_set, right_set;
+        for (typename std::vector<Rect<DIM,T> >::const_iterator it =
+              subrects.begin(); it != subrects.end(); it++)
         {
-          const Rect<DIM,T> left_rect = it->first.intersection(left_bounds);
+          const Rect<DIM,T> left_rect = it->intersection(left_bounds);
           if (!left_rect.empty())
-            left_set.push_back(std::make_pair(left_rect, it->second));
-          const Rect<DIM,T> right_rect = it->first.intersection(right_bounds);
+            left_set.push_back(left_rect);
+          const Rect<DIM,T> right_rect = it->intersection(right_bounds);
           if (!right_rect.empty())
-            right_set.push_back(std::make_pair(right_rect, it->second));
+            right_set.push_back(right_rect);
         }
 #ifdef DEBUG_LEGION
         assert(left_set.size() < subrects.size());
@@ -6589,9 +6877,13 @@ namespace Legion {
         float cost_diff = (cost_left < cost_right) ? 
           (cost_right - cost_left) : (cost_left - cost_right);
         float total_cost = (cost_left + cost_right + cost_diff);
-        // See if this is the first splitting plane we've found or 
-        // whether we have a better cost here
-        if ((best_dim < 0) || (total_cost < best_cost))
+#ifdef DEBUG_LEGION
+        assert((1.f <= total_cost) && (total_cost <= 2.f));
+#endif
+        // Check to see if the cost is considered to be a "good" refinement
+        // For now we'll say that this is a good cost if it is less than
+        // or equal to 1.5, halfway between the range of costs from 1.0 to 2.0
+        if ((total_cost <= 1.5f) && (total_cost < best_cost))
         {
           best_dim = d;
           best_cost = total_cost;
@@ -6601,39 +6893,32 @@ namespace Legion {
           best_right_bounds = right_bounds;
         }
       }
-      // See if we had at least one possible refinement
+      // See if we had at least one good refinement
       if (best_dim >= 0)
       {
-        // Check to see if the cost is considered to be a "good" refinement
-        // For now we'll say that this is a good cost if it is less than
-        // or equal to 1.5, halfway between the range of costs from 1.0 to 2.0
-        const bool good = (best_cost <= 1.5f);
-        if (good || (consecutive_bad < DIM))
+        // Always clear the old-subrects before recursing to reduce memory usage
         {
-          left = new KDNode<DIM,T,RT>(best_left_bounds, best_left_set, 
-                                      good ? 0 : consecutive_bad + 1);
-          right = new KDNode<DIM,T,RT>(best_right_bounds, best_right_set,
-                                       good ? 0 : consecutive_bad + 1);
-          return;
+          std::vector<Rect<DIM,T> > empty;
+          empty.swap(subrects);
         }
+        left = new KDNode<DIM,T,void>(best_left_bounds, best_left_set); 
+        right = new KDNode<DIM,T,void>(best_right_bounds, best_right_set);
       }
-      // If we make it here then we couldn't find a splitting plane to refine 
-      // anymore so just record all the subrects as our rects
-      rects.swap(subrects);
+      else
+      {
+        REPORT_LEGION_WARNING(LEGION_WARNING_KDTREE_REFINEMENT_FAILED,
+            "Failed to find a refinement for KD tree with %d dimensions "
+            "and %zd rectangles. Please report your application to the "
+            "Legion developers' mailing list.", DIM, subrects.size())
+        // If we make it here then we couldn't find a splitting plane to refine
+        // anymore so just record all the subrects as our rects
+        rects.swap(subrects);
+      }
     }
 
     //--------------------------------------------------------------------------
-    template<int DIM, typename T, typename RT>
-    KDNode<DIM,T,RT>::KDNode(const KDNode<DIM,T,RT> &rhs)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
-    }
-
-    //--------------------------------------------------------------------------
-    template<int DIM, typename T, typename RT>
-    KDNode<DIM,T,RT>::~KDNode(void)
+    template<int DIM, typename T>
+    KDNode<DIM,T,void>::~KDNode(void)
     //--------------------------------------------------------------------------
     {
       if (left != NULL)
@@ -6643,29 +6928,44 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    template<int DIM, typename T, typename RT>
-    KDNode<DIM,T,RT>& KDNode<DIM,T,RT>::operator=(const KDNode<DIM,T,RT> &rhs)
+    template<int DIM, typename T>
+    size_t KDNode<DIM,T,void>::count_rectangles(void) const
     //--------------------------------------------------------------------------
     {
-      // should never be called
-      assert(false);
-      return *this;
+      size_t result = rects.size();
+      if (left != NULL)
+        result += left->count_rectangles();
+      if (right != NULL)
+        result += right->count_rectangles();
+      return result;
     }
 
     //--------------------------------------------------------------------------
-    template<int DIM, typename T, typename RT>
-    void KDNode<DIM,T,RT>::find_interfering(const Rect<DIM,T> &test,
-                                         std::set<RT> &interfering)
+    template<int DIM, typename T>
+    size_t KDNode<DIM,T,void>::count_intersecting_points(
+                                                  const Rect<DIM,T> &rect) const
     //--------------------------------------------------------------------------
     {
-      if ((left != NULL) && left->bounds.overlaps(test))
-        left->find_interfering(test, interfering);
-      if ((right != NULL) && right->bounds.overlaps(test))
-        right->find_interfering(test, interfering);
-      for (typename std::vector<std::pair<Rect<DIM,T>,RT> >::
-            const_iterator it = rects.begin(); it != rects.end(); it++)
-        if (it->first.overlaps(test))
-          interfering.insert(it->second);
+      size_t result = 0;
+      for (typename std::vector<Rect<DIM,T> >::const_iterator it =
+            rects.begin(); it != rects.end(); it++)
+      {
+        const Rect<DIM,T> overlap = it->intersection(rect);
+        result += overlap.volume();
+      }
+      if (left != NULL)
+      {
+        Rect<DIM,T> left_overlap = rect.intersection(left->bounds);
+        if (!left_overlap.empty())
+          result += left->count_intersecting_points(left_overlap);
+      }
+      if (right != NULL)
+      {
+        Rect<DIM,T> right_overlap = rect.intersection(right->bounds);
+        if (!right_overlap.empty())
+          result += right->count_intersecting_points(right_overlap);
+      }
+      return result;
     }
 
     /////////////////////////////////////////////////////////////

@@ -1,4 +1,4 @@
--- Copyright 2021 Stanford University, NVIDIA Corporation
+-- Copyright 2022 Stanford University, NVIDIA Corporation
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
@@ -2183,7 +2183,7 @@ end
 -- A helper for capturing debug information.
 local function emit_debuginfo(node)
   assert(node.span.source and node.span.start.line)
-  if string.len(node.span.source) == 0 then
+  if std.config["no-debuginfo"] or string.len(node.span.source) == 0 then
     return quote end
   end
   return quote
@@ -8877,10 +8877,16 @@ function codegen.stat_for_list(cx, node)
       end
 
       -- Register the kernel function to JIT
-      local kernel_id = cx.task_meta:get_cuda_variant():add_cuda_kernel(kernel)
+      local kernel_name = cx.task_meta:get_cuda_variant():add_cuda_kernel(kernel)
+
+      if std.config["cuda-pretty-kernels"] then
+        io.write("===== CUDA kernel @ " .. node.span.source .. ":" .. node.span.start.line .. " =====\n")
+        kernel:printpretty(false)
+      end
+
       local count = terralib.newsymbol(c.size_t, "count")
       local kernel_call =
-        cudahelper.codegen_kernel_call(cuda_cx, kernel_id, count, args, shared_mem_size, false)
+        cudahelper.codegen_kernel_call(cuda_cx, kernel_name, count, args, shared_mem_size, false)
 
       local bounds_setup = terralib.newlist()
       bounds_setup:insert(quote var [count] = 1 end)

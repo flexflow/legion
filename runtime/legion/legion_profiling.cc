@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1401,6 +1401,8 @@ namespace Legion {
       {
         LegionProfDesc::MetaDesc meta_desc;
         meta_desc.kind = idx;
+        meta_desc.message = false;
+        meta_desc.ordered_vc = false;
         meta_desc.name = task_descriptions[idx];
         serializer->serialize(meta_desc);
       }
@@ -1409,6 +1411,10 @@ namespace Legion {
       {
         LegionProfDesc::MetaDesc meta_desc;
         meta_desc.kind = num_meta_tasks + idx;
+        meta_desc.message = true;
+        const VirtualChannelKind vc = 
+          MessageManager::find_message_vc((MessageKind)idx);
+        meta_desc.ordered_vc = (vc <= LAST_UNORDERED_VIRTUAL_CHANNEL);
         meta_desc.name = message_descriptions[idx];
         serializer->serialize(meta_desc);
       }

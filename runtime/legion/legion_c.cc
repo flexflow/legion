@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University
+/* Copyright 2022 Stanford University
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -5702,12 +5702,7 @@ legion_attach_launcher_add_cpu_soa_field(legion_attach_launcher_t launcher_,
   AttachLauncher *launcher = CObjectWrapper::unwrap(launcher_);
 
   std::vector<FieldID> fields(1, fid);
-  // Find the memory that we are using
-  const Memory local_sysmem = Machine::MemoryQuery(Machine::get_machine())
-      .has_affinity_to(Processor::get_executing_processor())
-      .only_kind(Memory::SYSTEM_MEM)
-      .first();
-  launcher->attach_array_soa(base_ptr, column_major, fields, local_sysmem);
+  launcher->attach_array_soa(base_ptr, column_major, fields);
 }
 
 legion_future_t

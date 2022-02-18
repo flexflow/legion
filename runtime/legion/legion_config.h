@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1385,6 +1385,8 @@ typedef enum legion_error_t {
   LEGION_WARNING_IGNORING_ADVISED_ANALYSIS_SUBTREE = 1110,
   LEGION_WARNING_MISMATCHED_UNORDERED_OPERATIONS = 1111,
   LEGION_WARNING_PARTITION_VERIFICATION = 1112,
+  LEGION_WARNING_IMPRECISE_ATTACH_MEMORY = 1113,
+  LEGION_WARNING_KDTREE_REFINEMENT_FAILED = 1114,
   
   
   LEGION_FATAL_MUST_EPOCH_NOADDRESS = 2000,

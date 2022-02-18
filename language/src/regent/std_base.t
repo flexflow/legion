@@ -1,4 +1,4 @@
--- Copyright 2021 Stanford University, NVIDIA Corporation
+-- Copyright 2022 Stanford University, NVIDIA Corporation
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
@@ -898,11 +898,11 @@ local symbol = {}
 function symbol:__index(field)
   local value = symbol[field]
   if value ~= nil then return value end
-  error("symbol has no field '" .. field .. "' (in lookup)", 2)
+  error("symbol has no field '" .. tostring(field) .. "' (in lookup)", 2)
 end
 
 function symbol:__newindex(field, value)
-  error("symbol has no field '" .. field .. "' (in assignment)", 2)
+  error("symbol has no field '" .. tostring(field) .. "' (in assignment)", 2)
 end
 
 do
@@ -1047,15 +1047,14 @@ do
       self.cudakernels = terralib.newlist()
     end
     local kernel_name = self.task:get_name():concat("_") .. "_cuda" .. tostring(global_kernel_counter)
-    local kernel_id = terralib.global(&int8, "__kernel_id_" .. kernel_name)
+    kernel_name = "__kernel_id_" .. kernel_name
     self.cudakernels:insert({
       name = kernel_name,
       kernel = kernel,
-      kernel_id = kernel_id,
     })
     kernel:setname(kernel_name)
     global_kernel_counter = global_kernel_counter + 1
-    return kernel_id
+    return kernel_name
   end
 end
 

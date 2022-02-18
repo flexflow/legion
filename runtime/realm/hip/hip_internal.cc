@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *                Los Alamos National Laboratory
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,12 +45,22 @@ namespace Realm {
       src_gpus.resize(inputs_info.size(), 0);
       for(size_t i = 0; i < input_ports.size(); i++)
 	      if(input_ports[i].mem->kind == MemoryImpl::MKIND_GPUFB)
-          src_gpus[i] = checked_cast<GPUFBMemory *>(input_ports[0].mem)->gpu;
+          src_gpus[i] = (ID(input_ports[i].mem->me).is_memory() ?
+                           (checked_cast<GPUFBMemory *>(input_ports[i].mem))->gpu :
+                           (checked_cast<GPUFBIBMemory *>(input_ports[i].mem))->gpu);
 
       dst_gpus.resize(outputs_info.size(), 0);
+      dst_is_ipc.resize(outputs_info.size(), false);
       for(size_t i = 0; i < output_ports.size(); i++)
-        if(output_ports[i].mem->kind == MemoryImpl::MKIND_GPUFB)
-          dst_gpus[i] = checked_cast<GPUFBMemory *>(output_ports[0].mem)->gpu;
+        if(output_ports[i].mem->kind == MemoryImpl::MKIND_GPUFB) {
+          dst_gpus[i] = (ID(output_ports[i].mem->me).is_memory() ?
+                           (checked_cast<GPUFBMemory *>(output_ports[i].mem))->gpu :
+                           (checked_cast<GPUFBIBMemory *>(output_ports[i].mem))->gpu);
+        } else {
+          // assume a memory owned by another node is ipc
+          if(NodeID(ID(output_ports[i].mem->me).memory_owner_node()) != Network::my_node_id)
+            dst_is_ipc[i] = true;
+        }      
     }
 	
     long GPUXferDes::get_requests(Request** requests, long nr)
@@ -60,7 +70,7 @@ namespace Realm {
       return 0;
     }
 
-        bool GPUXferDes::progress_xd(GPUChannel *channel,
+    bool GPUXferDes::progress_xd(GPUChannel *channel,
                                  TimeLimit work_until)
     {
       bool did_work = false;
@@ -77,6 +87,8 @@ namespace Realm {
         XferPort *in_port = 0, *out_port = 0;
         size_t in_span_start = 0, out_span_start = 0;
         GPU *in_gpu = 0, *out_gpu = 0;
+        bool out_is_ipc = false;
+        int out_ipc_index = -1;
         if(input_control.current_io_port >= 0) {
           in_port = &input_ports[input_control.current_io_port];
           in_span_start = in_port->local_bytes_total;
@@ -86,23 +98,33 @@ namespace Realm {
           out_port = &output_ports[output_control.current_io_port];
           out_span_start = out_port->local_bytes_total;
           out_gpu = dst_gpus[output_control.current_io_port];
+          out_is_ipc = dst_is_ipc[output_control.current_io_port];
         }
 
         size_t total_bytes = 0;
         if(in_port != 0) {
           if(out_port != 0) {
             // input and output both exist - transfer what we can
-            log_xd.info() << "cuda memcpy chunk: min=" << min_xfer_size
+            log_xd.info() << "hip memcpy chunk: min=" << min_xfer_size
                           << " max=" << max_bytes;
 
             uintptr_t in_base = reinterpret_cast<uintptr_t>(in_port->mem->get_direct_ptr(0, 0));
-            uintptr_t out_base = reinterpret_cast<uintptr_t>(out_port->mem->get_direct_ptr(0, 0));
+            uintptr_t out_base;
+            const GPU::HipIpcMapping *out_mapping = 0;
+            if(out_is_ipc) {
+              out_mapping = in_gpu->find_ipc_mapping(out_port->mem->me);
+              assert(out_mapping);
+              out_base = out_mapping->local_base;
+            } else
+              out_base = reinterpret_cast<uintptr_t>(out_port->mem->get_direct_ptr(0, 0));
 
             // pick the correct stream for any memcpy's we generate
             GPUStream *stream;
             if(in_gpu) {
               if(out_gpu == in_gpu)
-                stream = in_gpu->device_to_device_stream;
+                stream = in_gpu->get_next_d2d_stream();
+              else if(out_mapping)
+                stream = in_gpu->hipipc_streams[out_mapping->owner];
               else if(!out_gpu)
                 stream = in_gpu->device_to_host_stream;
               else {
@@ -134,7 +156,7 @@ namespace Realm {
               size_t bytes_left = max_bytes - total_bytes;
 
               // limit transfer size for host<->device copies
-              if((bytes_left > (4 << 20)) && (!in_gpu || !out_gpu))
+              if((bytes_left > (4 << 20)) && (!in_gpu || (!out_gpu && (out_ipc_index == -1))))
                 bytes_left = 4 << 20;
 
               assert(in_dim > 0);
@@ -160,11 +182,11 @@ namespace Realm {
                 // grr...  prototypes of these differ slightly...
                 hipMemcpyKind copy_type;
                 if(in_gpu) {
-                  if(out_gpu == in_gpu)
+                  if(out_gpu == in_gpu || (out_ipc_index >= 0)) {
                     copy_type = hipMemcpyDeviceToDevice;
-                  else if(!out_gpu)
+                  } else if(!out_gpu) {
                     copy_type = hipMemcpyDeviceToHost;
-                  else {
+                  } else {
                     copy_type = hipMemcpyDefault;
                   }
                 } else {
@@ -241,11 +263,11 @@ namespace Realm {
                   
                   hipMemcpyKind copy_type;
                   if(in_gpu) {
-                    if(out_gpu == in_gpu)
+                    if(out_gpu == in_gpu || (out_ipc_index >= 0)) {
                       copy_type = hipMemcpyDeviceToDevice;
-                    else if(!out_gpu)
+                    } else if(!out_gpu) {
                       copy_type = hipMemcpyDeviceToHost;
-                    else {
+                    } else {
                       copy_type = hipMemcpyDefault;
                     }
                   } else {
@@ -313,11 +335,11 @@ namespace Realm {
                   //  timeout
                   hipMemcpyKind copy_type;
                     if(in_gpu) {
-                    if(out_gpu == in_gpu)
+                    if(out_gpu == in_gpu || (out_ipc_index >= 0)) {
                       copy_type = hipMemcpyDeviceToDevice;
-                    else if(!out_gpu)
+                    } else if(!out_gpu) {
                       copy_type = hipMemcpyDeviceToHost;
-                    else {
+                    } else {
                       copy_type = hipMemcpyDefault;
                     }
                   } else {
@@ -443,48 +465,60 @@ namespace Realm {
                                                 stringbuilder() << "hip channel (gpu=" << _src_gpu->info->index << " kind=" << (int)_kind << ")")
     {
       src_gpu = _src_gpu;
-
+        
       // switch out of ordered mode if multi-threaded dma is requested
       if(_src_gpu->module->cfg_multithread_dma)
         xdq.ordered_mode = false;
 
-      Memory fbm = src_gpu->fbmem->me;
+      std::vector<Memory> local_gpu_mems;
+      local_gpu_mems.push_back(src_gpu->fbmem->me);
+      if(src_gpu->fb_ibmem)
+        local_gpu_mems.push_back(src_gpu->fb_ibmem->me);
+
+      std::vector<Memory> peer_gpu_mems;
+      peer_gpu_mems.insert(peer_gpu_mems.end(),
+                           src_gpu->peer_fbs.begin(),
+                           src_gpu->peer_fbs.end());
+      for(std::vector<GPU::HipIpcMapping>::const_iterator it = src_gpu->hipipc_mappings.begin();
+          it != src_gpu->hipipc_mappings.end();
+          ++it)
+        peer_gpu_mems.push_back(it->mem);
+
+      std::vector<Memory> mapped_cpu_mems;
+      mapped_cpu_mems.insert(mapped_cpu_mems.end(),
+                             src_gpu->pinned_sysmems.begin(),
+                             src_gpu->pinned_sysmems.end());
+      // TODO:managed memory
+      // // treat managed memory as usually being on the host as well
+      // mapped_cpu_mems.insert(mapped_cpu_mems.end(),
+      //                        src_gpu->managed_mems.begin(),
+      //                        src_gpu->managed_mems.end());
 
       switch(_kind) {
       case XFER_GPU_TO_FB:
         {
-          unsigned bw = 0; // TODO
-          unsigned latency = 0;
-          for(std::set<Memory>::const_iterator it = src_gpu->pinned_sysmems.begin();
-              it != src_gpu->pinned_sysmems.end();
-              ++it)
-            add_path(*it, fbm, bw, latency, false, false,
-                     XFER_GPU_TO_FB);
-
-          // for(std::set<Memory>::const_iterator it = src_gpu->managed_mems.begin();
-          //     it != src_gpu->managed_mems.end();
-          //     ++it)
-          //   add_path(*it, fbm, bw, latency, false, false,
-          //            XFER_GPU_TO_FB);
-
+          unsigned bw = 10000;  // HACK - estimate at 10 GB/s
+          unsigned latency = 1000;  // HACK - estimate at 1 us
+          unsigned frag_overhead = 2000;  // HACK - estimate at 2 us
+          
+          add_path(mapped_cpu_mems,
+                   local_gpu_mems,
+                   bw, latency, frag_overhead, XFER_GPU_TO_FB)
+            .set_max_dim(2); // D->H cudamemcpy3d is unrolled into 2d copies
+          
           break;
         }
 
       case XFER_GPU_FROM_FB:
         {
-          unsigned bw = 0; // TODO
-          unsigned latency = 0;
-          for(std::set<Memory>::const_iterator it = src_gpu->pinned_sysmems.begin();
-              it != src_gpu->pinned_sysmems.end();
-              ++it)
-            add_path(fbm, *it, bw, latency, false, false,
-                     XFER_GPU_FROM_FB);
+          unsigned bw = 10000;  // HACK - estimate at 10 GB/s
+          unsigned latency = 1000;  // HACK - estimate at 1 us
+          unsigned frag_overhead = 2000;  // HACK - estimate at 2 us
 
-          // for(std::set<Memory>::const_iterator it = src_gpu->managed_mems.begin();
-          //     it != src_gpu->managed_mems.end();
-          //     ++it)
-          //   add_path(fbm, *it, bw, latency, false, false,
-          //            XFER_GPU_FROM_FB);
+          add_path(local_gpu_mems,
+                   mapped_cpu_mems,
+                   bw, latency, frag_overhead, XFER_GPU_FROM_FB)
+            .set_max_dim(2); // H->D cudamemcpy3d is unrolled into 2d copies
 
           break;
         }
@@ -492,10 +526,14 @@ namespace Realm {
       case XFER_GPU_IN_FB:
         {
           // self-path
-          unsigned bw = 0; // TODO
-          unsigned latency = 0;
-          add_path(fbm, fbm, bw, latency, false, false,
-                   XFER_GPU_IN_FB);
+          unsigned bw = 200000;  // HACK - estimate at 200 GB/s
+          unsigned latency = 250;  // HACK - estimate at 250 ns
+          unsigned frag_overhead = 2000;  // HACK - estimate at 2 us
+
+          add_path(local_gpu_mems,
+                   local_gpu_mems,
+                   bw, latency, frag_overhead, XFER_GPU_IN_FB)
+            .set_max_dim(3);
 
           break;
         }
@@ -503,13 +541,14 @@ namespace Realm {
       case XFER_GPU_PEER_FB:
         {
           // just do paths to peers - they'll do the other side
-          unsigned bw = 0; // TODO
-          unsigned latency = 0;
-          for(std::set<Memory>::const_iterator it = src_gpu->peer_fbs.begin();
-              it != src_gpu->peer_fbs.end();
-              ++it)
-            add_path(fbm, *it, bw, latency, false, false,
-                     XFER_GPU_PEER_FB);
+          unsigned bw = 50000;  // HACK - estimate at 50 GB/s
+          unsigned latency = 1000;  // HACK - estimate at 1 us
+          unsigned frag_overhead = 2000;  // HACK - estimate at 2 us
+
+          add_path(local_gpu_mems,
+                   peer_gpu_mems,
+                   bw, latency, frag_overhead, XFER_GPU_PEER_FB)
+            .set_max_dim(3);    
 
           break;
         }
@@ -579,6 +618,10 @@ namespace Realm {
 
       void GPUTransferCompletion::request_completed(void)
       {
+	log_gpudma.info() << "gpu memcpy complete: xd=" << std::hex << xd->guid << std::dec
+                        << " read=" << read_port_idx << "/" << read_offset
+                        << " write=" << write_port_idx << "/" << write_offset
+                        << " bytes=" << write_size;
         if(read_port_idx >= 0)
           xd->update_bytes_read(read_port_idx, read_offset, read_size);
         if(write_port_idx >= 0)
@@ -666,7 +709,7 @@ namespace Realm {
             uintptr_t out_base = reinterpret_cast<uintptr_t>(out_port->mem->get_direct_ptr(0, 0));
 
             AutoGPUContext agc(channel->gpu);
-            GPUStream *stream = channel->gpu->device_to_device_stream;
+            GPUStream *stream = channel->gpu->get_next_d2d_stream();
 
             while(total_bytes < max_bytes) {
               AddressListCursor& out_alc = out_port->addrcursor;
@@ -946,11 +989,12 @@ namespace Realm {
       {
         Memory fbm = gpu->fbmem->me;
 
-        unsigned bw = 0; // TODO
-        unsigned latency = 0;
+        unsigned bw = 300000;  // HACK - estimate at 300 GB/s
+        unsigned latency = 250;  // HACK - estimate at 250 ns
+        unsigned frag_overhead = 2000;  // HACK - estimate at 2 us
 
-        add_path(Memory::NO_MEMORY, fbm,
-                 bw, latency, false, false, XFER_GPU_IN_FB);
+        add_path(Memory::NO_MEMORY, fbm, bw, latency, frag_overhead, XFER_GPU_IN_FB)
+          .set_max_dim(2);
 
         xdq.add_to_manager(bgwork);
       }

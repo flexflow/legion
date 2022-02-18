@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1651,7 +1651,7 @@ namespace Legion {
         // Check to see if any fields are projected, if so then we only
         // need to compute equivalence sets for the projected regions
         LegionMap<RegionTreeNode*,
-          FieldMaskSet<RefProjectionSummary> >::aligned::const_iterator 
+          FieldMaskSet<RefProjectionSummary> >::const_iterator 
             finder = projections.find(it->first);
         if (finder != projections.end())
         {
@@ -1855,7 +1855,7 @@ namespace Legion {
           for (std::vector<RegionNode*>::const_iterator rit =
                 children.begin(); rit != children.end(); rit++)
           {
-            LegionMap<RegionNode*,VersionInfo>::aligned::iterator finder =
+            LegionMap<RegionNode*,VersionInfo>::iterator finder =
               sharded_region_version_infos.find(*rit);
 #ifdef DEBUG_LEGION
             assert(finder != sharded_region_version_infos.end());
@@ -1921,7 +1921,7 @@ namespace Legion {
           FieldMask mask = make_from[it->second];
           // Prune out any projection fields for this node
           LegionMap<RegionTreeNode*,
-            FieldMaskSet<RefProjectionSummary> >::aligned::const_iterator
+            FieldMaskSet<RefProjectionSummary> >::const_iterator
               finder = projections.find(it->second);
           if (finder != projections.end())
             mask -= finder->second.get_valid_mask();
@@ -1985,7 +1985,7 @@ namespace Legion {
           FieldMask mask = make_from[it->second];
           // Prune out any projection fields for this node
           LegionMap<RegionTreeNode*,
-            FieldMaskSet<RefProjectionSummary> >::aligned::const_iterator
+            FieldMaskSet<RefProjectionSummary> >::const_iterator
               finder = projections.find(it->second);
           if (finder != projections.end())
             mask -= finder->second.get_valid_mask();
@@ -2916,7 +2916,7 @@ namespace Legion {
         if (!src_indirect_requirements.empty() &&
             collective_src_indirect_points)
         {
-          LegionVector<IndirectRecord>::aligned empty_records;
+          LegionVector<IndirectRecord> empty_records;
           for (unsigned idx = 0; idx < src_indirect_requirements.size(); idx++)
           {
             IndirectRecordExchange collective(repl_ctx, src_collectives[idx]);
@@ -2927,7 +2927,7 @@ namespace Legion {
         if (!dst_indirect_requirements.empty() && 
             collective_dst_indirect_points)
         {
-          LegionVector<IndirectRecord>::aligned empty_records;
+          LegionVector<IndirectRecord> empty_records;
           for (unsigned idx = 0; idx < dst_indirect_requirements.size(); idx++)
           {
             IndirectRecordExchange collective(repl_ctx, dst_collectives[idx]);
@@ -3062,7 +3062,7 @@ namespace Legion {
         const unsigned index, const ApEvent local_pre, const ApEvent local_post,
         const PhysicalTraceInfo &trace_info, const InstanceSet &instances,
         const IndexSpace space, const DomainPoint &key,
-        LegionVector<IndirectRecord>::aligned &records, const bool sources)
+        LegionVector<IndirectRecord> &records, const bool sources)
     //--------------------------------------------------------------------------
     {
       if (sources && !collective_src_indirect_points)
@@ -3499,7 +3499,7 @@ namespace Legion {
               assert(deletion_req_indexes.empty());
 #endif
               runtime->forest->destroy_index_space(index_space,
-                                                   applied, true/*collective*/);
+                  runtime->address_space, applied, true/*collective*/);
               if (!sub_partitions.empty())
               {
                 for (std::vector<IndexPartition>::const_iterator it = 
@@ -3561,7 +3561,8 @@ namespace Legion {
 #ifdef DEBUG_LEGION
               assert(deletion_req_indexes.empty());
 #endif
-              runtime->forest->destroy_index_space(index_space, applied);
+              runtime->forest->destroy_index_space(index_space,
+                              runtime->address_space, applied);
               if (!sub_partitions.empty())
               {
                 for (std::vector<IndexPartition>::const_iterator it = 
@@ -8503,37 +8504,36 @@ namespace Legion {
     //--------------------------------------------------------------------------
     CollectiveMapping::CollectiveMapping(
                             const std::vector<AddressSpaceID> &spaces, size_t r)
-      : radix(r)
+      : total_spaces(spaces.size()), radix(r)
     //--------------------------------------------------------------------------
     {
-      std::set<AddressSpaceID> unique_spaces(spaces.begin(), spaces.end());
-      unique_sorted_spaces.insert(unique_sorted_spaces.end(),
-                                  unique_spaces.begin(), unique_spaces.end());
+      for (std::vector<AddressSpaceID>::const_iterator it =
+            spaces.begin(); it != spaces.end(); it++)
+        unique_sorted_spaces.add(*it);
     }
 
     //--------------------------------------------------------------------------
     CollectiveMapping::CollectiveMapping(const ShardMapping &mapping, size_t r)
-      : radix(r)
+      : total_spaces(mapping.size()), radix(r)
     //--------------------------------------------------------------------------
     {
-      std::set<AddressSpaceID> unique_spaces;
-      for (unsigned idx = 0; idx < mapping.size(); idx++)
-        unique_spaces.insert(mapping[idx]);
-      unique_sorted_spaces.insert(unique_sorted_spaces.end(),
-                                  unique_spaces.begin(), unique_spaces.end());
+      for (unsigned idx = 0; idx < total_spaces; idx++)
+        unique_sorted_spaces.add(mapping[idx]);
     }
 
     //--------------------------------------------------------------------------
-    CollectiveMapping::CollectiveMapping(Deserializer &derez)
+    CollectiveMapping::CollectiveMapping(Deserializer &derez, size_t total)
+      : total_spaces(total)
     //--------------------------------------------------------------------------
     {
-      size_t num_spaces;
-      derez.deserialize(num_spaces);
-      unique_sorted_spaces.resize(num_spaces);
-      for (unsigned idx = 0; idx < num_spaces; idx++)
-        derez.deserialize(unique_sorted_spaces[idx]);
-      if (num_spaces > 0)
-        derez.deserialize(radix);
+#ifdef DEBUG_LEGION
+      assert(total_spaces > 0);
+#endif
+      derez.deserialize(unique_sorted_spaces);
+#ifdef DEBUG_LEGION
+      assert(unique_sorted_spaces.size() == total_spaces);
+#endif
+      derez.deserialize(radix);
     }
 
     //--------------------------------------------------------------------------
@@ -8542,12 +8542,7 @@ namespace Legion {
     {
       if (radix != rhs.radix)
         return false;
-      if (size() != rhs.size())
-        return false;
-      for (unsigned idx = 0; idx < unique_sorted_spaces.size(); idx++)
-        if (unique_sorted_spaces[idx] != rhs[idx])
-          return false;
-      return true;
+      return unique_sorted_spaces == rhs.unique_sorted_spaces;
     }
 
     //--------------------------------------------------------------------------
@@ -8565,12 +8560,12 @@ namespace Legion {
       const unsigned local_index = find_index(local);
       const unsigned origin_index = find_index(origin);
 #ifdef DEBUG_LEGION
-      assert(local_index < unique_sorted_spaces.size());
-      assert(origin_index < unique_sorted_spaces.size());
+      assert(local_index < total_spaces);
+      assert(origin_index < total_spaces);
 #endif
       const unsigned offset = convert_to_offset(local_index, origin_index);
       const unsigned index = convert_to_index((offset-1) / radix, origin_index);
-      return unique_sorted_spaces[index];
+      return unique_sorted_spaces.get_index(index);
     }
 
     //--------------------------------------------------------------------------
@@ -8581,62 +8576,32 @@ namespace Legion {
       const unsigned local_index = find_index(local);
       const unsigned origin_index = find_index(origin);
 #ifdef DEBUG_LEGION
-      assert(local_index < unique_sorted_spaces.size());
-      assert(origin_index < unique_sorted_spaces.size());
+      assert(local_index < total_spaces);
+      assert(origin_index < total_spaces);
 #endif
       const unsigned offset = radix * 
         convert_to_offset(local_index, origin_index);
       for (unsigned idx = 1; idx <= radix; idx++)
       {
         const unsigned child_offset = offset + idx;
-        if (child_offset < unique_sorted_spaces.size())
+        if (child_offset < total_spaces)
         {
           const unsigned index = convert_to_index(child_offset, origin_index);
-          children.push_back(unique_sorted_spaces[index]); 
+          children.push_back(unique_sorted_spaces.get_index(index)); 
         }
       }
-    }
-
-    //--------------------------------------------------------------------------
-    bool CollectiveMapping::contains(const AddressSpaceID space) const
-    //--------------------------------------------------------------------------
-    {
-      return (find_index(space) < unique_sorted_spaces.size()); 
     }
 
     //--------------------------------------------------------------------------
     void CollectiveMapping::pack(Serializer &rez) const
     //--------------------------------------------------------------------------
     {
-      rez.serialize<size_t>(unique_sorted_spaces.size());
-      for (unsigned idx = 0; idx < unique_sorted_spaces.size(); idx++)
-        rez.serialize(unique_sorted_spaces[idx]);
-      if (!unique_sorted_spaces.empty())
-        rez.serialize(radix);
-    }
-
-    //--------------------------------------------------------------------------
-    unsigned CollectiveMapping::find_index(const AddressSpaceID space) const
-    //--------------------------------------------------------------------------
-    {
-      // Binary search, will be fast
-      unsigned first = 0;
-      unsigned last = unique_sorted_spaces.size() - 1;
-      unsigned mid = 0;
-      while (first <= last)
-      {
-        mid = (first + last) / 2;
-        const AddressSpaceID midval = unique_sorted_spaces[mid];
-        if (space == midval)
-          return mid;
-        else if (space < midval)
-          last = mid - 1;
-        else if (midval < space)
-          first = mid + 1;
-        else
-          break;
-      }
-      return unique_sorted_spaces.size();
+#ifdef DEBUG_LEGION
+      assert(total_spaces > 0);
+#endif
+      rez.serialize(total_spaces);
+      rez.serialize(unique_sorted_spaces);
+      rez.serialize(radix);
     }
 
     //--------------------------------------------------------------------------
@@ -8645,13 +8610,13 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
-      assert(index < unique_sorted_spaces.size());
-      assert(origin_index < unique_sorted_spaces.size());
+      assert(index < total_spaces);
+      assert(origin_index < total_spaces);
 #endif
       if (index < origin_index)
       {
         // Modulus arithmetic here
-        return ((index + unique_sorted_spaces.size()) - origin_index);
+        return ((index + total_spaces) - origin_index);
       }
       else
         return (index - origin_index);
@@ -8663,12 +8628,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
-      assert(offset < unique_sorted_spaces.size());
-      assert(origin_index < unique_sorted_spaces.size());
+      assert(offset < total_spaces);
+      assert(origin_index < total_spaces);
 #endif
       unsigned result = origin_index + offset;
-      if (result >= unique_sorted_spaces.size())
-        result -= unique_sorted_spaces.size();
+      if (result >= total_spaces)
+        result -= total_spaces;
       return result;
     }
 
@@ -12516,13 +12481,13 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void IndirectRecordExchange::exchange_records(
-                           LegionVector<IndirectRecord>::aligned &local_records)
+                                    LegionVector<IndirectRecord> &local_records)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(records.empty());
 #endif
-      for (LegionVector<IndirectRecord>::aligned::const_iterator it = 
+      for (LegionVector<IndirectRecord>::const_iterator it = 
             local_records.begin(); it != local_records.end(); it++)
       {
         const IndirectKey key(it->inst, it->domain);
@@ -12531,7 +12496,7 @@ namespace Legion {
       perform_collective_sync();
       local_records.resize(records.size());
       unsigned index = 0;
-      for (LegionMap<IndirectKey,FieldMask>::aligned::const_iterator it = 
+      for (LegionMap<IndirectKey,FieldMask>::const_iterator it = 
             records.begin(); it != records.end(); it++, index++)
       {
         IndirectRecord &record = local_records[index];
@@ -12547,7 +12512,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       rez.serialize(records.size());
-      for (LegionMap<IndirectKey,FieldMask>::aligned::const_iterator it = 
+      for (LegionMap<IndirectKey,FieldMask>::const_iterator it = 
             records.begin(); it != records.end(); it++)
       {
         rez.serialize(it->first.inst);
@@ -12568,7 +12533,7 @@ namespace Legion {
         IndirectKey key;
         derez.deserialize(key.inst);
         derez.deserialize(key.domain);
-        LegionMap<IndirectKey,FieldMask>::aligned::iterator finder = 
+        LegionMap<IndirectKey,FieldMask>::iterator finder = 
           records.find(key);
         if (finder != records.end())
         {
@@ -13927,13 +13892,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       rez.serialize<size_t>(mappings.size());
-      for (std::map<DistributedID,LegionMap<ShardID,FieldMask>::aligned>::
-            const_iterator mit = mappings.begin(); 
-            mit != mappings.end(); mit++)
+      for (std::map<DistributedID,LegionMap<ShardID,FieldMask>>::const_iterator
+            mit = mappings.begin(); mit != mappings.end(); mit++)
       {
         rez.serialize(mit->first);
         rez.serialize<size_t>(mit->second.size());
-        for (LegionMap<ShardID,FieldMask>::aligned::const_iterator it = 
+        for (LegionMap<ShardID,FieldMask>::const_iterator it = 
               mit->second.begin(); it != mit->second.end(); it++)
         {
           rez.serialize(it->first);
@@ -13941,7 +13905,7 @@ namespace Legion {
         }
       }
       rez.serialize<size_t>(global_views.size());
-      for (LegionMap<DistributedID,FieldMask>::aligned::const_iterator it = 
+      for (LegionMap<DistributedID,FieldMask>::const_iterator it = 
             global_views.begin(); it != global_views.end(); it++)
       {
         rez.serialize(it->first);
@@ -13962,12 +13926,12 @@ namespace Legion {
         derez.deserialize(did);
         size_t num_shards;
         derez.deserialize(num_shards);
-        LegionMap<ShardID,FieldMask>::aligned &inst_map = mappings[did];
+        LegionMap<ShardID,FieldMask> &inst_map = mappings[did];
         for (unsigned idx2 = 0; idx2 < num_shards; idx2++)
         {
           ShardID sid;
           derez.deserialize(sid);
-          LegionMap<ShardID,FieldMask>::aligned::iterator finder = 
+          LegionMap<ShardID,FieldMask>::iterator finder = 
             inst_map.find(sid);
           if (finder != inst_map.end())
           {
@@ -13985,7 +13949,7 @@ namespace Legion {
       {
         DistributedID did;
         derez.deserialize(did);
-        LegionMap<DistributedID,FieldMask>::aligned::iterator finder = 
+        LegionMap<DistributedID,FieldMask>::iterator finder = 
           global_views.find(did);
         if (finder != global_views.end())
         {
@@ -14014,8 +13978,8 @@ namespace Legion {
           if (check_mappings)
           {
             const DistributedID did = mapping.get_manager()->did;
-            LegionMap<ShardID,FieldMask>::aligned &inst_map = mappings[did];
-            LegionMap<ShardID,FieldMask>::aligned::iterator finder = 
+            LegionMap<ShardID,FieldMask> &inst_map = mappings[did];
+            LegionMap<ShardID,FieldMask>::iterator finder = 
               inst_map.find(shard_id);
             if (finder == inst_map.end())
               inst_map[shard_id] = mask;
@@ -14023,7 +13987,7 @@ namespace Legion {
               finder->second |= mask;
           }
           const DistributedID view_did = local_views[idx]->did;
-          LegionMap<DistributedID,FieldMask>::aligned::iterator finder = 
+          LegionMap<DistributedID,FieldMask>::iterator finder = 
             global_views.find(view_did);
           if (finder == global_views.end())
             global_views[view_did] = mask;
@@ -14056,13 +14020,13 @@ namespace Legion {
           const DistributedID did = mapping.get_manager()->did;
           const FieldMask &mask = mapping.get_valid_fields();
           const std::map<DistributedID,
-                LegionMap<ShardID,FieldMask>::aligned>::const_iterator
+                LegionMap<ShardID,FieldMask> >::const_iterator
             finder = mappings.find(did);
 #ifdef DEBUG_LEGION
           // We should have at least our own
           assert(finder != mappings.end());
 #endif
-          for (LegionMap<ShardID,FieldMask>::aligned::const_iterator it = 
+          for (LegionMap<ShardID,FieldMask>::const_iterator it = 
                 finder->second.begin(); it != finder->second.end(); it++)
           {
             // We can skip ourself
@@ -14735,7 +14699,7 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     const VerifyReplicableExchange::ShardHashes& 
-                            VerifyReplicableExchange::exchange(uint64_t hash[2])
+                      VerifyReplicableExchange::exchange(const uint64_t hash[2])
     //--------------------------------------------------------------------------
     {
       const std::pair<uint64_t,uint64_t> key(hash[0],hash[1]);

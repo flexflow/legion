@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -624,12 +624,12 @@ namespace Legion {
     public:
       IndirectRecordExchange& operator=(const IndirectRecordExchange &rhs);
     public:
-      void exchange_records(LegionVector<IndirectRecord>::aligned &records);
+      void exchange_records(LegionVector<IndirectRecord> &records);
     public:
       virtual void pack_collective_stage(Serializer &rez, int stage);
       virtual void unpack_collective_stage(Deserializer &derez, int stage);
     protected:
-      LegionMap<IndirectKey,FieldMask>::aligned records;
+      LegionMap<IndirectKey,FieldMask> records;
     };
     
     /**
@@ -931,8 +931,8 @@ namespace Legion {
       const ShardID shard_id;
       const bool check_mappings;
     protected:
-      std::map<DistributedID,LegionMap<ShardID,FieldMask>::aligned> mappings;
-      LegionMap<DistributedID,FieldMask>::aligned global_views;
+      std::map<DistributedID,LegionMap<ShardID,FieldMask> > mappings;
+      LegionMap<DistributedID,FieldMask> global_views;
     };
 
     /**
@@ -1095,7 +1095,7 @@ namespace Legion {
       virtual void unpack_collective_stage(Deserializer &derez, int stage);
     public:
       typedef std::map<std::pair<uint64_t,uint64_t>,ShardID> ShardHashes;
-      const ShardHashes& exchange(uint64_t hash[2]);
+      const ShardHashes& exchange(const uint64_t hash[2]);
     public:
       ShardHashes unique_hashes;
     };
@@ -1479,7 +1479,7 @@ namespace Legion {
       std::map<LogicalRegion,RegionNode*> replicated_regions;
       // Version information objects for each of our local regions
       // that we are own after sharding non-replicated partitions
-      LegionMap<RegionNode*,VersionInfo>::aligned sharded_region_version_infos;
+      LegionMap<RegionNode*,VersionInfo> sharded_region_version_infos;
       // Regions for which we need to propagate refinements for
       // non-replicated partition refinements
       std::map<PartitionNode*,std::vector<RegionNode*> > sharded_regions;
@@ -1624,7 +1624,7 @@ namespace Legion {
           const ApEvent local_post, const PhysicalTraceInfo &trace_info,
           const InstanceSet &instances, const IndexSpace space,
           const DomainPoint &key,
-          LegionVector<IndirectRecord>::aligned &records, const bool sources);
+          LegionVector<IndirectRecord> &records, const bool sources);
     public:
       void initialize_replication(ReplicateContext *ctx,
                                   std::vector<ApBarrier> &indirection_bars,
@@ -2419,11 +2419,11 @@ namespace Legion {
     public:
       CollectiveMapping(const std::vector<AddressSpaceID> &spaces,size_t radix);
       CollectiveMapping(const ShardMapping &shard_mapping, size_t radix);
-      CollectiveMapping(Deserializer &derez);
+      CollectiveMapping(Deserializer &derez, size_t total_spaces);
     public:
       inline AddressSpaceID operator[](unsigned idx) const
-        { return unique_sorted_spaces[idx]; }
-      inline size_t size(void) const { return unique_sorted_spaces.size(); }
+        { return unique_sorted_spaces.get_index(idx); }
+      inline size_t size(void) const { return total_spaces; }
       bool operator==(const CollectiveMapping &rhs) const;
       bool operator!=(const CollectiveMapping &rhs) const;
     public:
@@ -2431,15 +2431,18 @@ namespace Legion {
                                 const AddressSpaceID local) const;
       void get_children(const AddressSpaceID origin, const AddressSpaceID local,
                         std::vector<AddressSpaceID> &children) const;
-      bool contains(const AddressSpaceID space) const;
+      inline bool contains(const AddressSpaceID space) const
+        { return unique_sorted_spaces.contains(space); }
     public:
       void pack(Serializer &rez) const;
     protected:
-      unsigned find_index(const AddressSpaceID space) const;
+      inline unsigned find_index(const AddressSpaceID space) const
+        { return unique_sorted_spaces.find_index(space); }
       unsigned convert_to_offset(unsigned index, unsigned origin) const;
       unsigned convert_to_index(unsigned offset, unsigned origin) const;
     protected:
-      std::vector<AddressSpaceID> unique_sorted_spaces;
+      NodeSet unique_sorted_spaces;
+      size_t total_spaces;
       size_t radix;
     };
 

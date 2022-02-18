@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,7 +76,7 @@ template<unsigned int MAX> class AVXTLBitMask;
 template<unsigned int MAX> class PPCBitMask;
 template<unsigned int MAX> class PPCTLBitMask;
 #endif
-template<typename IT, typename DT, bool BIDIR> class IntegerSet;
+template<typename DT, unsigned BLOAT, bool BIDIR> class CompoundBitMask;
 
 namespace BindingLib { class Utility; } // BindingLib namespace
 
@@ -704,6 +704,7 @@ namespace Legion {
       // The default and work virtual channels are unordered
       DEFAULT_VIRTUAL_CHANNEL = 0, // latency priority
       THROUGHPUT_VIRTUAL_CHANNEL = 1, // throughput priority
+      LAST_UNORDERED_VIRTUAL_CHANNEL = THROUGHPUT_VIRTUAL_CHANNEL,
       // All the rest of these are ordered (latency-priority) channels
       MAPPER_VIRTUAL_CHANNEL = 1, 
       TASK_VIRTUAL_CHANNEL = 2,
@@ -736,7 +737,6 @@ namespace Legion {
       SEND_INDEX_SPACE_COLORS_RESPONSE,
       SEND_INDEX_SPACE_REMOTE_EXPRESSION_REQUEST,
       SEND_INDEX_SPACE_REMOTE_EXPRESSION_RESPONSE,
-      SEND_INDEX_SPACE_REMOTE_EXPRESSION_INVALIDATION,
       SEND_INDEX_SPACE_GENERATE_COLOR_REQUEST,
       SEND_INDEX_SPACE_GENERATE_COLOR_RESPONSE,
       SEND_INDEX_SPACE_RELEASE_COLOR,
@@ -954,7 +954,6 @@ namespace Legion {
         "Send Index Space Colors Response",                           \
         "Send Index Space Remote Expression Request",                 \
         "Send Index Space Remote Expression Response",                \
-        "Send Index Space Remote Expression Invalidation",            \
         "Send Index Space Generate Color Request",                    \
         "Send Index Space Generate Color Response",                   \
         "Send Index Space Release Color",                             \
@@ -1726,56 +1725,6 @@ namespace Legion {
     class RemoteContext;
     class LeafContext;
 
-    // Nasty global variable for TLS support of figuring out
-    // our context implicitly
-    extern __thread TaskContext *implicit_context;
-    // Same thing for the runtime
-    extern __thread Runtime *implicit_runtime;
-    // Another nasty global variable for tracking the fast
-    // reservations that we are holding
-    extern __thread AutoLock *local_lock_list;
-    // One more nasty global variable that we use for tracking
-    // the provenance of meta-task operations for profiling
-    // purposes, this has no bearing on correctness
-    extern __thread ::legion_unique_id_t implicit_provenance;
-    // Use this to track if we're inside of a registration 
-    // callback function which we know to be deduplicated
-    enum RegistrationCallbackMode {
-      NO_REGISTRATION_CALLBACK = 0,
-      LOCAL_REGISTRATION_CALLBACK = 1,
-      GLOBAL_REGISTRATION_CALLBACK = 2,
-    };
-    extern __thread unsigned inside_registration_callback;
-#ifdef DEBUG_LEGION_WAITS
-    extern __thread int meta_task_id;
-#endif
-#ifdef DEBUG_LEGION_CALLERS
-    extern __thread LgTaskID implicit_task_kind;
-    extern __thread LgTaskID implicit_task_caller;
-#endif
-
-    /**
-     * \class LgTaskArgs
-     * The base class for all Legion Task arguments
-     */
-    template<typename T>
-    struct LgTaskArgs {
-    public:
-      LgTaskArgs(::legion_unique_id_t uid)
-        : provenance(uid),
-#ifdef DEBUG_LEGION_CALLERS
-          lg_call_id(implicit_task_kind),
-#endif
-          lg_task_id(T::TASK_ID) { }
-    public:
-      // In this order for alignment reasons
-      const ::legion_unique_id_t provenance;
-#ifdef DEBUG_LEGION_CALLERS
-      const LgTaskID lg_call_id;
-#endif
-      const LgTaskID lg_task_id;
-    };
-    
     // legion_trace.h
     class LegionTrace;
     class StaticTrace;
@@ -1815,6 +1764,7 @@ namespace Legion {
     class RegionTreeForest;
     class CopyIndirection;
     class IndexSpaceExpression;
+    class IndexSpaceExprRef;
     class IndexSpaceOperation;
     template<int DIM, typename T> class IndexSpaceOperationT;
     template<int DIM, typename T> class IndexSpaceUnion;
@@ -1832,6 +1782,7 @@ namespace Legion {
     class PartitionNode;
     class ColorSpaceIterator;
     template<int DIM, typename T> class ColorSpaceIteratorT;
+    template<int DIM, typename T, typename RT = void> class KDNode;
 
     class RegionTreeContext;
     class RegionTreePath;
@@ -1850,7 +1801,7 @@ namespace Legion {
     class Notifiable;
     class ReferenceMutator;
     class LocalReferenceMutator;
-    class NeverReferenceMutator;
+    class ImplicitReferenceTracker;
     class DistributedCollectable;
     class LayoutDescription;
     class InstanceManager; // base class for all instances
@@ -1888,6 +1839,7 @@ namespace Legion {
     class TreeClose;
     struct CloseInfo; 
     struct FieldDataDescriptor;
+    struct PendingRemoteExpression;
 
     // legion_spy.h
     class TreeStateLogger;
@@ -1950,6 +1902,63 @@ namespace Legion {
     class FutureNameExchange;
     class MustEpochMappingBroadcast;
     class MustEpochMappingExchange;
+
+    // Nasty global variable for TLS support of figuring out
+    // our context implicitly
+    extern __thread TaskContext *implicit_context;
+    // Same thing for the runtime
+    extern __thread Runtime *implicit_runtime;
+    // Another nasty global variable for tracking the fast
+    // reservations that we are holding
+    extern __thread AutoLock *local_lock_list;
+    // One more nasty global variable that we use for tracking
+    // the provenance of meta-task operations for profiling
+    // purposes, this has no bearing on correctness
+    extern __thread ::legion_unique_id_t implicit_provenance;
+    // Use this to track if we're inside of a registration 
+    // callback function which we know to be deduplicated
+    enum RegistrationCallbackMode {
+      NO_REGISTRATION_CALLBACK = 0,
+      LOCAL_REGISTRATION_CALLBACK = 1,
+      GLOBAL_REGISTRATION_CALLBACK = 2,
+    };
+    extern __thread unsigned inside_registration_callback;
+    // This data structure tracks references to any live
+    // temporary index space expressions that have been
+    // handed back by the region tree inside the execution
+    // of a meta-task or a runtime API call. It also tracks
+    // changes to remote distributed collectable that can be
+    // delayed and batched together.
+    extern __thread ImplicitReferenceTracker *implicit_reference_tracker; 
+#ifdef DEBUG_LEGION_WAITS
+    extern __thread int meta_task_id;
+#endif
+#ifdef DEBUG_LEGION_CALLERS
+    extern __thread LgTaskID implicit_task_kind;
+    extern __thread LgTaskID implicit_task_caller;
+#endif
+
+    /**
+     * \class LgTaskArgs
+     * The base class for all Legion Task arguments
+     */
+    template<typename T>
+    struct LgTaskArgs {
+    public:
+      LgTaskArgs(::legion_unique_id_t uid)
+        : provenance(uid),
+#ifdef DEBUG_LEGION_CALLERS
+          lg_call_id(implicit_task_kind),
+#endif
+          lg_task_id(T::TASK_ID) { }
+    public:
+      // In this order for alignment reasons
+      const ::legion_unique_id_t provenance;
+#ifdef DEBUG_LEGION_CALLERS
+      const LgTaskID lg_call_id;
+#endif
+      const LgTaskID lg_task_id;
+    };
 
 #define FRIEND_ALL_RUNTIME_CLASSES                          \
     friend class Legion::Runtime;                           \
@@ -2183,9 +2192,16 @@ namespace Legion {
     typedef Realm::DynamicTemplates::ListProduct2<Realm::DIMCOUNTS, 
                                                   Realm::DIMTYPES> SUPER;
     public:
-      template<int N, typename T>
-      static inline TypeTag encode_tag(void) {
+      template<int N, typename T> __CUDA_HD__
+      static inline constexpr TypeTag encode_tag(void) {
+#if __cplusplus >= 201402L
+        constexpr TypeTag type =
+          SUPER::template encode_tag<Realm::DynamicTemplates::Int<N>, T>();
+        static_assert(type != 0, "All types should be non-zero for Legion");
+        return type;
+#else
         return SUPER::template encode_tag<Realm::DynamicTemplates::Int<N>, T>();
+#endif
       }
       template<int N, typename T>
       static inline void check_type(const TypeTag t) {
@@ -2320,7 +2336,7 @@ namespace Legion {
                     LEGION_NODE_MASK_NODE_MASK> NodeMask;
 #endif
 #endif
-    typedef IntegerSet<AddressSpaceID,NodeMask,false/*bidir*/> NodeSet;
+    typedef CompoundBitMask<NodeMask,1/*bloat*/,true/*bidir*/> NodeSet;
 
 #undef LEGION_NODE_MASK_NODE_SHIFT
 #undef LEGION_NODE_MASK_NODE_MASK
@@ -2742,6 +2758,9 @@ namespace Legion {
 #endif
       // Save whether we are in a registration callback
       unsigned local_callback = Internal::inside_registration_callback;
+      // Save the reference tracker that we have
+      ImplicitReferenceTracker *local_tracker = implicit_reference_tracker;
+      Internal::implicit_reference_tracker = NULL;
       // Check to see if we have any local locks to notify
       if (Internal::local_lock_list != NULL)
       {
@@ -2784,6 +2803,11 @@ namespace Legion {
 #endif
       // Write the registration callback information back
       Internal::inside_registration_callback = local_callback;
+#ifdef DEBUG_LEGION
+      assert(Internal::implicit_reference_tracker == NULL);
+#endif
+      // Write the local reference tracker back
+      Internal::implicit_reference_tracker = local_tracker;
 #ifdef DEBUG_LEGION_WAITS
       Internal::meta_task_id = local_meta_task_id;
       const long long stop = Realm::Clock::current_time_in_microseconds();
@@ -2796,6 +2820,10 @@ namespace Legion {
     inline void LgEvent::wait_faultaware(bool &poisoned) const
     //--------------------------------------------------------------------------
     {
+#ifdef DEBUG_LEGION_WAITS
+      const int local_meta_task_id = Internal::meta_task_id;
+      const long long start = Realm::Clock::current_time_in_microseconds();
+#endif
       // Save the context locally
       Internal::TaskContext *local_ctx = Internal::implicit_context; 
       // Save the task provenance information
@@ -2806,6 +2834,9 @@ namespace Legion {
 #endif
       // Save whether we are in a registration callback
       unsigned local_callback = Internal::inside_registration_callback;
+      // Save the reference tracker that we have
+      ImplicitReferenceTracker *local_tracker = implicit_reference_tracker;
+      Internal::implicit_reference_tracker = NULL;
       // Check to see if we have any local locks to notify
       if (Internal::local_lock_list != NULL)
       {
@@ -2848,6 +2879,17 @@ namespace Legion {
 #endif
       // Write the registration callback information back
       Internal::inside_registration_callback = local_callback;
+#ifdef DEBUG_LEGION
+      assert(Internal::implicit_reference_tracker == NULL);
+#endif
+      // Write the local reference tracker back
+      Internal::implicit_reference_tracker = local_tracker;
+#ifdef DEBUG_LEGION_WAITS
+      Internal::meta_task_id = local_meta_task_id;
+      const long long stop = Realm::Clock::current_time_in_microseconds();
+      if (((stop - start) >= LIMIT) && (local_meta_task_id == BAD_TASK_ID))
+        assert(false);
+#endif
     }
 
 #ifdef LEGION_SPY

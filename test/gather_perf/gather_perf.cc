@@ -1,4 +1,4 @@
-/* Copyright 2021 NVIDIA Corporation
+/* Copyright 2022 NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1087,7 +1087,7 @@ public:
     , replicate(_replicate)
   {
     Machine::MemoryQuery mq(machine);
-    mq.only_kind(Memory::SYSTEM_MEM);
+    mq.only_kind(Memory::SYSTEM_MEM).has_capacity(1);
     for(Machine::MemoryQuery::iterator it = mq.begin();
 	it != mq.end();
 	++it) {

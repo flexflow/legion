@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@ namespace Realm {
   namespace Network {
     REALM_INTERNAL_API_EXTERNAL_LINKAGE NodeID my_node_id = 0;
     REALM_INTERNAL_API_EXTERNAL_LINKAGE NodeID max_node_id = 0;
-    NodeSet all_peers;
+    REALM_INTERNAL_API_EXTERNAL_LINKAGE NodeSet all_peers;
     NetworkModule *single_network = 0;
 
     bool check_for_quiescence(IncomingMessageManager *message_manager)

@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -361,7 +361,8 @@ namespace Legion {
                                       const std::set<FieldID> &fields) = 0;
       virtual FieldAllocatorImpl* create_field_allocator(FieldSpace handle,
                                                          bool unordered);
-      virtual void destroy_field_allocator(FieldSpaceNode *node);
+      virtual void destroy_field_allocator(FieldSpaceNode *node, 
+                                           bool from_application = true);
       virtual void get_local_field_set(const FieldSpace handle,
                                        const std::set<unsigned> &indexes,
                                        std::set<FieldID> &to_set) const = 0;
@@ -510,7 +511,7 @@ namespace Legion {
     public:
       virtual void initialize_region_tree_contexts(
           const std::vector<RegionRequirement> &clone_requirements,
-          const LegionVector<VersionInfo>::aligned &version_infos,
+          const LegionVector<VersionInfo> &version_infos,
           const std::vector<EquivalenceSet*> &equivalence_sets,
           const std::vector<ApUserEvent> &unmap_events,
           std::set<RtEvent> &applied_events,
@@ -751,7 +752,7 @@ namespace Legion {
 #endif
     }; 
 
-    class InnerContext : public TaskContext,
+    class InnerContext : public TaskContext, public Murmur3Hasher::HashVerifier,
                          public LegionHeapify<InnerContext> {
     public:
       // Prepipeline stages need to hold a reference since the
@@ -933,6 +934,9 @@ namespace Legion {
               std::map<IndexPartition,unsigned> &created_partitions,
               std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
               std::set<RtEvent> &preconditions);
+    public: // Murmur3Hasher::HashVerifier method
+      virtual bool verify_hash(const uint64_t hash[2],
+                               const char *description, bool every);
     protected:
       void register_region_creations(
                      std::map<LogicalRegion,unsigned> &regions);
@@ -1407,7 +1411,7 @@ namespace Legion {
       void configure_context(MapperManager *mapper, TaskPriority priority);
       virtual void initialize_region_tree_contexts(
           const std::vector<RegionRequirement> &clone_requirements,
-          const LegionVector<VersionInfo>::aligned &version_infos,
+          const LegionVector<VersionInfo> &version_infos,
           const std::vector<EquivalenceSet*> &equivalence_sets,
           const std::vector<ApUserEvent> &unmap_events,
           std::set<RtEvent> &applied_events,
@@ -1544,8 +1548,7 @@ namespace Legion {
       // unordered detach operations can touch it without synchronizing
       // with the executing task
       mutable LocalLock inline_lock;
-      LegionList<PhysicalRegion,TASK_INLINE_REGION_ALLOC>::tracked
-                                                inline_regions;
+      LegionList<PhysicalRegion,TASK_INLINE_REGION_ALLOC> inline_regions;
     protected:
       mutable LocalLock                     child_op_lock;
       // Track whether this task has finished executing
@@ -1554,11 +1557,11 @@ namespace Legion {
       size_t total_summary_count;
       size_t outstanding_children_count;
       LegionMap<Operation*,GenerationID,
-                EXECUTING_CHILD_ALLOC>::tracked executing_children;
+                EXECUTING_CHILD_ALLOC> executing_children;
       LegionMap<Operation*,GenerationID,
-                EXECUTED_CHILD_ALLOC>::tracked executed_children;
+                EXECUTED_CHILD_ALLOC> executed_children;
       LegionMap<Operation*,GenerationID,
-                COMPLETE_CHILD_ALLOC>::tracked complete_children; 
+                COMPLETE_CHILD_ALLOC> complete_children; 
       // For tracking any operations that come from outside the
       // task like a garbage collector that need to be inserted
       // into the stream of operations from the task
@@ -1590,7 +1593,7 @@ namespace Legion {
       CompletionQueue                                 post_task_comp_queue;
     protected:
       // Traces for this task's execution
-      LegionMap<TraceID,LegionTrace*,TASK_TRACES_ALLOC>::tracked traces;
+      LegionMap<TraceID,LegionTrace*,TASK_TRACES_ALLOC> traces;
       LegionTrace *current_trace;
       LegionTrace *previous_trace;
       bool valid_wait_event;
@@ -1635,7 +1638,7 @@ namespace Legion {
     protected:
       mutable LocalLock                         pending_set_lock;
       LegionMap<RegionNode*,
-        FieldMaskSet<PendingEquivalenceSet> >::aligned pending_equivalence_sets;
+        FieldMaskSet<PendingEquivalenceSet> >   pending_equivalence_sets;
     protected:
       mutable LocalLock                       remote_lock;
       std::map<AddressSpaceID,RemoteContext*> remote_instances;
@@ -1676,8 +1679,8 @@ namespace Legion {
         std::vector<AttachProjectionFunctor*> > attach_functions;
     protected:
       // Resources that can build up over a task's lifetime
-      LegionDeque<Reservation,TASK_RESERVATION_ALLOC>::tracked context_locks;
-      LegionDeque<ApBarrier,TASK_BARRIER_ALLOC>::tracked context_barriers;
+      LegionDeque<Reservation,TASK_RESERVATION_ALLOC> context_locks;
+      LegionDeque<ApBarrier,TASK_BARRIER_ALLOC> context_barriers;
     };
 
     /**
@@ -1924,6 +1927,9 @@ namespace Legion {
               std::map<IndexPartition,unsigned> &created_partitions,
               std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
               std::set<RtEvent> &preconditions);
+    public: // Murmur3Hasher::HashVerifier method
+      virtual bool verify_hash(const uint64_t hash[2],
+                               const char *description, bool every);
     protected:
       void receive_replicate_resources(size_t return_index,
               std::map<LogicalRegion,unsigned> &created_regions,
@@ -2259,7 +2265,8 @@ namespace Legion {
     public:
       virtual FieldAllocatorImpl* create_field_allocator(FieldSpace handle,
                                                          bool unordered);
-      virtual void destroy_field_allocator(FieldSpaceNode *node);
+      virtual void destroy_field_allocator(FieldSpaceNode *node,
+                                           bool from_application = true);
     public:
       virtual void insert_unordered_ops(AutoLock &d_lock, const bool end_task,
                                         const bool progress);
@@ -2482,9 +2489,10 @@ namespace Legion {
       IndexSpaceNode* compute_index_attach_launch_spaces(
                                             std::vector<size_t> &shard_sizes);
     public:
-      void hash_future(Murmur3Hasher &hasher, 
-                       const unsigned safe_level, const Future &future) const;
-      static void hash_future_map(Murmur3Hasher &hasher, const FutureMap &map);
+      void hash_future(Murmur3Hasher &hasher, const unsigned safe_level, 
+                       const Future &future, const char *description) const;
+      static void hash_future_map(Murmur3Hasher &hasher, const FutureMap &map,
+                                  const char *description);
       static void hash_index_space_requirements(Murmur3Hasher &hasher,
           const std::vector<IndexSpaceRequirement> &index_requirements);
       static void hash_region_requirements(Murmur3Hasher &hasher,
@@ -2493,16 +2501,16 @@ namespace Legion {
           const std::vector<Grant> &grants);
       static void hash_phase_barriers(Murmur3Hasher &hasher,
           const std::vector<PhaseBarrier> &phase_barriers);
-      static void hash_argument(Murmur3Hasher &hasher, 
-                          const unsigned safe_level, const UntypedBuffer &arg);
-      static void hash_predicate(Murmur3Hasher &hasher, const Predicate &pred);
+      static void hash_argument(Murmur3Hasher &hasher,const unsigned safe_level,
+                             const UntypedBuffer &arg, const char *description);
+      static void hash_predicate(Murmur3Hasher &hasher, const Predicate &pred,
+                                 const char *description);
       static void hash_static_dependences(Murmur3Hasher &hasher,
           const std::vector<StaticDependence> *dependences);
       void hash_task_launcher(Murmur3Hasher &hasher, 
           const unsigned safe_level, const TaskLauncher &launcher) const;
       void hash_index_launcher(Murmur3Hasher &hasher,
           const unsigned safe_level, const IndexTaskLauncher &launcher);
-      void verify_replicable(Murmur3Hasher &hasher, const char *func_name);
     public:
       // A little help for ConsensusMatchExchange since it is templated
       static void help_complete_future(Future &f, const void *ptr,
@@ -3171,7 +3179,7 @@ namespace Legion {
     public:
       virtual void initialize_region_tree_contexts(
           const std::vector<RegionRequirement> &clone_requirements,
-          const LegionVector<VersionInfo>::aligned &version_infos,
+          const LegionVector<VersionInfo> &version_infos,
           const std::vector<EquivalenceSet*> &equivalence_sets,
           const std::vector<ApUserEvent> &unmap_events,
           std::set<RtEvent> &applied_events, 
@@ -3230,6 +3238,9 @@ namespace Legion {
     inline void TaskContext::begin_runtime_call(void)
     //--------------------------------------------------------------------------
     {
+#ifdef DEBUG_LEGION
+      assert(implicit_reference_tracker == NULL);
+#endif
       if (overhead_tracker == NULL)
         return;
       const long long current = Realm::Clock::current_time_in_nanoseconds();
@@ -3242,6 +3253,11 @@ namespace Legion {
     inline void TaskContext::end_runtime_call(void)
     //--------------------------------------------------------------------------
     {
+      if (implicit_reference_tracker != NULL)
+      {
+        delete implicit_reference_tracker;
+        implicit_reference_tracker = NULL;
+      }
       if (overhead_tracker == NULL)
         return;
       const long long current = Realm::Clock::current_time_in_nanoseconds();

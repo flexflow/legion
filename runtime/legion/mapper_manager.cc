@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -3461,14 +3461,14 @@ namespace Legion {
     {
       pause_mapper_call(ctx);
       Domain result = Domain::NO_DOMAIN;
-      const TypeTag type_tag = handle.get_type_tag();
-      switch (NT_TemplateHelper::get_dim(type_tag))
+      switch (NT_TemplateHelper::get_dim(handle.get_type_tag()))
       {
 #define DIMFUNC(DIM) \
         case DIM: \
           { \
             DomainT<DIM,coord_t> realm_is; \
-            runtime->get_index_space_domain(handle, &realm_is, type_tag); \
+            const TypeTag tag = NT_TemplateHelper::encode_tag<DIM,coord_t>(); \
+            runtime->get_index_space_domain(handle, &realm_is, tag); \
             result = realm_is; \
             break; \
           }

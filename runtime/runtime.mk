@@ -1,5 +1,5 @@
-# Copyright 2021 Stanford University, NVIDIA Corporation
-# Copyright 2021 Los Alamos National Laboratory
+# Copyright 2022 Stanford University, NVIDIA Corporation
+# Copyright 2022 Los Alamos National Laboratory
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -168,18 +168,17 @@ GPU_ARCH ?= pascal
 CONDUIT ?= ibv #not sure if this is true
 endif
 
-# backwards-compatibility for GASNet builds - any of GASNET_ROOT, GASNET, or
-#  USE_GASNET=1 will set REALM_NETWORKS=gasnet1
-USE_GASNET ?= 0
+# Backwards-compatibility for GASNet builds
+# GASNET_ROOT is a synonym for GASNET
 ifdef GASNET_ROOT
   GASNET ?= $(GASNET_ROOT)
 endif
-ifneq ($(strip $(GASNET)),)
-  ifneq ($(strip $(USE_GASNET)),0)
-    REALM_NETWORKS ?= gasnet1
-  endif
+# USE_GASNET=1 will set REALM_NETWORKS=gasnet1
+USE_GASNET ?= 0
+ifeq ($(strip $(USE_GASNET)),1)
+  REALM_NETWORKS ?= gasnet1
 endif
-# Backwards compatibility, turn on network support if REALM_NETWORKS is not empty
+# Turn on network support if REALM_NETWORKS is not empty
 REALM_NETWORKS ?=
 ifndef USE_NETWORK
   ifeq ($(strip $(REALM_NETWORKS)),)
@@ -859,6 +858,7 @@ REALM_SRC 	+= $(LG_RT_DIR)/realm/runtime_impl.cc \
 	           $(LG_RT_DIR)/realm/transfer/channel.cc \
 	           $(LG_RT_DIR)/realm/transfer/channel_disk.cc \
 	           $(LG_RT_DIR)/realm/transfer/lowlevel_dma.cc \
+	           $(LG_RT_DIR)/realm/transfer/ib_memory.cc \
 	           $(LG_RT_DIR)/realm/mutex.cc \
 	           $(LG_RT_DIR)/realm/module.cc \
 	           $(LG_RT_DIR)/realm/threads.cc \
@@ -1187,16 +1187,16 @@ TARGET_BIN_FILES := $(addprefix $(strip $(PREFIX))/bin/,$(INSTALL_BIN_FILES))
 TARGET_INC_FILES := $(addprefix $(strip $(PREFIX))/include/,$(INSTALL_INC_FILES))
 TARGET_LIB_FILES := $(addprefix $(strip $(PREFIX))/lib/,$(INSTALL_LIB_FILES))
 install: $(TARGET_HEADERS) $(TARGET_BIN_FILES) $(TARGET_INC_FILES) $(TARGET_LIB_FILES)
-$(TARGET_HEADERS) : $(strip $(PREFIX))/include/% : $(LG_RT_DIR)/%
+$(TARGET_HEADERS) : $(strip $(PREFIX))/include/% : $(LG_RT_DIR)/% $(OUTFILE)
 	mkdir -p $(dir $@)
 	cp $< $@
-$(TARGET_BIN_FILES) : $(strip $(PREFIX))/bin/% : %
+$(TARGET_BIN_FILES) : $(strip $(PREFIX))/bin/% : % $(OUTFILE)
 	mkdir -p $(dir $@)
 	cp $< $@
-$(TARGET_INC_FILES) : $(strip $(PREFIX))/include/% : %
+$(TARGET_INC_FILES) : $(strip $(PREFIX))/include/% : % $(OUTFILE)
 	mkdir -p $(dir $@)
 	cp $< $@
-$(TARGET_LIB_FILES) : $(strip $(PREFIX))/lib/% : %
+$(TARGET_LIB_FILES) : $(strip $(PREFIX))/lib/% : % $(OUTFILE)
 	mkdir -p $(dir $@)
 	cp $< $@
 else
@@ -1312,19 +1312,19 @@ $(MAPPER_OBJS) : %.cc.o : %.cc $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
 
 ifeq ($(strip $(MK_HIP_TARGET)),ROCM)
 $(filter %.cpp.o,$(APP_OBJS)) : %.cpp.o : %.cpp $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(HIPCC) -o $<.d -M $< $(HIPCC_FLAGS) $(INC_FLAGS)
+	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
 	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
 endif
 
 ifeq ($(strip $(MK_HIP_TARGET)),CUDA)
 $(filter %.cu.o,$(APP_OBJS)) : %.cu.o : %.cu $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(HIPCC) -o $<.d -M $< $(HIPCC_FLAGS) $(INC_FLAGS)
+	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
 	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
 endif
 
 ifeq ($(strip $(USE_CUDA)),1)
 $(filter %.cu.o,$(APP_OBJS)) : %.cu.o : %.cu $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(NVCC) -o $<.d -M $< $(NVCC_FLAGS) $(INC_FLAGS)
+	$(NVCC) -o $<.d -M -MT $@ $< $(NVCC_FLAGS) $(INC_FLAGS)
 	$(NVCC) -o $@ -c $< $(NVCC_FLAGS) $(INC_FLAGS)
 endif
 
@@ -1332,19 +1332,19 @@ ifeq ($(strip $(MK_HIP_TARGET)),ROCM)
 $(filter %.cpp,$(LEGION_HIP_SRC)): %.cpp : %.cu
 	hipify-perl $< > $@
 $(filter %.cpp.o,$(LEGION_OBJS)): %.cpp.o : %.cpp $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(HIPCC) -o $<.d -M $< $(HIPCC_FLAGS) $(INC_FLAGS)
+	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
 	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
 endif
 
 ifeq ($(strip $(MK_HIP_TARGET)),CUDA)
 $(filter %.cu.o,$(LEGION_OBJS)): %.cu.o : %.cu $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(HIPCC) -o $<.d -M $< $(HIPCC_FLAGS) $(INC_FLAGS)
+	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
 	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
 endif
 
 ifeq ($(strip $(USE_CUDA)),1)
 $(filter %.cu.o,$(LEGION_OBJS)): %.cu.o : %.cu $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(NVCC) -o $<.d -M $< $(NVCC_FLAGS) $(INC_FLAGS)
+	$(NVCC) -o $<.d -M -MT $@ $< $(NVCC_FLAGS) $(INC_FLAGS)
 	$(NVCC) -o $@ -c $< $(NVCC_FLAGS) $(INC_FLAGS)
 endif
 

@@ -1,4 +1,4 @@
-/* Copyright 2021 Stanford University, NVIDIA Corporation
+/* Copyright 2022 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -80,7 +80,7 @@ namespace Legion {
     {
       FieldMask compressed; 
       bool found_in_cache = false;
-      for (LegionDeque<std::pair<FieldMask,FieldMask> >::aligned::const_iterator
+      for (LegionDeque<std::pair<FieldMask,FieldMask> >::const_iterator
             it = compressed_cache.begin(); it != compressed_cache.end(); it++)
       {
         if (it->first == src_mask)
@@ -97,14 +97,14 @@ namespace Legion {
         compressed_cache.push_back(
             std::pair<FieldMask,FieldMask>(src_mask, compressed));
       }
-      int pop_count = FieldMask::pop_count(compressed);
+      const unsigned pop_count = FieldMask::pop_count(compressed);
 #ifdef DEBUG_LEGION
       assert(pop_count == FieldMask::pop_count(src_mask));
 #endif
       unsigned offset = dst_fields.size();
       dst_fields.resize(offset + pop_count);
       int next_start = 0;
-      for (int idx = 0; idx < pop_count; idx++)
+      for (unsigned idx = 0; idx < pop_count; idx++)
       {
         int index = compressed.find_next_set(next_start);
         CopySrcDstField &field = dst_fields[offset+idx];
@@ -330,13 +330,12 @@ namespace Legion {
       {
         AutoLock o_lock(layout_lock,1,false/*exclusive*/);
         std::map<LEGION_FIELD_MASK_FIELD_TYPE,
-                 LegionList<std::pair<FieldMask,FieldMask> >::aligned>::
-                   const_iterator finder = comp_cache.find(hash_key);
+                 LegionList<std::pair<FieldMask,FieldMask> > >::const_iterator
+                   finder = comp_cache.find(hash_key);
         if (finder != comp_cache.end())
         {
-          for (LegionList<std::pair<FieldMask,FieldMask> >::aligned::
-                const_iterator it = finder->second.begin(); 
-                it != finder->second.end(); it++)
+          for (LegionList<std::pair<FieldMask,FieldMask> >::const_iterator it =
+                finder->second.begin(); it != finder->second.end(); it++)
           {
             if (it->first == copy_mask)
             {
@@ -361,14 +360,14 @@ namespace Legion {
       // the order in which they appear in the field mask so that 
       // they line up in the same order with the source/destination infos
       // (depending on the calling context of this function
-      int pop_count = FieldMask::pop_count(compressed);
+      const unsigned pop_count = FieldMask::pop_count(compressed);
 #ifdef DEBUG_LEGION
       assert(pop_count == FieldMask::pop_count(copy_mask));
 #endif
       unsigned offset = fields.size();
       fields.resize(offset + pop_count);
       int next_start = 0;
-      for (int idx = 0; idx < pop_count; idx++)
+      for (unsigned idx = 0; idx < pop_count; idx++)
       {
         int index = compressed.find_next_set(next_start);
         CopySrcDstField &field = fields[offset+idx];
@@ -594,9 +593,9 @@ namespace Legion {
       if (layout != NULL)
         layout->add_reference();
       if (field_space_node != NULL)
-        field_space_node->add_base_gc_ref(PHYSICAL_MANAGER_REF);
+        field_space_node->add_nested_gc_ref(did);
       if (instance_domain != NULL)
-        instance_domain->add_expression_reference();
+        instance_domain->add_nested_expression_reference(did);
     }
 
     //--------------------------------------------------------------------------
@@ -606,10 +605,10 @@ namespace Legion {
       if ((layout != NULL) && layout->remove_reference())
         delete layout;
       if ((field_space_node != NULL) &&
-          field_space_node->remove_base_gc_ref(PHYSICAL_MANAGER_REF))
+          field_space_node->remove_nested_gc_ref(did))
         delete field_space_node;
       if ((instance_domain != NULL) && 
-          instance_domain->remove_expression_reference())
+          instance_domain->remove_nested_expression_reference(did))
         delete instance_domain;
     } 
 
@@ -1577,6 +1576,7 @@ namespace Legion {
         rez.serialize(memory_manager->memory);
         rez.serialize(instance);
         rez.serialize(instance_footprint);
+        // No need for a reference here since we know we'll continue holding it
         instance_domain->pack_expression(rez, target);
         rez.serialize(piece_list_size);
         if (piece_list_size > 0)
@@ -1612,13 +1612,11 @@ namespace Legion {
       derez.deserialize(inst);
       size_t inst_footprint;
       derez.deserialize(inst_footprint);
-      bool local_is, domain_is;
-      IndexSpace domain_handle;
-      IndexSpaceExprID domain_expr_id;
+      PendingRemoteExpression pending;
       RtEvent domain_ready;
       IndexSpaceExpression *inst_domain = 
         IndexSpaceExpression::unpack_expression(derez, runtime->forest, source,
-              local_is, domain_is, domain_handle, domain_expr_id, domain_ready);
+                                                pending, domain_ready);
       size_t piece_list_size;
       derez.deserialize(piece_list_size);
       void *piece_list = NULL;
@@ -1655,8 +1653,8 @@ namespace Legion {
         {
           // We need to defer this instance creation
           DeferIndividualManagerArgs args(did, owner_space, mem, inst,
-              inst_footprint, local_is, inst_domain, domain_is, domain_handle, 
-              domain_expr_id, handle, tree_id, layout_id, unique_event, kind,
+              inst_footprint, inst_domain, pending, 
+              handle, tree_id, layout_id, unique_event, kind,
               redop, piece_list, piece_list_size, shadow_inst);
           runtime->issue_runtime_meta_task(args,
               LG_LATENCY_RESPONSE_PRIORITY, precondition);
@@ -1664,9 +1662,7 @@ namespace Legion {
         }
         // If we fall through we need to refetch things that we didn't get
         if (domain_ready.exists())
-          inst_domain = domain_is ? 
-            runtime->forest->get_node(domain_handle) :
-            runtime->forest->find_remote_expression(domain_expr_id);
+          inst_domain = runtime->forest->find_remote_expression(pending);
         if (fs_ready.exists())
           space_node = runtime->forest->get_node(handle);
         if (layout_ready.exists())
@@ -1683,20 +1679,19 @@ namespace Legion {
     //--------------------------------------------------------------------------
     IndividualManager::DeferIndividualManagerArgs::DeferIndividualManagerArgs(
             DistributedID d, AddressSpaceID own, Memory m, PhysicalInstance i, 
-            size_t f, bool local, IndexSpaceExpression *lx, bool is, 
-            IndexSpace dh, IndexSpaceExprID dx, FieldSpace h, RegionTreeID tid,
+            size_t f, IndexSpaceExpression *lx, 
+            const PendingRemoteExpression &p, FieldSpace h, RegionTreeID tid,
             LayoutConstraintID l, ApEvent u, InstanceKind k, ReductionOpID r,
             const void *pl, size_t pl_size, bool shadow)
       : LgTaskArgs<DeferIndividualManagerArgs>(implicit_provenance),
-            did(d), owner(own), mem(m), inst(i), footprint(f), local_is(local),
-            domain_is(is), local_expr(local ? lx : NULL), domain_handle(dh), 
-            domain_expr(dx), handle(h), tree_id(tid), layout_id(l), 
+            did(d), owner(own), mem(m), inst(i), footprint(f), pending(p),
+            local_expr(lx), handle(h), tree_id(tid), layout_id(l), 
             use_event(u), kind(k), redop(r), piece_list(pl),
             piece_list_size(pl_size), shadow_instance(shadow)
     //--------------------------------------------------------------------------
     {
-      if (local_is)
-        local_expr->add_expression_reference();
+      if (local_expr != NULL)
+        local_expr->add_base_expression_reference(META_TASK_REF);
     }
 
     //--------------------------------------------------------------------------
@@ -1716,9 +1711,9 @@ namespace Legion {
     {
       const DeferIndividualManagerArgs *dargs = 
         (const DeferIndividualManagerArgs*)args; 
-      IndexSpaceExpression *inst_domain = dargs->local_is ? dargs->local_expr :
-        dargs->domain_is ? runtime->forest->get_node(dargs->domain_handle) :
-        runtime->forest->find_remote_expression(dargs->domain_expr);
+      IndexSpaceExpression *inst_domain = dargs->local_expr;
+      if (inst_domain == NULL)
+        inst_domain = runtime->forest->find_remote_expression(dargs->pending);
       FieldSpaceNode *space_node = runtime->forest->get_node(dargs->handle);
       LayoutConstraints *constraints = 
         runtime->find_layout_constraints(dargs->layout_id);
@@ -1727,7 +1722,8 @@ namespace Legion {
           dargs->piece_list_size, space_node, dargs->tree_id, constraints, 
           dargs->use_event, dargs->kind, dargs->redop, dargs->shadow_instance);
       // Remove the local expression reference if necessary
-      if (dargs->local_is && dargs->local_expr->remove_expression_reference())
+      if ((dargs->local_expr != NULL) &&
+          dargs->local_expr->remove_base_expression_reference(META_TASK_REF))
         delete dargs->local_expr;
     }
 
@@ -3178,6 +3174,7 @@ namespace Legion {
         rez.serialize(owner_space);
         rez.serialize(point_space->handle);
         rez.serialize(instance_footprint);
+        // No need for a reference here since we know we'll continue holding it
         instance_domain->pack_expression(rez, target);
         rez.serialize(field_space_node->handle);
         rez.serialize(tree_id);
@@ -3206,13 +3203,11 @@ namespace Legion {
         runtime->forest->get_node(points_handle, &points_ready); 
       size_t inst_footprint;
       derez.deserialize(inst_footprint);
-      bool local_is, domain_is;
-      IndexSpace domain_handle;
-      IndexSpaceExprID domain_expr_id;
+      PendingRemoteExpression pending;
       RtEvent domain_ready;
       IndexSpaceExpression *inst_domain = 
         IndexSpaceExpression::unpack_expression(derez, runtime->forest, source,
-              local_is, domain_is, domain_handle, domain_expr_id, domain_ready);
+                                                pending, domain_ready);
       size_t piece_list_size;
       derez.deserialize(piece_list_size);
       void *piece_list = NULL;
@@ -3254,9 +3249,8 @@ namespace Legion {
         {
           // We need to defer this instance creation
           DeferCollectiveManagerArgs args(did, owner_space, points_handle, 
-              inst_footprint, local_is, inst_domain, domain_is, domain_handle, 
-              domain_expr_id, handle, tree_id, layout_id, unique_event, redop,
-              piece_list, piece_list_size);
+              inst_footprint, inst_domain, pending, handle, tree_id, layout_id,
+              unique_event, redop, piece_list, piece_list_size, source);
           runtime->issue_runtime_meta_task(args,
               LG_LATENCY_RESPONSE_PRIORITY, precondition);
           return;
@@ -3265,9 +3259,7 @@ namespace Legion {
         if (points_ready.exists())
           point_space = runtime->forest->get_node(points_handle);
         if (domain_ready.exists())
-          inst_domain = domain_is ? 
-            runtime->forest->get_node(domain_handle) :
-            runtime->forest->find_remote_expression(domain_expr_id);
+          inst_domain = runtime->forest->find_remote_expression(pending);
         if (fs_ready.exists())
           space_node = runtime->forest->get_node(handle);
         if (layout_ready.exists())
@@ -3283,19 +3275,18 @@ namespace Legion {
     //--------------------------------------------------------------------------
     CollectiveManager::DeferCollectiveManagerArgs::DeferCollectiveManagerArgs(
             DistributedID d, AddressSpaceID own, IndexSpace points, 
-            size_t f, bool local, IndexSpaceExpression *lx, bool is, 
-            IndexSpace dh, IndexSpaceExprID dx, FieldSpace h, RegionTreeID tid,
+            size_t f, IndexSpaceExpression *lx,
+            const PendingRemoteExpression &p, FieldSpace h, RegionTreeID tid,
             LayoutConstraintID l, ApEvent use, ReductionOpID r,
-            const void *pl, size_t pl_size)
+            const void *pl, size_t pl_size, AddressSpace src)
       : LgTaskArgs<DeferCollectiveManagerArgs>(implicit_provenance),
-        did(d), owner(own), point_space(points), footprint(f), local_is(local),
-        domain_is(is), local_expr(lx), domain_handle(dh), domain_expr(dx), 
-        handle(h), tree_id(tid), layout_id(l), use_event(use), redop(r), 
-        piece_list(pl), piece_list_size(pl_size)
+        did(d), owner(own), point_space(points), footprint(f), local_expr(lx),
+        pending(p), handle(h), tree_id(tid), layout_id(l), use_event(use),
+        redop(r), piece_list(pl), piece_list_size(pl_size), source(src)
     //--------------------------------------------------------------------------
     {
-      if (local_is)
-        local_expr->add_expression_reference();
+      if (local_expr != NULL)
+        local_expr->add_base_expression_reference(META_TASK_REF);
     }
 
     //--------------------------------------------------------------------------
@@ -3307,9 +3298,9 @@ namespace Legion {
         (const DeferCollectiveManagerArgs*)args; 
       IndexSpaceNode *point_space = 
         runtime->forest->get_node(dargs->point_space);
-      IndexSpaceExpression *inst_domain = dargs->local_is ? dargs->local_expr :
-        dargs->domain_is ? runtime->forest->get_node(dargs->domain_handle) :
-        runtime->forest->find_remote_expression(dargs->domain_expr);
+      IndexSpaceExpression *inst_domain = dargs->local_expr;
+      if (inst_domain == NULL)
+        inst_domain = runtime->forest->find_remote_expression(dargs->pending);
       FieldSpaceNode *space_node = runtime->forest->get_node(dargs->handle);
       LayoutConstraints *constraints = 
         runtime->find_layout_constraints(dargs->layout_id);
@@ -3318,7 +3309,8 @@ namespace Legion {
           dargs->piece_list_size, space_node, dargs->tree_id, constraints, 
           dargs->use_event, dargs->redop);
       // Remove the local expression reference if necessary
-      if (dargs->local_is && dargs->local_expr->remove_expression_reference())
+      if ((dargs->local_expr != NULL) &&
+          dargs->local_expr->remove_base_expression_reference(META_TASK_REF))
         delete dargs->local_expr;
     }
 

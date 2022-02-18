@@ -1,4 +1,4 @@
--- Copyright 2021 Stanford University
+-- Copyright 2022 Stanford University
 --
 -- Licensed under the Apache License, Version 2.0 (the "License");
 -- you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 import "regent"
 
-local c = terralib.includec("stdio.h")
+local c = regentlib.c
 
 -- Global constants are simply Lua variables, defined at the top
 -- scope. (Regent does not support mutable global variables.)
