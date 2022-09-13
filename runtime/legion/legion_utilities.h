@@ -105,6 +105,12 @@ namespace Legion {
       template<unsigned int MAX>
       inline void serialize(const PPCTLBitMask<MAX> &mask);
 #endif
+#ifdef __ARM_NEON
+      template<unsigned int MAX>
+      inline void serialize(const NeonBitMask<MAX> &mask);
+      template<unsigned int MAX>
+      inline void serialize(const NeonTLBitMask<MAX> &mask);
+#endif
       template<typename DT, unsigned BLOAT, bool BIDIR>
       inline void serialize(const CompoundBitMask<DT,BLOAT,BIDIR> &mask);
       inline void serialize(const Domain &domain);
@@ -187,6 +193,12 @@ namespace Legion {
       inline void deserialize(PPCBitMask<MAX> &mask);
       template<unsigned int MAX>
       inline void deserialize(PPCTLBitMask<MAX> &mask);
+#endif
+#ifdef __ARM_NEON
+      template<unsigned int MAX>
+      inline void deserialize(NeonBitMask<MAX> &mask);
+      template<unsigned int MAX>
+      inline void deserialize(NeonTLBitMask<MAX> &mask);
 #endif
       template<typename DT, unsigned BLOAT, bool BIDIR>
       inline void deserialize(CompoundBitMask<DT,BLOAT,BIDIR> &mask);
@@ -581,6 +593,7 @@ namespace Legion {
       uint8_t blocks[16];
       uint64_t h1, h2, len;
       uint8_t bytes;
+    public:
       const bool precise;
       const bool verify_every_call;
     public:
@@ -888,6 +901,24 @@ namespace Legion {
     }
 #endif
 
+#ifdef __ARM_NEON
+    //--------------------------------------------------------------------------
+    template<unsigned int MAX>
+    inline void Serializer::serialize(const NeonBitMask<MAX> &mask)
+    //--------------------------------------------------------------------------
+    {
+      mask.serialize(*this);
+    }
+
+    //--------------------------------------------------------------------------
+    template<unsigned int MAX>
+    inline void Serializer::serialize(const NeonTLBitMask<MAX> &mask)
+    //--------------------------------------------------------------------------
+    {
+      mask.serialize(*this);
+    }
+#endif
+
     //--------------------------------------------------------------------------
     template<typename DT, unsigned BLOAT, bool BIDIR>
     inline void Serializer::serialize(const CompoundBitMask<DT,BLOAT,BIDIR> &m)
@@ -1105,6 +1136,24 @@ namespace Legion {
     //--------------------------------------------------------------------------
     template<unsigned int MAX>
     inline void Deserializer::deserialize(PPCTLBitMask<MAX> &mask)
+    //--------------------------------------------------------------------------
+    {
+      mask.deserialize(*this);
+    }
+#endif
+
+#ifdef __ARM_NEON
+    //--------------------------------------------------------------------------
+    template<unsigned int MAX>
+    inline void Deserializer::deserialize(NeonBitMask<MAX> &mask)
+    //--------------------------------------------------------------------------
+    {
+      mask.deserialize(*this);
+    }
+
+    //--------------------------------------------------------------------------
+    template<unsigned int MAX>
+    inline void Deserializer::deserialize(NeonTLBitMask<MAX> &mask)
     //--------------------------------------------------------------------------
     {
       mask.deserialize(*this);
@@ -2023,8 +2072,6 @@ namespace Legion {
         if (result == NULL)
         {
           result = new ET();
-          // Enforce total store ordering
-          __sync_synchronize();
           leaf->elems[offset].store(result);
         }
       }
@@ -2054,8 +2101,6 @@ namespace Legion {
         if (result == NULL)
         {
           result = new ET(arg);
-          // Enforce total store ordering
-          __sync_synchronize();
           leaf->elems[offset].store(result);
         }
       }
@@ -2086,8 +2131,6 @@ namespace Legion {
         if (result == NULL)
         {
           result = new ET(arg1, arg2);
-          // Enforce total store ordering
-          __sync_synchronize();
           leaf->elems[offset].store(result);
         }
       }
@@ -2132,7 +2175,6 @@ namespace Legion {
                                              parent_first, parent_last);
             typename ALLOCATOR::INNER_TYPE *inner = 
               static_cast<typename ALLOCATOR::INNER_TYPE*>(parent);
-            __sync_synchronize();
             inner->elems[0].store(n);
             n = parent;
           }
@@ -2174,7 +2216,6 @@ namespace Legion {
             IT child_last = inner->first_index + ((i + 1) << child_shift) - 1;
 
             child = new_tree_node(child_level, child_first, child_last);
-            __sync_synchronize();
             inner->elems[i].store(child);
           }
         }
@@ -2719,9 +2760,15 @@ namespace Legion {
     public:
       // forward declaration
       class const_iterator;
-      class iterator : public std::iterator<std::input_iterator_tag,
-                              std::pair<T*const,FieldMask> > {
+      class iterator {
       public:
+        // explicitly set iterator traits
+        typedef std::input_iterator_tag iterator_category;
+        typedef std::pair<T*const,FieldMask> value_type;
+        typedef std::ptrdiff_t difference_type;
+        typedef std::pair<T*const,FieldMask> *pointer;
+        typedef std::pair<T*const,FieldMask>& reference;
+
         iterator(FieldMaskSet *_set, 
             std::pair<T*const,FieldMask> *_result)
           : set(_set), result(_result), single(true) { }
@@ -2831,9 +2878,15 @@ namespace Legion {
         bool single;
       };
     public:
-      class const_iterator : public std::iterator<std::input_iterator_tag,
-                              std::pair<T*const,FieldMask> > {
+      class const_iterator {
       public:
+        // explicitly set iterator traits
+        typedef std::input_iterator_tag iterator_category;
+        typedef std::pair<T*const,FieldMask> value_type;
+        typedef std::ptrdiff_t difference_type;
+        typedef std::pair<T*const,FieldMask> *pointer;
+        typedef std::pair<T*const,FieldMask>& reference;
+
         const_iterator(const FieldMaskSet *_set, 
             const std::pair<T*const,FieldMask> *_result)
           : set(_set), result(_result), single(true) { }

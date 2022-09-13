@@ -52,7 +52,8 @@ namespace Legion {
     class LogicalView : public DistributedCollectable {
     public:
       LogicalView(RegionTreeForest *ctx, DistributedID did,
-                  AddressSpaceID owner_proc, bool register_now);
+                  AddressSpaceID owner_proc, bool register_now,
+                  CollectiveMapping *mapping);
       virtual ~LogicalView(void);
     public:
       inline bool deterministic_pointer_less(const LogicalView *rhs) const
@@ -118,40 +119,15 @@ namespace Legion {
       typedef LegionMap<ApEvent,FieldMaskSet<PhysicalUser> > EventFieldUsers;
       typedef FieldMaskSet<PhysicalUser> EventUsers;
     public:
-      struct DeferFindCopyPreconditionArgs : 
-        public LgTaskArgs<DeferFindCopyPreconditionArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFER_FIND_COPY_PRE_TASK_ID;
-      public:
-        DeferFindCopyPreconditionArgs(LogicalView *v, bool read, bool trace,
-            ReductionOpID r, const FieldMask &m, IndexSpaceExpression *x, 
-            UniqueID uid, unsigned idx, AddressSpaceID s, CopyFillAggregator *a,
-            RtUserEvent d)
-          : LgTaskArgs<DeferFindCopyPreconditionArgs>(uid),
-            view(v), reading(read), trace_recording(trace), 
-            redop(r), copy_mask(new FieldMask(m)), copy_expr(x),
-            op_id(uid), index(idx), source(s), aggregator(a), done_event(d) { }
-      public:
-        LogicalView *const view;
-        const bool reading;
-        const bool trace_recording;
-        ReductionOpID redop;
-        FieldMask *const copy_mask;
-        IndexSpaceExpression *const copy_expr;
-        const UniqueID op_id;
-        const unsigned index;
-        const AddressSpaceID source;
-        CopyFillAggregator *const aggregator;
-        const RtUserEvent done_event;
-      };
-    public:
       InstanceView(RegionTreeForest *ctx,DistributedID did,PhysicalManager *man,
                    AddressSpaceID owner_proc, AddressSpaceID logical_owner, 
-                   UniqueID owner_context, bool register_now); 
+                   UniqueID owner_context, bool register_now,
+                   CollectiveMapping *mapping); 
       virtual ~InstanceView(void);
     public:
       inline bool is_logical_owner(void) const
         { return (local_space == logical_owner); }
+      AddressSpaceID get_analysis_space(const DomainPoint &point) const;
     public:
       virtual bool has_manager(void) const = 0;
       virtual PhysicalManager* get_manager(void) const = 0;
@@ -176,22 +152,13 @@ namespace Legion {
                                     const PhysicalTraceInfo &trace_info,
                                     const AddressSpaceID source,
                                     bool symbolic = false) = 0;
-      virtual RtEvent find_copy_preconditions(bool reading,
+      virtual ApEvent find_copy_preconditions(bool reading,
                                     ReductionOpID redop,              
                                     const FieldMask &copy_mask,
                                     IndexSpaceExpression *copy_expr,
                                     UniqueID op_id, unsigned index,
-                                    CopyFillAggregator &aggregator,
-                                    const bool trace_recording,
-                                    const AddressSpaceID source) = 0;
-      virtual void find_copy_preconditions_remote(bool reading,
-                                    ReductionOpID redop,
-                                    const FieldMask &copy_mask,
-                                    IndexSpaceExpression *copy_expr,
-                                    UniqueID op_id, unsigned index,
-                                    EventFieldMap &preconditions,
-                                    const bool trace_recording,
-                                    const AddressSpaceID source) = 0;
+                                    std::set<RtEvent> &applied_events,
+                                    const PhysicalTraceInfo &trace_info) = 0;
       virtual void add_copy_user(bool reading, ReductionOpID redop,
                                  ApEvent done_event, RtEvent collect_event,
                                  const FieldMask &copy_mask,
@@ -200,6 +167,12 @@ namespace Legion {
                                  std::set<RtEvent> &applied_events,
                                  const bool trace_recording,
                                  const AddressSpaceID source) = 0;
+      virtual void find_last_users(std::set<ApEvent> &events,
+                                   const DomainPoint &collective_point,
+                                   const RegionUsage &usage,
+                                   const FieldMask &mask,
+                                   IndexSpaceExpression *user_expr,
+                                   std::vector<RtEvent> &applied) const = 0;
 #ifdef ENABLE_VIEW_REPLICATION
     public:
       virtual void process_replication_request(AddressSpaceID source,
@@ -232,13 +205,12 @@ namespace Legion {
     public:
       void find_atomic_reservations(const FieldMask &mask, Operation *op, 
                                     const unsigned index, bool exclusive);
-      void find_field_reservations(const std::vector<FieldID> &needed_fields,
+      void find_field_reservations(const FieldMask &mask,
                                    std::vector<Reservation> &results);
       static void handle_send_atomic_reservation_request(Runtime *runtime,
                                   Deserializer &derez, AddressSpaceID source);
-      void update_field_reservations(
-                            const std::vector<FieldID> &fields,
-                            const std::vector<Reservation> &reservations);
+      void update_field_reservations(const FieldMask &mask,
+                                  const std::vector<Reservation> &reservations);
       static void handle_send_atomic_reservation_response(Runtime *runtime,
                                                           Deserializer &derez);
     public:
@@ -246,12 +218,11 @@ namespace Legion {
                         Runtime *runtime, AddressSpaceID source);
       static void handle_view_find_copy_pre_request(Deserializer &derez,
                         Runtime *runtime, AddressSpaceID source);
-      static void handle_view_find_copy_pre_request(const void *args, 
-                        Runtime *runtime);
-      static void handle_view_find_copy_pre_response(Deserializer &derez,
-                        Runtime *runtime, AddressSpaceID source);
       static void handle_view_add_copy_user(Deserializer &derez,
                         Runtime *runtime, AddressSpaceID source);
+      static void handle_view_find_last_users_request(Deserializer &derz,
+                        Runtime *runtime, AddressSpaceID source);
+      static void handle_view_find_last_users_response(Deserializer &derez);
 #ifdef ENABLE_VIEW_REPLICATION
       static void handle_view_replication_request(Deserializer &derez,
                         Runtime *runtime, AddressSpaceID source);
@@ -271,7 +242,7 @@ namespace Legion {
       // Keep track of the locks used for managing atomic coherence
       // on individual fields of this materialized view. Only the
       // top-level view for an instance needs to track this.
-      std::map<FieldID,Reservation> atomic_reservations;
+      std::map<unsigned,Reservation> atomic_reservations;
     };
 
     /**
@@ -336,8 +307,13 @@ namespace Legion {
                                    const bool copy_dominates,
                                    const FieldMask &copy_mask,
                                    UniqueID op_id, unsigned index,
-                                   EventFieldMap &preconditions,
+                                   std::set<ApEvent> &preconditions,
                                    const bool trace_recording);
+      void find_last_users(const RegionUsage &usage,
+                                   IndexSpaceExpression *expr,
+                                   const bool expr_dominates,
+                                   const FieldMask &mask,
+                                   std::set<ApEvent> &last_events) const;
       // Check to see if there is any view with the same shape already
       // in the ExprView tree, if so return it
       ExprView* find_congruent_view(IndexSpaceExpression *expr);
@@ -407,7 +383,7 @@ namespace Legion {
                                       const UniqueID op_id,
                                       const unsigned index,
                                       const bool user_covers,
-                                      EventFieldMap &preconditions,
+                                      std::set<ApEvent> &preconditions,
                                       std::set<ApEvent> &dead_events,
                                       EventFieldUsers &filter_events,
                                       FieldMask &observed, 
@@ -419,9 +395,23 @@ namespace Legion {
                                       const UniqueID op_id,
                                       const unsigned index,
                                       const bool user_covers,
-                                      EventFieldMap &preconditions,
+                                      std::set<ApEvent> &preconditions,
                                       std::set<ApEvent> &dead_events,
                                       const bool trace_recording);
+      // Overloads for find_last_users
+      void find_current_preconditions(const RegionUsage &usage,
+                                      const FieldMask &user_mask,
+                                      IndexSpaceExpression *expr,
+                                      const bool expr_covers,
+                                      std::set<ApEvent> &last_events,
+                                      FieldMask &observed, 
+                                      FieldMask &non_dominated) const;
+      void find_previous_preconditions(const RegionUsage &usage,
+                                      const FieldMask &user_mask,
+                                      IndexSpaceExpression *expr,
+                                      const bool expr_covers,
+                                      std::set<ApEvent> &last_events) const;
+
       template<bool COPY_USER>
       inline bool has_local_precondition(PhysicalUser *prev_user,
                                       const RegionUsage &next_user,
@@ -429,14 +419,14 @@ namespace Legion {
                                       const UniqueID op_id,
                                       const unsigned index,
                                       const bool user_covers,
-                                      bool &dominates);
+                                      bool &dominates) const;
       template<bool COPY_USER>
       inline bool has_local_precondition(PhysicalUser *prev_user,
                                       const RegionUsage &next_user,
                                       IndexSpaceExpression *user_expr,
                                       const UniqueID op_id,
                                       const unsigned index,
-                                      const bool user_covers);
+                                      const bool user_covers) const;
     public:
       size_t get_view_volume(void);
     protected:
@@ -574,7 +564,8 @@ namespace Legion {
       MaterializedView(RegionTreeForest *ctx, DistributedID did,
                        AddressSpaceID owner_proc, 
                        AddressSpaceID logical_owner, PhysicalManager *manager,
-                       UniqueID owner_context, bool register_now);
+                       UniqueID owner_context, bool register_now,
+                       CollectiveMapping *mapping = NULL);
       MaterializedView(const MaterializedView &rhs);
       virtual ~MaterializedView(void);
     public:
@@ -613,22 +604,13 @@ namespace Legion {
                                     const PhysicalTraceInfo &trace_info,
                                     const AddressSpaceID source,
                                     bool symbolic = false);
-      virtual RtEvent find_copy_preconditions(bool reading,
+      virtual ApEvent find_copy_preconditions(bool reading,
                                     ReductionOpID redop,
                                     const FieldMask &copy_mask,
                                     IndexSpaceExpression *copy_expr,
                                     UniqueID op_id, unsigned index,
-                                    CopyFillAggregator &aggregator,
-                                    const bool trace_recording,
-                                    const AddressSpaceID source);
-      virtual void find_copy_preconditions_remote(bool reading,
-                                    ReductionOpID redop,
-                                    const FieldMask &copy_mask,
-                                    IndexSpaceExpression *copy_expr,
-                                    UniqueID op_id, unsigned index,
-                                    EventFieldMap &preconditions,
-                                    const bool trace_recording,
-                                    const AddressSpaceID source);
+                                    std::set<RtEvent> &applied_events,
+                                    const PhysicalTraceInfo &trace_info);
       virtual void add_copy_user(bool reading, ReductionOpID redop,
                                  ApEvent term_event, RtEvent collect_event,
                                  const FieldMask &copy_mask,
@@ -637,6 +619,12 @@ namespace Legion {
                                  std::set<RtEvent> &applied_events,
                                  const bool trace_recording,
                                  const AddressSpaceID source); 
+      virtual void find_last_users(std::set<ApEvent> &events,
+                                   const DomainPoint &collective_point,
+                                   const RegionUsage &usage,
+                                   const FieldMask &mask,
+                                   IndexSpaceExpression *user_expr,
+                                   std::vector<RtEvent> &ready_events) const;
 #ifdef ENABLE_VIEW_REPLICATION
     public:
       virtual void process_replication_request(AddressSpaceID source,
@@ -698,7 +686,7 @@ namespace Legion {
       unsigned expr_cache_uses;
       // Helping with making sure that there are no outstanding users being
       // added for when we go to invalidate the cache and clean the views
-      unsigned outstanding_additions;
+      std::atomic<unsigned> outstanding_additions;
       RtUserEvent clean_waiting; 
 #ifdef ENABLE_VIEW_REPLICATION
     protected:
@@ -762,7 +750,8 @@ namespace Legion {
       ReductionView(RegionTreeForest *ctx, DistributedID did,
                     AddressSpaceID owner_proc,
                     AddressSpaceID logical_owner, PhysicalManager *manager,
-                    UniqueID owner_context, bool register_now);
+                    UniqueID owner_context, bool register_now,
+                    CollectiveMapping *mapping = NULL);
       ReductionView(const ReductionView &rhs);
       virtual ~ReductionView(void);
     public:
@@ -790,22 +779,13 @@ namespace Legion {
                                     const PhysicalTraceInfo &trace_info,
                                     const AddressSpaceID source,
                                     bool symbolic = false);
-      virtual RtEvent find_copy_preconditions(bool reading,
+      virtual ApEvent find_copy_preconditions(bool reading,
                                     ReductionOpID redop,
                                     const FieldMask &copy_mask,
                                     IndexSpaceExpression *copy_expr,
                                     UniqueID op_id, unsigned index,
-                                    CopyFillAggregator &aggregator,
-                                    const bool trace_recording,
-                                    const AddressSpaceID source);
-      virtual void find_copy_preconditions_remote(bool reading,
-                                    ReductionOpID redop,
-                                    const FieldMask &copy_mask,
-                                    IndexSpaceExpression *copy_expr,
-                                    UniqueID op_id, unsigned index,
-                                    EventFieldMap &preconditions,
-                                    const bool trace_recording,
-                                    const AddressSpaceID source);
+                                    std::set<RtEvent> &applied_events,
+                                    const PhysicalTraceInfo &trace_info);
       virtual void add_copy_user(bool reading, ReductionOpID redop,
                                  ApEvent term_event, RtEvent collect_event,
                                  const FieldMask &copy_mask,
@@ -814,24 +794,26 @@ namespace Legion {
                                  std::set<RtEvent> &applied_events,
                                  const bool trace_recording,
                                  const AddressSpaceID source);
+      virtual void find_last_users(std::set<ApEvent> &events,
+                                   const DomainPoint &collective_point,
+                                   const RegionUsage &usage,
+                                   const FieldMask &mask,
+                                   IndexSpaceExpression *user_expr,
+                                   std::vector<RtEvent> &ready_events) const;
     protected: 
       void find_reducing_preconditions(const RegionUsage &usage,
                                        const FieldMask &user_mask,
                                        IndexSpaceExpression *user_expr,
-                                       UniqueID op_id,
                                        std::set<ApEvent> &wait_on) const;
       void find_initializing_preconditions(const FieldMask &user_mask,
                                            IndexSpaceExpression *user_expr,
-                                           UniqueID op_id,
-                                           EventFieldMap &preconditions);
-      void find_reducing_preconditions(const FieldMask &user_mask,
-                                       IndexSpaceExpression *user_expr,
-                                       UniqueID op_id,
-                                       EventFieldMap &preconditions) const;
+                                           std::set<ApEvent> &preconditions);
       void find_reading_preconditions(const FieldMask &user_mask,
                                       IndexSpaceExpression *user_expr,
-                                      UniqueID op_id,
-                                      EventFieldMap &preconditions) const;
+                                      std::set<ApEvent> &preconditions) const;
+      void find_initializing_last_users(const FieldMask &user_mask,
+                                        IndexSpaceExpression *user_expr,
+                                        std::set<ApEvent> &preconditions) const;
       bool add_user(const RegionUsage &usage,
                     IndexSpaceExpression *user_expr,
                     const FieldMask &user_mask,
@@ -1359,7 +1341,7 @@ namespace Legion {
                                                  const UniqueID op_id,
                                                  const unsigned index,
                                                  const bool next_covers,
-                                                 bool &dominates)
+                                                 bool &dominates) const
     //--------------------------------------------------------------------------
     {
       // We order these tests in a entirely based on cost
@@ -1412,7 +1394,7 @@ namespace Legion {
                                                  IndexSpaceExpression *expr,
                                                  const UniqueID op_id,
                                                  const unsigned index,
-                                                 const bool next_covers)
+                                                 const bool next_covers) const
     //--------------------------------------------------------------------------
     {
       // We order these tests in a entirely based on cost

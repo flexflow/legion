@@ -15,11 +15,13 @@
 
 #include "realm/cuda/cuda_module.h"
 #include "realm/cuda/cuda_internal.h"
+#include "realm/cuda/cuda_access.h"
 
 #include "realm/tasks.h"
 #include "realm/logging.h"
 #include "realm/cmdline.h"
 #include "realm/event_impl.h"
+#include "realm/idx_impl.h"
 
 #include "realm/transfer/lowlevel_dma.h"
 #include "realm/transfer/channel.h"
@@ -1546,9 +1548,6 @@ namespace Realm {
     //  silently permitted (0), warned (1), or a fatal error (2) based on this
     //  setting
     /*extern*/ int cudart_hijack_nongpu_sync = 2;
-
-    // used in GPUTaskScheduler<T>::execute_task below
-    static bool already_issued_hijack_warning = false;
 #endif
 
     template <typename T>
@@ -1594,28 +1593,47 @@ namespace Realm {
         ThreadLocal::created_gpu_streams = 0;
       }
 
+      // if this is our first task, we might need to decide whether
+      //  full context synchronization is required for a task to be
+      //  "complete"
+      if(gpu_proc->gpu->module->cfg_task_context_sync < 0) {
+        // if legacy stream sync was requested, default for ctxsync is off
+        if(gpu_proc->gpu->module->cfg_task_legacy_sync) {
+          gpu_proc->gpu->module->cfg_task_context_sync = 0;
+        } else {
 #ifdef REALM_USE_CUDART_HIJACK
-      // if our hijack code is not active, the application may have put some work for this
-      //  task on streams we don't know about, so it takes an expensive device synchronization
-      //  to guarantee that any work enqueued on a stream in the future is ordered with respect
-      //  to this task's results
-      if(!cudart_hijack_active) {
-	// print a warning if this is the first time and it hasn't been suppressed
-	if(!(gpu_proc->gpu->module->cfg_suppress_hijack_warning ||
-	     already_issued_hijack_warning)) {
-	  already_issued_hijack_warning = true;
-	  log_gpu.warning() << "CUDART hijack code not active"
-			    << " - device synchronizations required after every GPU task!";
-	}
-	gpu_proc->ctxsync.add_fence(fence);
-      } else {
-	// a fence on the local stream is sufficient when hijack is active
-	fence->enqueue_on_stream(s);
-      }
+          // normally hijack code will catch all the work and put it on the
+          //  right stream, but if we haven't seen it used, there may be a
+          //  static copy of the cuda runtime that's in use and foiling the
+          //  hijack
+          if(cudart_hijack_active) {
+            gpu_proc->gpu->module->cfg_task_context_sync = 0;
+          } else {
+            if(!gpu_proc->gpu->module->cfg_suppress_hijack_warning)
+              log_gpu.warning() << "CUDART hijack code not active"
+                                << " - device synchronizations required after every GPU task!";
+            gpu_proc->gpu->module->cfg_task_context_sync = 1;
+          }
 #else
-      // always use a full ctx synchronization to capture task effects
-      gpu_proc->ctxsync.add_fence(fence);
+          // without hijack or legacy sync requested, ctxsync is needed
+          gpu_proc->gpu->module->cfg_task_context_sync = 1;
 #endif
+        }
+      }
+
+      // if requested, use a cuda event to couple legacy stream work into
+      //  the current task's stream
+      if(gpu_proc->gpu->module->cfg_task_legacy_sync) {
+        CUevent e = gpu_proc->gpu->event_pool.get_event();
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuEventRecord)(e, CU_STREAM_LEGACY) );
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuStreamWaitEvent)(s->get_stream(), e, 0) );
+        gpu_proc->gpu->event_pool.return_event(e);
+      }
+
+      if(gpu_proc->gpu->module->cfg_task_context_sync)
+        gpu_proc->ctxsync.add_fence(fence);
+      else
+	fence->enqueue_on_stream(s);
 
       // A useful debugging macro
 #ifdef FORCE_GPU_STREAM_SYNCHRONIZE
@@ -2327,6 +2345,9 @@ namespace Realm {
       : LocalManagedMemory(_me, _size, MKIND_GPUFB, 512, Memory::GPU_FB_MEM, 0)
       , gpu(_gpu), base(_base)
     {
+      // mark what context we belong to
+      add_module_specific(new CudaDeviceMemoryInfo(gpu->context));
+
       // advertise for potential gpudirect support
       local_segment.assign(NetworkSegmentInfo::CudaDeviceMem,
 			   reinterpret_cast<void *>(base), size,
@@ -2339,23 +2360,345 @@ namespace Realm {
     // these work, but they are SLOW
     void GPUFBMemory::get_bytes(off_t offset, void *dst, size_t size)
     {
-      // create an async copy and then wait for it to finish...
-      BlockingCompletionNotification bcn;
-      gpu->copy_from_fb(dst, offset, size, &bcn);
-      bcn.wait();
+      // use a blocking copy - host memory probably isn't pinned anyway
+      {
+        AutoGPUContext agc(gpu);
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuMemcpyDtoH)
+                  (dst, reinterpret_cast<CUdeviceptr>(base + offset), size) );
+      }
     }
 
     void GPUFBMemory::put_bytes(off_t offset, const void *src, size_t size)
     {
-      // create an async copy and then wait for it to finish...
-      BlockingCompletionNotification bcn;
-      gpu->copy_to_fb(offset, src, size, &bcn);
-      bcn.wait();
+      // use a blocking copy - host memory probably isn't pinned anyway
+      {
+        AutoGPUContext agc(gpu);
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuMemcpyHtoD)
+                  (reinterpret_cast<CUdeviceptr>(base + offset), src, size) );
+      }
     }
 
     void *GPUFBMemory::get_direct_ptr(off_t offset, size_t size)
     {
       return (void *)(base + offset);
+    }
+
+    // GPUFBMemory supports ExternalCudaMemoryResource and
+    //  ExternalCudaArrayResource
+    bool GPUFBMemory::attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                         size_t& inst_offset)
+    {
+      {
+        ExternalCudaMemoryResource *res = dynamic_cast<ExternalCudaMemoryResource *>(inst->metadata.ext_resource);
+        if(res) {
+          // automatic success
+          inst_offset = res->base - base; // offset relative to our base
+          return true;
+        }
+      }
+
+      {
+        ExternalCudaArrayResource *res = dynamic_cast<ExternalCudaArrayResource *>(inst->metadata.ext_resource);
+        if(res) {
+          // automatic success
+          inst_offset = 0;
+          CUarray array = reinterpret_cast<CUarray>(res->array);
+          inst->metadata.add_mem_specific(new MemSpecificCudaArray(array));
+          return true;
+        }
+      }
+
+      // not a kind we recognize
+      return false;
+    }
+
+    void GPUFBMemory::unregister_external_resource(RegionInstanceImpl *inst)
+    {
+      // TODO: clean up surface/texture objects
+      MemSpecificCudaArray *ms = inst->metadata.find_mem_specific<MemSpecificCudaArray>();
+      if(ms) {
+        ms->array = 0;
+      }
+    }
+
+    // for re-registration purposes, generate an ExternalInstanceResource *
+    //  (if possible) for a given instance, or a subset of one
+    ExternalInstanceResource *GPUFBMemory::generate_resource_info(RegionInstanceImpl *inst,
+                                                                  const IndexSpaceGeneric *subspace,
+                                                                  span<const FieldID> fields,
+                                                                  bool read_only)
+    {
+      // compute the bounds of the instance relative to our base
+      assert(inst->metadata.is_valid() &&
+             "instance metadata must be valid before accesses are performed");
+      assert(inst->metadata.layout);
+      InstanceLayoutGeneric *ilg = inst->metadata.layout;
+      uintptr_t rel_base, extent;
+      if(subspace == 0) {
+        // want full instance
+        rel_base = 0;
+        extent = ilg->bytes_used;
+      } else {
+        assert(!fields.empty());
+        uintptr_t limit;
+        for(size_t i = 0; i < fields.size(); i++) {
+          uintptr_t f_base, f_limit;
+          if(!subspace->impl->compute_affine_bounds(ilg, fields[i], f_base, f_limit))
+            return 0;
+          if(i == 0) {
+            rel_base = f_base;
+            limit = f_limit;
+          } else {
+            rel_base = std::min(rel_base, f_base);
+            limit = std::max(limit, f_limit);
+          }
+        }
+        extent = limit - rel_base;
+      }
+
+      uintptr_t abs_base = (this->base + inst->metadata.inst_offset + rel_base);
+
+      return new ExternalCudaMemoryResource(gpu->info->index,
+                                            abs_base, extent, read_only);
+    }
+
+
+    ////////////////////////////////////////////////////////////////////////
+    //
+    // class GPUDynamicMemory
+
+    GPUDynamicFBMemory::GPUDynamicFBMemory(Memory _me, GPU *_gpu,
+                                           size_t _max_size)
+      : MemoryImpl(_me, _max_size, MKIND_GPUFB, Memory::GPU_DYNAMIC_MEM, 0)
+      , gpu(_gpu)
+      , cur_size(0)
+    {
+      // mark what context we belong to
+      add_module_specific(new CudaDeviceMemoryInfo(gpu->context));
+    }
+
+    GPUDynamicFBMemory::~GPUDynamicFBMemory(void)
+    {
+      // free any remaining allocations
+      AutoGPUContext agc(gpu);
+      AutoLock<> al(mutex);
+      for(std::map<RegionInstance, std::pair<CUdeviceptr, size_t> >::const_iterator it = alloc_bases.begin();
+          it != alloc_bases.end();
+          ++it)
+        if(it->second.first)
+          CHECK_CU( CUDA_DRIVER_FNPTR(cuMemFree)(it->second.first) );
+      alloc_bases.clear();
+    }
+
+    MemoryImpl::AllocationResult GPUDynamicFBMemory::allocate_storage_immediate(RegionInstanceImpl *inst,
+                                                                                bool need_alloc_result,
+                                                                                bool poisoned,
+                                                                                TimeLimit work_until)
+    {
+      // poisoned allocations are cancellled
+      if(poisoned) {
+        inst->notify_allocation(ALLOC_CANCELLED,
+                                RegionInstanceImpl::INSTOFFSET_FAILED,
+                                work_until);
+        return ALLOC_CANCELLED;
+      }
+
+      // attempt cuMemAlloc, except for bytes=0 allocations
+      size_t bytes = inst->metadata.layout->bytes_used;
+      CUdeviceptr base = 0;
+      if(bytes > 0) {
+        // before we attempt an allocation with cuda, make sure we're not
+        //  going over our usage limit
+        bool limit_ok;
+        size_t cur_snapshot;
+        {
+          AutoLock<> al(mutex);
+          cur_snapshot = cur_size;
+          if((cur_size + bytes) <= size) {
+            cur_size += bytes;
+            limit_ok = true;
+          } else
+            limit_ok = false;
+        }
+
+        if(!limit_ok) {
+          log_gpu.warning() << "dynamic allocation limit reached: mem=" << me
+                            << " cur_size=" << cur_snapshot
+                            << " bytes=" << bytes << " limit=" << size;
+          inst->notify_allocation(ALLOC_INSTANT_FAILURE,
+                                  RegionInstanceImpl::INSTOFFSET_FAILED,
+                                  work_until);
+          return ALLOC_INSTANT_FAILURE;
+        }
+
+        CUresult ret;
+        {
+          AutoGPUContext agc(gpu);
+          // TODO: handle large alignments?
+          ret = CUDA_DRIVER_FNPTR(cuMemAlloc)(&base, bytes);
+          if((ret != CUDA_SUCCESS) && (ret != CUDA_ERROR_OUT_OF_MEMORY))
+            REPORT_CU_ERROR("cuMemAlloc", ret);
+        }
+        if(ret == CUDA_ERROR_OUT_OF_MEMORY) {
+          log_gpu.warning() << "out of memory in cuMemAlloc: bytes=" << bytes;
+          inst->notify_allocation(ALLOC_INSTANT_FAILURE,
+                                  RegionInstanceImpl::INSTOFFSET_FAILED,
+                                  work_until);
+          return ALLOC_INSTANT_FAILURE;
+        }
+      }
+
+      // insert entry into our alloc_bases map
+      {
+        AutoLock<> al(mutex);
+        alloc_bases[inst->me] = std::make_pair(base, bytes);
+      }
+
+      inst->notify_allocation(ALLOC_INSTANT_SUCCESS, base, work_until);
+      return ALLOC_INSTANT_SUCCESS;
+    }
+
+    void GPUDynamicFBMemory::release_storage_immediate(RegionInstanceImpl *inst,
+                                                       bool poisoned,
+                                                       TimeLimit work_until)
+    {
+      // ignore poisoned releases
+      if(poisoned)
+        return;
+
+      // for external instances, all we have to do is ack the destruction
+      if(inst->metadata.ext_resource != 0) {
+        unregister_external_resource(inst);
+        inst->notify_deallocation();
+	return;
+      }
+
+      CUdeviceptr base;
+      {
+        AutoLock<> al(mutex);
+        std::map<RegionInstance, std::pair<CUdeviceptr, size_t> >::iterator it = alloc_bases.find(inst->me);
+        if(it == alloc_bases.end()) {
+          log_gpu.fatal() << "attempt to release unknown instance: inst=" << inst->me;
+          abort();
+        }
+        base = it->second.first;
+        assert(cur_size >= it->second.second);
+        cur_size -= it->second.second;
+        alloc_bases.erase(it);
+      }
+
+      if(base != 0) {
+        AutoGPUContext agc(gpu);
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuMemFree)(base) );
+      }
+
+      inst->notify_deallocation();
+    }
+
+    // these work, but they are SLOW
+    void GPUDynamicFBMemory::get_bytes(off_t offset, void *dst, size_t size)
+    {
+      // use a blocking copy - host memory probably isn't pinned anyway
+      {
+        AutoGPUContext agc(gpu);
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuMemcpyDtoH)
+                  (dst, CUdeviceptr(offset), size) );
+      }
+    }
+
+    void GPUDynamicFBMemory::put_bytes(off_t offset, const void *src, size_t size)
+    {
+      // use a blocking copy - host memory probably isn't pinned anyway
+      {
+        AutoGPUContext agc(gpu);
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuMemcpyHtoD)
+                  (CUdeviceptr(offset), src, size) );
+      }
+    }
+
+    void *GPUDynamicFBMemory::get_direct_ptr(off_t offset, size_t size)
+    {
+      // offset 'is' the pointer for instances in this memory
+      return reinterpret_cast<void *>(offset);
+    }
+
+    // GPUFBMemory supports ExternalCudaMemoryResource and
+    //  ExternalCudaArrayResource
+    bool GPUDynamicFBMemory::attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                                size_t& inst_offset)
+    {
+      {
+        ExternalCudaMemoryResource *res = dynamic_cast<ExternalCudaMemoryResource *>(inst->metadata.ext_resource);
+        if(res) {
+          // automatic success
+          inst_offset = res->base; // "offsets" are absolute in dynamic fbmem
+          return true;
+        }
+      }
+
+      {
+        ExternalCudaArrayResource *res = dynamic_cast<ExternalCudaArrayResource *>(inst->metadata.ext_resource);
+        if(res) {
+          // automatic success
+          inst_offset = 0;
+          CUarray array = reinterpret_cast<CUarray>(res->array);
+          inst->metadata.add_mem_specific(new MemSpecificCudaArray(array));
+          return true;
+        }
+      }
+
+      // not a kind we recognize
+      return false;
+    }
+
+    void GPUDynamicFBMemory::unregister_external_resource(RegionInstanceImpl *inst)
+    {
+      // TODO: clean up surface/texture objects
+      MemSpecificCudaArray *ms = inst->metadata.find_mem_specific<MemSpecificCudaArray>();
+      if(ms) {
+        ms->array = 0;
+      }
+    }
+
+    // for re-registration purposes, generate an ExternalInstanceResource *
+    //  (if possible) for a given instance, or a subset of one
+    ExternalInstanceResource *GPUDynamicFBMemory::generate_resource_info(RegionInstanceImpl *inst,
+                                                                         const IndexSpaceGeneric *subspace,
+                                                                         span<const FieldID> fields,
+                                                                         bool read_only)
+    {
+      // compute the bounds of the instance relative to our base
+      assert(inst->metadata.is_valid() &&
+             "instance metadata must be valid before accesses are performed");
+      assert(inst->metadata.layout);
+      InstanceLayoutGeneric *ilg = inst->metadata.layout;
+      uintptr_t rel_base, extent;
+      if(subspace == 0) {
+        // want full instance
+        rel_base = 0;
+        extent = ilg->bytes_used;
+      } else {
+        assert(!fields.empty());
+        uintptr_t limit;
+        for(size_t i = 0; i < fields.size(); i++) {
+          uintptr_t f_base, f_limit;
+          if(!subspace->impl->compute_affine_bounds(ilg, fields[i], f_base, f_limit))
+            return 0;
+          if(i == 0) {
+            rel_base = f_base;
+            limit = f_limit;
+          } else {
+            rel_base = std::min(rel_base, f_base);
+            limit = std::max(limit, f_limit);
+          }
+        }
+        extent = limit - rel_base;
+      }
+
+      uintptr_t abs_base = (inst->metadata.inst_offset + rel_base);
+
+      return new ExternalCudaMemoryResource(gpu->info->index,
+                                            abs_base, extent, read_only);
     }
 
 
@@ -2369,8 +2712,13 @@ namespace Realm {
       : LocalManagedMemory(_me, _size, _kind, 256, _lowlevel_kind, 0)
       , gpu_base(_gpu_base), cpu_base((char *)_cpu_base)
     {
-      // advertise ourselves as a host memory
-      local_segment.assign(NetworkSegmentInfo::HostMem, cpu_base, size);
+      // advertise ourselves as a host or managed memory, as appropriate
+      NetworkSegmentInfo::MemoryType mtype;
+      if(_kind == MemoryImpl::MKIND_MANAGED)
+        mtype = NetworkSegmentInfo::CudaManagedMem;
+      else
+        mtype = NetworkSegmentInfo::HostMem;
+      local_segment.assign(mtype, cpu_base, size);
       segment = &local_segment;
     }
 
@@ -2390,6 +2738,72 @@ namespace Realm {
     {
       return (cpu_base + offset);
     }
+
+    // GPUZCMemory supports ExternalCudaPinnedHostResource
+    bool GPUZCMemory::attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                         size_t& inst_offset)
+    {
+      {
+        ExternalCudaPinnedHostResource *res = dynamic_cast<ExternalCudaPinnedHostResource *>(inst->metadata.ext_resource);
+        if(res) {
+          // automatic success - offset relative to our base
+          inst_offset = res->base - reinterpret_cast<uintptr_t>(cpu_base);
+          return true;
+        }
+      }
+
+      // not a kind we recognize
+      return false;
+    }
+
+    void GPUZCMemory::unregister_external_resource(RegionInstanceImpl *inst)
+    {
+      // nothing actually to clean up
+    }
+
+    // for re-registration purposes, generate an ExternalInstanceResource *
+    //  (if possible) for a given instance, or a subset of one
+    ExternalInstanceResource *GPUZCMemory::generate_resource_info(RegionInstanceImpl *inst,
+                                                                  const IndexSpaceGeneric *subspace,
+                                                                  span<const FieldID> fields,
+                                                                  bool read_only)
+    {
+      // compute the bounds of the instance relative to our base
+      assert(inst->metadata.is_valid() &&
+             "instance metadata must be valid before accesses are performed");
+      assert(inst->metadata.layout);
+      InstanceLayoutGeneric *ilg = inst->metadata.layout;
+      uintptr_t rel_base, extent;
+      if(subspace == 0) {
+        // want full instance
+        rel_base = 0;
+        extent = ilg->bytes_used;
+      } else {
+        assert(!fields.empty());
+        uintptr_t limit;
+        for(size_t i = 0; i < fields.size(); i++) {
+          uintptr_t f_base, f_limit;
+          if(!subspace->impl->compute_affine_bounds(ilg, fields[i], f_base, f_limit))
+            return 0;
+          if(i == 0) {
+            rel_base = f_base;
+            limit = f_limit;
+          } else {
+            rel_base = std::min(rel_base, f_base);
+            limit = std::max(limit, f_limit);
+          }
+        }
+        extent = limit - rel_base;
+      }
+
+      void *mem_base = (this->cpu_base +
+                        inst->metadata.inst_offset +
+                        rel_base);
+
+      return new ExternalCudaPinnedHostResource(reinterpret_cast<uintptr_t>(mem_base),
+                                                extent, read_only);
+    }
+
 
     ////////////////////////////////////////////////////////////////////////
     //
@@ -3012,6 +3426,37 @@ namespace Realm {
 	  runtime->add_proc_mem_affinity(pma);
 	}
       }
+
+      // look for any other local memories that belong to our context or
+      //  peer-able contexts
+      const Node& n = get_runtime()->nodes[Network::my_node_id];
+      for(std::vector<MemoryImpl *>::const_iterator it = n.memories.begin();
+          it != n.memories.end();
+          ++it) {
+        CudaDeviceMemoryInfo *cdm = (*it)->find_module_specific<CudaDeviceMemoryInfo>();
+        if(!cdm) continue;
+        if(cdm->context == context) {
+          Machine::ProcessorMemoryAffinity pma;
+          pma.p = p;
+          pma.m = (*it)->me;
+          pma.bandwidth = 200;  // "big"
+          pma.latency = 5;      // "ok"
+          runtime->add_proc_mem_affinity(pma);
+        } else {
+          // if the other context is associated with a gpu and we've got peer
+          //  access, use it
+          // TODO: add option to enable peer access at this point?  might be
+          //  expensive...
+          if(cdm->gpu && (info->peers.count(cdm->gpu->info->device) > 0)) {
+            Machine::ProcessorMemoryAffinity pma;
+            pma.p = p;
+            pma.m = (*it)->me;
+            pma.bandwidth = 10; // assuming pcie, this should be ~half the bw and
+            pma.latency = 400;  // ~twice the latency as zcmem
+            runtime->add_proc_mem_affinity(pma);
+          }
+        }
+      }
     }
 
     void GPU::create_fb_memory(RuntimeImpl *runtime, size_t size, size_t ib_size)
@@ -3078,6 +3523,24 @@ namespace Realm {
         fb_ibmem = new GPUFBIBMemory(m, this, fb_ibmem_base, ib_size);
         runtime->add_ib_memory(fb_ibmem);
       }
+    }
+
+    void GPU::create_dynamic_fb_memory(RuntimeImpl *runtime, size_t max_size)
+    {
+      // if the max_size is non-zero, also limit by what appears to be
+      //  currently available
+      if(max_size > 0) {
+	AutoGPUContext agc(this);
+
+        size_t free_bytes, total_bytes;
+        CHECK_CU( CUDA_DRIVER_FNPTR(cuMemGetInfo)(&free_bytes, &total_bytes) );
+        if(total_bytes < max_size)
+          max_size = total_bytes;
+      }
+
+      Memory m = runtime->next_local_memory_id();
+      GPUDynamicFBMemory *dfb = new GPUDynamicFBMemory(m, this, max_size);
+      runtime->add_memory(dfb);
     }
 
 #ifdef REALM_USE_CUDART_HIJACK
@@ -3163,7 +3626,7 @@ namespace Realm {
       //  that name a symbol that does not actually exist in the module - since
       //  we are doing eager lookup, we need to tolerate CUDA_ERROR_NOT_FOUND
       //  results here
-      CUresult res = cuModuleGetFunction(&f, module, func->device_fun);
+      CUresult res = CUDA_DRIVER_FNPTR(cuModuleGetFunction)(&f, module, func->device_fun);
       switch(res) {
       case CUDA_SUCCESS:
         {
@@ -3181,8 +3644,8 @@ namespace Realm {
       default:
         {
           const char *name, *str;
-          cuGetErrorName(res, &name);
-          cuGetErrorString(res, &str);
+          CUDA_DRIVER_FNPTR(cuGetErrorName)(res, &name);
+          CUDA_DRIVER_FNPTR(cuGetErrorString)(res, &str);
           log_gpu.fatal() << "unexpected error when looking up device function '"
                           << func->device_fun << "' in module " << module
                           << ": " << str << " (" << name << ")";
@@ -3277,12 +3740,14 @@ namespace Realm {
     AutoGPUContext::AutoGPUContext(GPU *_gpu)
       : gpu(_gpu)
     {
-      gpu->push_context();
+      if(gpu)
+        gpu->push_context();
     }
 
     AutoGPUContext::~AutoGPUContext(void)
     {
-      gpu->pop_context();
+      if(gpu)
+        gpu->pop_context();
     }
 
 
@@ -3301,6 +3766,8 @@ namespace Realm {
       , cfg_fb_mem_size(256 << 20)
       , cfg_fb_ib_size(128 << 20)
       , cfg_uvm_mem_size(0)
+      , cfg_use_dynamic_fb(true)
+      , cfg_dynfb_max_size(~size_t(0))
       , cfg_num_gpus(0)
       , cfg_task_streams(1)
       , cfg_d2d_streams(4)
@@ -3312,6 +3779,8 @@ namespace Realm {
       , cfg_skip_gpu_count(0)
       , cfg_skip_busy_gpus(false)
       , cfg_min_avail_mem(0)
+      , cfg_task_legacy_sync(0)
+      , cfg_task_context_sync(-1)
       , cfg_max_ctxsync_threads(4)
       , cfg_lmem_resize_to_max(false)
       , cfg_multithread_dma(false)
@@ -3469,6 +3938,8 @@ namespace Realm {
 	  .add_option_int_units("-ll:ib_fsize", m->cfg_fb_ib_size, 'm')
 	  .add_option_int_units("-ll:ib_zsize", m->cfg_zc_ib_size, 'm')
           .add_option_int_units("-ll:msize", m->cfg_uvm_mem_size, 'm')
+          .add_option_int("-cuda:dynfb", m->cfg_use_dynamic_fb)
+          .add_option_int_units("-cuda:dynfb_max", m->cfg_dynfb_max_size, 'm')
 	  .add_option_int("-ll:gpu", m->cfg_num_gpus)
           .add_option_string("-ll:gpu_ids", m->cfg_gpu_idxs)
 	  .add_option_int("-ll:streams", m->cfg_task_streams)
@@ -3482,6 +3953,8 @@ namespace Realm {
 	  .add_option_int("-cuda:skipgpus", m->cfg_skip_gpu_count)
 	  .add_option_bool("-cuda:skipbusy", m->cfg_skip_busy_gpus)
 	  .add_option_int_units("-cuda:minavailmem", m->cfg_min_avail_mem, 'm')
+          .add_option_int("-cuda:legacysync", m->cfg_task_legacy_sync)
+          .add_option_int("-cuda:contextsync", m->cfg_task_context_sync)
 	  .add_option_int("-cuda:maxctxsync", m->cfg_max_ctxsync_threads)
           .add_option_int("-cuda:lmemresize", m->cfg_lmem_resize_to_max)
 	  .add_option_int("-cuda:mtdma", m->cfg_multithread_dma)
@@ -3818,6 +4291,12 @@ namespace Realm {
 	    it != gpus.end();
 	    it++)
 	  (*it)->create_fb_memory(runtime, cfg_fb_mem_size, cfg_fb_ib_size);
+
+      if(cfg_use_dynamic_fb)
+	for(std::vector<GPU *>::iterator it = gpus.begin();
+	    it != gpus.end();
+	    it++)
+	  (*it)->create_dynamic_fb_memory(runtime, cfg_dynfb_max_size);
 
       // a single ZC memory for everybody
       if((cfg_zc_mem_size > 0) && !gpus.empty()) {
@@ -4464,7 +4943,7 @@ namespace Realm {
 
             // attempt to import each entry
             for(unsigned i = 0; i < args.count; i++) {
-              CUdeviceptr dptr;
+              CUdeviceptr dptr = 0;
               CUresult ret = CUDA_DRIVER_FNPTR(cuIpcOpenMemHandle)(&dptr,
                                                                    entries[i].handle,
                                                                    CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS);
@@ -4473,23 +4952,29 @@ namespace Realm {
                                  << " local=" << dptr << std::dec
                                  << " ret=" << ret;
 
-              if(ret != CUDA_SUCCESS)
-                continue; // complain louder?
+              if(ret == CUDA_SUCCESS) {
+                // take the cudaipc mutex to actually add the mapping
+                GPU::CudaIpcMapping mapping;
+                mapping.owner = sender;
+                mapping.mem = entries[i].mem;
+                mapping.local_base = dptr;
+                mapping.address_offset = entries[i].base_ptr - dptr;
+                {
+                  AutoLock<> al(cuda_module_singleton->cudaipc_mutex);
+                  (*it)->cudaipc_mappings.push_back(mapping);
 
-              // take the cudaipc mutex to actually add the mapping
-              GPU::CudaIpcMapping mapping;
-              mapping.owner = sender;
-              mapping.mem = entries[i].mem;
-              mapping.local_base = dptr;
-              mapping.address_offset = entries[i].base_ptr - dptr;
-              {
-                AutoLock<> al(cuda_module_singleton->cudaipc_mutex);
-                (*it)->cudaipc_mappings.push_back(mapping);
+                  // do we have a stream for this target?
+                  if((*it)->cudaipc_streams.count(sender) == 0)
+                    (*it)->cudaipc_streams[sender] = new GPUStream(*it,
+                                                                   (*it)->worker);
+                }
+              } else {
+                // consider complaining louder?
 
-                // do we have a stream for this target?
-                if((*it)->cudaipc_streams.count(sender) == 0)
-                  (*it)->cudaipc_streams[sender] = new GPUStream(*it,
-                                                                 (*it)->worker);
+                // also, go ahead and release the handle now since we can't
+                //  use it
+                ActiveMessage<CudaIpcRelease> amsg(sender);
+                amsg.commit();
               }
             }
           }
@@ -4535,4 +5020,3 @@ namespace Realm {
 
   }; // namespace Cuda
 }; // namespace Realm
-

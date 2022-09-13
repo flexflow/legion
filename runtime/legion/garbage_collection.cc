@@ -63,7 +63,7 @@ namespace Legion {
     void LocalReferenceMutator::record_reference_mutation_effect(RtEvent event)
     //--------------------------------------------------------------------------
     {
-      mutation_effects.insert(event);
+      mutation_effects.push_back(event);
     }
 
     //--------------------------------------------------------------------------
@@ -178,8 +178,6 @@ namespace Legion {
       assert(valid_references == 0);
       assert(resource_references == 0);
 #endif
-      if (is_owner() && registered_with_runtime)
-        unregister_with_runtime();
       if ((collective_mapping != NULL) && 
           collective_mapping->remove_reference())
         delete collective_mapping;
@@ -189,8 +187,10 @@ namespace Legion {
 #endif
     }
 
+#ifndef DEBUG_LEGION_GC
     //--------------------------------------------------------------------------
-    void DistributedCollectable::add_gc_reference(ReferenceMutator *mutator)
+    void DistributedCollectable::add_gc_reference(
+                                             ReferenceMutator *mutator, int cnt)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -232,14 +232,23 @@ namespace Legion {
         if (first)
         {
           bool reentrant = false;
+          // Wait for any state transitions to be finished
+          // before we attempt to update the state
           wait_for = check_for_transition_event(reentrant);
           if (wait_for.exists())
             continue;
-          // Wait for any state transitions to be finished
-          // before we attempt to update the state
 #ifdef DEBUG_LEGION
-          // Should have at least one reference here
-          assert(__sync_fetch_and_add(&gc_references, 0) > 0);
+          assert(in_stable_state() || reentrant);
+#endif
+          // See if we lost the race to update the references
+          if (gc_references.fetch_add(cnt) > 0)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
+            break;
+          }
+#ifdef DEBUG_LEGION
+          assert(!has_gc_references);
 #endif
           has_gc_references = true;
           if (reentrant)
@@ -252,17 +261,15 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      if (do_deletion)
-      {
-        // If we get here it is probably a race in reference counting
-        // scheme above, so mark it is as such
-        assert(false);
-        delete this;
-      }
+#ifdef DEBUG_LEGION
+      // Probably a race in the reference counting scheme above
+      assert(!do_deletion);
+#endif
     }
 
     //--------------------------------------------------------------------------
-    bool DistributedCollectable::remove_gc_reference(ReferenceMutator *mutator)
+    bool DistributedCollectable::remove_gc_reference(
+                                             ReferenceMutator *mutator, int cnt)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -307,9 +314,15 @@ namespace Legion {
           wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
-          // Check to see if we lost the race for changing state
-          if (has_gc_references && 
-              (__sync_fetch_and_add(&gc_references, 0) == 0))
+#ifdef DEBUG_LEGION
+          assert(in_stable_state() || reentrant);
+#endif
+          const int previous = gc_references.fetch_sub(cnt);
+#ifdef DEBUG_LEGION
+          assert(has_gc_references);
+          assert(previous >= cnt);
+#endif
+          if (previous == cnt)
             has_gc_references = false;
           else
           {
@@ -327,11 +340,14 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
 
     //--------------------------------------------------------------------------
-    void DistributedCollectable::add_valid_reference(ReferenceMutator *mutator)
+    void DistributedCollectable::add_valid_reference(
+                                             ReferenceMutator *mutator, int cnt)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -377,8 +393,17 @@ namespace Legion {
           if (wait_for.exists())
             continue;
 #ifdef DEBUG_LEGION
-          // Should have at least one reference here
-          assert(__sync_fetch_and_add(&valid_references, 0) > 0);
+          assert(in_stable_state() || reentrant);
+#endif
+          // See if we lost the race to update the references
+          if (valid_references.fetch_add(cnt) > 0)
+          {
+            if (!reentrant)
+              reentrant_event = RtEvent::NO_RT_EVENT;
+            break;
+          }
+#ifdef DEBUG_LEGION
+          assert(!has_valid_references);
 #endif
           has_valid_references = true;
           if (reentrant)
@@ -391,17 +416,15 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      if (do_deletion)
-      {
-        // This probably indicates a race in reference counting algorithm
-        assert(false);
-        delete this;
-      }
+#ifdef DEBUG_LEGION
+      // Probably a race in the reference counting scheme above
+      assert(!do_deletion);
+#endif
     }
 
     //--------------------------------------------------------------------------
     bool DistributedCollectable::remove_valid_reference(
-                                                      ReferenceMutator *mutator)
+                                             ReferenceMutator *mutator, int cnt)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -446,9 +469,15 @@ namespace Legion {
           wait_for = check_for_transition_event(reentrant); 
           if (wait_for.exists())
             continue;
-          // Check to see if we lost the race for changing state
-          if (has_valid_references &&
-              (__sync_fetch_and_add(&valid_references, 0) == 0))
+#ifdef DEBUG_LEGION
+          assert(in_stable_state() || reentrant);
+#endif
+          const int previous = valid_references.fetch_sub(cnt);
+#ifdef DEBUG_LEGION
+          assert(has_valid_references);
+          assert(previous >= cnt);
+#endif
+          if (previous == cnt)
             has_valid_references = false;
           else
           {
@@ -466,280 +495,348 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
+#endif // not defined DEBUG_LEGION_GC
 
+#ifdef DEBUG_LEGION
     //--------------------------------------------------------------------------
-    bool DistributedCollectable::check_valid_and_increment(
-                                                ReferenceSource source, int cnt)
+    bool DistributedCollectable::check_valid(void)
     //--------------------------------------------------------------------------
     {
-      AutoLock gc(gc_lock);
-      if (current_state != VALID_STATE)
-        return false;
-#ifdef DEBUG_LEGION
-      assert(cnt >= 0);
-#endif
-#ifdef LEGION_GC
-      log_base_ref<true>(VALID_REF_KIND, did, local_space, source, cnt);
-#endif
-#ifndef DEBUG_LEGION_GC
-      int previous = __sync_fetch_and_add(&valid_references, cnt);
-#ifdef DEBUG_LEGION
-      assert(previous >= 0);
-#endif
-      if (previous == 0)
-        has_valid_references = true;
-#else
-      valid_references++;
-      std::map<ReferenceSource,int>::iterator finder = 
-        detailed_base_valid_references.find(source);
-      if (finder == detailed_base_valid_references.end())
-        detailed_base_valid_references[source] = cnt;
-      else
-        finder->second += cnt;
-      if (valid_references > cnt)
-        return true;
-#ifdef DEBUG_LEGION
-      assert(!has_valid_references);
-#endif
-      has_valid_references = true;
-#endif
-      return true;
-    }
-
-    //--------------------------------------------------------------------------
-    bool DistributedCollectable::check_valid_and_increment(
-                                                  DistributedID source, int cnt)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock gc(gc_lock);
-      if (current_state != VALID_STATE)
-        return false;
-#ifdef DEBUG_LEGION
-      assert(cnt >= 0);
-#endif
-#ifdef LEGION_GC
-      log_nested_ref<true>(VALID_REF_KIND, did, local_space, source, cnt);
-#endif
-#ifndef DEBUG_LEGION_GC
-      int previous = __sync_fetch_and_add(&valid_references, cnt);
-#ifdef DEBUG_LEGION
-      assert(previous >= 0);
-#endif
-      if (previous == 0)
-        has_valid_references = true;
-#else
-      valid_references++;
-      source = LEGION_DISTRIBUTED_ID_FILTER(source);
-      std::map<DistributedID,int>::iterator finder = 
-        detailed_nested_valid_references.find(source);
-      if (finder == detailed_nested_valid_references.end())
-        detailed_nested_valid_references[source] = cnt;
-      else
-        finder->second += cnt;
-      if (valid_references > cnt)
-        return true;
-#ifdef DEBUG_LEGION
-      assert(!has_valid_references);
-#endif
-      has_valid_references = true;
-#endif
-      return true;
-    }
-
-    //--------------------------------------------------------------------------
-    bool DistributedCollectable::check_gc_and_increment(
-                                                ReferenceSource source, int cnt)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock gc(gc_lock);
-      if ((current_state == INACTIVE_STATE) || 
-          (current_state == DELETED_STATE) || 
-          (current_state == PENDING_ACTIVE_STATE) || 
-          (current_state == PENDING_INACTIVE_STATE) ||
-          (current_state == PENDING_INACTIVE_INVALID_STATE))
-        return false;
-#ifdef DEBUG_LEGION
-      assert(cnt >= 0);
-#endif
-#ifdef LEGION_GC
-      log_base_ref<true>(GC_REF_KIND, did, local_space, source, cnt);
-#endif
-#ifndef DEBUG_LEGION_GC
-      int previous = __sync_fetch_and_add(&gc_references, cnt);
-#ifdef DEBUG_LEGION
-      assert(previous >= 0);
-#endif
-      if (previous == 0)
-        has_gc_references = true;
-#else
-      gc_references++;
-      std::map<ReferenceSource,int>::iterator finder = 
-        detailed_base_gc_references.find(source);
-      if (finder == detailed_base_gc_references.end())
-        detailed_base_gc_references[source] = cnt;
-      else
-        finder->second += cnt;
-      if (gc_references > cnt)
-        return true;
-#ifdef DEBUG_LEGION
-      assert(!has_gc_references);
-#endif
-      has_gc_references = true;
-#endif
-      return true;
-    }
-
-    //--------------------------------------------------------------------------
-    bool DistributedCollectable::check_gc_and_increment(
-                                                  DistributedID source, int cnt)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock gc(gc_lock);
-      if ((current_state == INACTIVE_STATE) || 
-          (current_state == DELETED_STATE) || 
-          (current_state == PENDING_ACTIVE_STATE) || 
-          (current_state == PENDING_INACTIVE_STATE) ||
-          (current_state == PENDING_INACTIVE_INVALID_STATE))
-        return false;
-#ifdef DEBUG_LEGION
-      assert(cnt >= 0);
-#endif
-#ifdef LEGION_GC
-      log_nested_ref<true>(GC_REF_KIND, did, local_space, source, cnt);
-#endif
-#ifndef DEBUG_LEGION_GC
-      int previous = __sync_fetch_and_add(&gc_references, cnt);
-#ifdef DEBUG_LEGION
-      assert(previous >= 0);
-#endif
-      if (previous == 0)
-        has_gc_references = true;
-#else
-      gc_references++;
-      source = LEGION_DISTRIBUTED_ID_FILTER(source);
-      std::map<DistributedID,int>::iterator finder = 
-        detailed_nested_gc_references.find(source);
-      if (finder == detailed_nested_gc_references.end())
-        detailed_nested_gc_references[source] = cnt;
-      else
-        finder->second += cnt;
-      if (gc_references > cnt)
-        return true;
-#ifdef DEBUG_LEGION
-      assert(!has_gc_references);
-#endif
-      has_gc_references = true;
-#endif
-      return true;
-    }
-
-    //--------------------------------------------------------------------------
-    bool DistributedCollectable::check_resource_and_increment(
-                                                ReferenceSource source, int cnt)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock gc(gc_lock);
-      if (current_state == DELETED_STATE)
-        return false;
-#ifdef DEBUG_LEGION
-      assert(cnt >= 0);
-#endif
-#ifdef LEGION_GC
-      log_base_ref<true>(RESOURCE_REF_KIND, did, local_space, source, cnt);
-#endif
-#ifndef DEBUG_LEGION_GC
-      int previous = __sync_fetch_and_add(&resource_references, cnt);
-#ifdef DEBUG_LEGION
-      assert(previous >= 0);
-#endif
-      if (previous == 0)
-        has_resource_references = true;
-#else
-      resource_references++;
-      std::map<ReferenceSource,int>::iterator finder = 
-        detailed_base_resource_references.find(source);
-      if (finder == detailed_base_resource_references.end())
-        detailed_base_resource_references[source] = cnt;
-      else
-        finder->second += cnt;
-      if (resource_references > cnt)
-        return true;
-#ifdef DEBUG_LEGION
-      assert(!has_resource_references);
-#endif
-      has_resource_references = true;
-#endif
-      return true;
-    }
-
-    //--------------------------------------------------------------------------
-    bool DistributedCollectable::check_resource_and_increment(
-                                                  DistributedID source, int cnt)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock gc(gc_lock);
-      if (current_state == DELETED_STATE)
-        return false;
-#ifdef DEBUG_LEGION
-      assert(cnt >= 0);
-#endif
-#ifdef LEGION_GC
-      log_nested_ref<true>(RESOURCE_REF_KIND, did, local_space, source, cnt);
-#endif
-#ifndef DEBUG_LEGION_GC
-      int previous = __sync_fetch_and_add(&resource_references, cnt);
-#ifdef DEBUG_LEGION
-      assert(previous >= 0);
-#endif
-      if (previous == 0)
-        has_resource_references = true;
-#else
-      resource_references++;
-      source = LEGION_DISTRIBUTED_ID_FILTER(source);
-      std::map<DistributedID,int>::iterator finder = 
-        detailed_nested_resource_references.find(source);
-      if (finder == detailed_nested_resource_references.end())
-        detailed_nested_resource_references[source] = cnt;
-      else
-        finder->second += cnt;
-      if (resource_references > cnt)
-        return true;
-#ifdef DEBUG_LEGION
-      assert(!has_resource_references);
-#endif
-      has_resource_references = true;
-#endif
-      return true;
-    }
-
-    //--------------------------------------------------------------------------
-    void DistributedCollectable::add_resource_reference(void)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock gc(gc_lock);
-#ifdef DEBUG_LEGION
-      // Should have at least one reference here
-      assert(__sync_fetch_and_add(&resource_references, 0) > 0);
-#endif
-      has_resource_references = true;
-    }
-
-    //--------------------------------------------------------------------------
-    bool DistributedCollectable::remove_resource_reference(void)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock gc(gc_lock);
-      // Check to see if we lost the race for changing state
-      if (__sync_fetch_and_add(&resource_references, 0) == 0)
+      RtEvent wait_for;
+      bool result = false;
+      bool reentrant = false;
+      do
       {
-        has_resource_references = false;
-        return can_delete();
-      }
-      else
-        return false;
+        if (wait_for.exists() && !wait_for.has_triggered())
+          wait_for.wait();
+        AutoLock gc(gc_lock); 
+        wait_for = check_for_transition_event(reentrant);
+        if (wait_for.exists())
+          continue; 
+        assert(in_stable_state());
+        result = (current_state == VALID_STATE);
+        if (!reentrant)
+          reentrant_event = RtEvent::NO_RT_EVENT;
+        break;
+      } while (true);
+      return result;
     }
+#endif
+
+    //--------------------------------------------------------------------------
+    bool DistributedCollectable::check_valid_and_increment(
+                                                ReferenceSource source, int cnt)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(cnt >= 0);
+#endif
+#ifndef DEBUG_LEGION_GC
+      // Check to see if we can do the add without the lock first
+      int current = valid_references.load();
+      while (current > 0)
+      {
+        int next = current + cnt;
+        if (valid_references.compare_exchange_weak(current, next))
+        {
+#ifdef LEGION_GC
+          log_base_ref<true>(VALID_REF_KIND, did, local_space, source, cnt);
+#endif
+          return true;
+        }
+      }
+#endif
+      // Need to wait until all transitions are done 
+      RtEvent wait_for;
+      bool reentrant = false;
+      do
+      {
+        if (wait_for.exists() && !wait_for.has_triggered())
+          wait_for.wait();
+        AutoLock gc(gc_lock); 
+        wait_for = check_for_transition_event(reentrant);
+        if (wait_for.exists())
+          continue;
+#ifdef DEBUG_LEGION
+        assert(in_stable_state());
+#endif
+        if (current_state != VALID_STATE)
+        {
+          if (!reentrant)
+            reentrant_event = RtEvent::NO_RT_EVENT;
+          break;
+        }
+#ifdef LEGION_GC
+        log_base_ref<true>(VALID_REF_KIND, did, local_space, source, cnt);
+#endif
+#ifdef DEBUG_LEGION
+        assert(has_valid_references);
+#endif
+#ifdef DEBUG_LEGION_GC
+        valid_references += cnt;
+        std::map<ReferenceSource,int>::iterator finder = 
+          detailed_base_valid_references.find(source);
+        if (finder == detailed_base_valid_references.end())
+          detailed_base_valid_references[source] = cnt;
+        else
+          finder->second += cnt;
+#else
+        valid_references.fetch_add(cnt);
+#endif
+        if (!reentrant)
+          reentrant_event = RtEvent::NO_RT_EVENT;
+        return true;
+      } while (true);
+      return false;
+    }
+
+    //--------------------------------------------------------------------------
+    bool DistributedCollectable::check_valid_and_increment(
+                                                  DistributedID source, int cnt)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(cnt >= 0);
+#endif
+#ifndef DEBUG_LEGION_GC
+      // Check to see if we can do the add without the lock first
+      int current = valid_references.load();
+      while (current > 0)
+      {
+        int next = current + cnt;
+        if (valid_references.compare_exchange_weak(current, next))
+        {
+#ifdef LEGION_GC
+          log_nested_ref<true>(VALID_REF_KIND, did, local_space, source, cnt);
+#endif
+          return true;
+        }
+      }
+#endif
+      // Need to wait until all transitions are done 
+      RtEvent wait_for;
+      bool reentrant = false;
+      do
+      {
+        if (wait_for.exists() && !wait_for.has_triggered())
+          wait_for.wait();
+        AutoLock gc(gc_lock); 
+        wait_for = check_for_transition_event(reentrant);
+        if (wait_for.exists())
+          continue;
+#ifdef DEBUG_LEGION
+        assert(in_stable_state());
+#endif
+        if (current_state != VALID_STATE)
+        {
+          if (!reentrant)
+            reentrant_event = RtEvent::NO_RT_EVENT;
+          break;
+        }
+#ifdef LEGION_GC
+        log_nested_ref<true>(VALID_REF_KIND, did, local_space, source, cnt);
+#endif
+#ifdef DEBUG_LEGION
+        assert(has_valid_references);
+#endif
+#ifdef DEBUG_LEGION_GC
+        valid_references += cnt;
+        source = LEGION_DISTRIBUTED_ID_FILTER(source);
+        std::map<DistributedID,int>::iterator finder = 
+          detailed_nested_valid_references.find(source);
+        if (finder == detailed_nested_valid_references.end())
+          detailed_nested_valid_references[source] = cnt;
+        else
+          finder->second += cnt;
+#else
+        valid_references.fetch_add(cnt);
+#endif
+        if (!reentrant)
+          reentrant_event = RtEvent::NO_RT_EVENT;
+        return true;
+      } while (true);
+      return false;
+    }
+
+    //--------------------------------------------------------------------------
+    bool DistributedCollectable::check_active_and_increment(
+                                                ReferenceSource source, int cnt)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(cnt >= 0);
+#endif
+#ifndef DEBUG_LEGION_GC
+      // Check to see if we can do the add without the lock first
+      int current = gc_references.load();
+      while (current > 0)
+      {
+        int next = current + cnt;
+        if (gc_references.compare_exchange_weak(current, next))
+        {
+#ifdef LEGION_GC
+          log_base_ref<true>(GC_REF_KIND, did, local_space, source, cnt);
+#endif
+          return true;
+        }
+      }
+#endif
+      // Need to wait until all transitions are done 
+      RtEvent wait_for;
+      bool reentrant = false;
+      do
+      {
+        if (wait_for.exists() && !wait_for.has_triggered())
+          wait_for.wait();
+        AutoLock gc(gc_lock); 
+        wait_for = check_for_transition_event(reentrant);
+        if (wait_for.exists())
+          continue;
+#ifdef DEBUG_LEGION
+        assert(in_stable_state());
+#endif
+        if ((current_state != ACTIVE_INVALID_STATE) && 
+            (current_state != VALID_STATE))
+        {
+          if (!reentrant)
+            reentrant_event = RtEvent::NO_RT_EVENT;
+          break;
+        }
+#ifdef LEGION_GC
+        log_base_ref<true>(GC_REF_KIND, did, local_space, source, cnt);
+#endif
+#ifdef DEBUG_LEGION_GC
+        if (gc_references == 0)
+          has_gc_references = true;
+        gc_references += cnt;
+        std::map<ReferenceSource,int>::iterator finder = 
+          detailed_base_gc_references.find(source);
+        if (finder == detailed_base_gc_references.end())
+          detailed_base_gc_references[source] = cnt;
+        else
+          finder->second += cnt;
+#else
+        if (gc_references.fetch_add(cnt) == 0)
+          has_gc_references = true;
+#endif
+        if (!reentrant)
+          reentrant_event = RtEvent::NO_RT_EVENT;
+        return true;
+      } while (true);
+      return false;
+    }
+
+    //--------------------------------------------------------------------------
+    bool DistributedCollectable::check_active_and_increment(
+                                                  DistributedID source, int cnt)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(cnt >= 0);
+#endif
+#ifndef DEBUG_LEGION_GC
+      // Check to see if we can do the add without the lock first
+      int current = gc_references.load();
+      while (current > 0)
+      {
+        int next = current + cnt;
+        if (gc_references.compare_exchange_weak(current, next))
+        {
+#ifdef LEGION_GC
+          log_nested_ref<true>(GC_REF_KIND, did, local_space, source, cnt);
+#endif
+          return true;
+        }
+      }
+#endif
+      // Need to wait until all transitions are done 
+      RtEvent wait_for;
+      bool reentrant = false;
+      do
+      {
+        if (wait_for.exists() && !wait_for.has_triggered())
+          wait_for.wait();
+        AutoLock gc(gc_lock); 
+        wait_for = check_for_transition_event(reentrant);
+        if (wait_for.exists())
+          continue;
+#ifdef DEBUG_LEGION
+        assert(in_stable_state());
+#endif
+        if ((current_state != ACTIVE_INVALID_STATE) && 
+            (current_state != VALID_STATE))
+        {
+          if (!reentrant)
+            reentrant_event = RtEvent::NO_RT_EVENT;
+          break;
+        }
+#ifdef LEGION_GC
+        log_nested_ref<true>(GC_REF_KIND, did, local_space, source, cnt);
+#endif
+#ifdef DEBUG_LEGION_GC
+        if (gc_references == 0)
+          has_gc_references = true;
+        gc_references += cnt;
+        source = LEGION_DISTRIBUTED_ID_FILTER(source);
+        std::map<DistributedID,int>::iterator finder = 
+          detailed_nested_gc_references.find(source);
+        if (finder == detailed_nested_gc_references.end())
+          detailed_nested_gc_references[source] = cnt;
+        else
+          finder->second += cnt;
+#else
+        if (gc_references.fetch_add(cnt) == 0)
+          has_gc_references = true;
+#endif
+        if (!reentrant)
+          reentrant_event = RtEvent::NO_RT_EVENT;
+        return true;
+      } while (true);
+      return false;
+    }
+
+#ifndef DEBUG_LEGION_GC
+    //--------------------------------------------------------------------------
+    void DistributedCollectable::add_resource_reference(int cnt)
+    //--------------------------------------------------------------------------
+    {
+      AutoLock gc(gc_lock);
+      if (resource_references.fetch_add(cnt) == 0)
+      {
+#ifdef DEBUG_LEGION
+        assert(!has_resource_references);
+#endif
+        has_resource_references = true;
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    bool DistributedCollectable::remove_resource_reference(int cnt)
+    //--------------------------------------------------------------------------
+    {
+      {
+        AutoLock gc(gc_lock);
+        int previous = resource_references.fetch_sub(cnt);
+#ifdef DEBUG_LEGION
+        assert(previous >= cnt);
+        assert(has_resource_references);
+#endif
+        if (previous == cnt)
+        {
+          has_resource_references = false;
+          if (!can_delete())
+            return false;
+        }
+        else
+          return false;
+      }
+      return try_unregister();
+    }
+#endif
 
 #ifdef USE_REMOTE_REFERENCES
     //--------------------------------------------------------------------------
@@ -829,7 +926,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
 
     //--------------------------------------------------------------------------
@@ -918,7 +1017,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
 #endif // USE_REMOTE_REFERENCES
 
@@ -997,13 +1098,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      if (do_deletion)
-      {
-        // If we get here it is probably a race in reference counting
-        // scheme above, so mark it is as such
-        assert(false);
-        delete this;
-      }
+      // If we get here it is probably a race in reference counting
+      // scheme above, so mark it is as such
+      assert(!do_deletion);
     }
 
     //--------------------------------------------------------------------------
@@ -1080,13 +1177,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      if (do_deletion)
-      {
-        // If we get here it is probably a race in reference counting
-        // scheme above, so mark it is as such
-        assert(false);
-        delete this;
-      }
+      // If we get here it is probably a race in reference counting
+      // scheme above, so mark it is as such
+      assert(!do_deletion);
     }
 
     //--------------------------------------------------------------------------
@@ -1163,7 +1256,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
 
     //--------------------------------------------------------------------------
@@ -1242,7 +1337,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
 
     //--------------------------------------------------------------------------
@@ -1319,12 +1416,8 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      if (do_deletion)
-      {
-        // This probably indicates a race in reference counting algorithm
-        assert(false);
-        delete this;
-      }
+      // This probably indicates a race in reference counting algorithm
+      assert(!do_deletion);
     }
 
     //--------------------------------------------------------------------------
@@ -1401,12 +1494,8 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      if (do_deletion)
-      {
-        // This probably indicates a race in reference counting algorithm
-        assert(false);
-        delete this;
-      }
+      // This probably indicates a race in reference counting algorithm
+      assert(!do_deletion);
     }
 
     //--------------------------------------------------------------------------
@@ -1485,7 +1574,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
 
     //--------------------------------------------------------------------------
@@ -1564,7 +1655,9 @@ namespace Legion {
         done = update_state(need_activate, need_validate,
                             need_invalidate, need_deactivate, do_deletion);
       }
-      return do_deletion;
+      if (do_deletion)
+        return try_unregister();
+      return false;
     }
 
     //--------------------------------------------------------------------------
@@ -1573,6 +1666,9 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       AutoLock gc(gc_lock);
+#ifdef DEBUG_LEGION
+      assert(current_state != DELETED_STATE);
+#endif
       resource_references++;
       std::map<ReferenceSource,int>::iterator finder = 
         detailed_base_resource_references.find(source);
@@ -1594,6 +1690,9 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       AutoLock gc(gc_lock);
+#ifdef DEBUG_LEGION
+      assert(current_state != DELETED_STATE);
+#endif
       resource_references++;
       std::map<DistributedID,int>::iterator finder = 
         detailed_nested_resource_references.find(did);
@@ -1614,23 +1713,27 @@ namespace Legion {
                                                 ReferenceSource source, int cnt)
     //--------------------------------------------------------------------------
     {
-      AutoLock gc(gc_lock);
+      {
+        AutoLock gc(gc_lock);
 #ifdef DEBUG_LEGION
-      assert(resource_references >= cnt);
-      assert(has_resource_references);
+        assert(resource_references >= cnt);
+        assert(has_resource_references);
 #endif
-      resource_references--;
-      std::map<ReferenceSource,int>::iterator finder = 
-        detailed_base_resource_references.find(source);
-      assert(finder != detailed_base_resource_references.end());
-      assert(finder->second >= cnt);
-      finder->second -= cnt;
-      if (finder->second == 0)
-        detailed_base_resource_references.erase(finder);
-      if (resource_references > 0)
-        return false;
-      has_resource_references = false;
-      return can_delete();
+        resource_references--;
+        std::map<ReferenceSource,int>::iterator finder = 
+          detailed_base_resource_references.find(source);
+        assert(finder != detailed_base_resource_references.end());
+        assert(finder->second >= cnt);
+        finder->second -= cnt;
+        if (finder->second == 0)
+          detailed_base_resource_references.erase(finder);
+        if (resource_references > 0)
+          return false;
+        has_resource_references = false;
+        if (!can_delete())
+          return false;
+      }
+      return try_unregister();
     }
 
     //--------------------------------------------------------------------------
@@ -1638,23 +1741,27 @@ namespace Legion {
                                                      DistributedID did, int cnt)
     //--------------------------------------------------------------------------
     {
-      AutoLock gc(gc_lock);
+      {
+        AutoLock gc(gc_lock);
 #ifdef DEBUG_LEGION
-      assert(resource_references >= cnt);
-      assert(has_resource_references);
+        assert(resource_references >= cnt);
+        assert(has_resource_references);
 #endif
-      resource_references -= cnt;
-      std::map<DistributedID,int>::iterator finder = 
-        detailed_nested_resource_references.find(did);
-      assert(finder != detailed_nested_resource_references.end());
-      assert(finder->second >= cnt);
-      finder->second -= cnt;
-      if (finder->second == 0)
-        detailed_nested_resource_references.erase(finder);
-      if (resource_references > 0)
-        return false;
-      has_resource_references = false;
-      return can_delete();
+        resource_references -= cnt;
+        std::map<DistributedID,int>::iterator finder = 
+          detailed_nested_resource_references.find(did);
+        assert(finder != detailed_nested_resource_references.end());
+        assert(finder->second >= cnt);
+        finder->second -= cnt;
+        if (finder->second == 0)
+          detailed_nested_resource_references.erase(finder);
+        if (resource_references > 0)
+          return false;
+        has_resource_references = false;
+        if (!can_delete())
+          return false;
+      }
+      return try_unregister();
     }
 #endif // DEBUG_LEGION_GC
 
@@ -1663,6 +1770,9 @@ namespace Legion {
                                                AddressSpaceID remote_inst) const
     //--------------------------------------------------------------------------
     {
+      if ((collective_mapping != NULL) && 
+          collective_mapping->contains(remote_inst))
+        return true;
       AutoLock gc(gc_lock,1,false/*exclusive*/);
       return remote_instances.contains(remote_inst);
     }
@@ -1696,8 +1806,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void DistributedCollectable::register_with_runtime(
-                                  ReferenceMutator *mutator, bool notify_remote)
+    void DistributedCollectable::register_with_runtime(void)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -1705,111 +1814,110 @@ namespace Legion {
 #endif
       registered_with_runtime = true;
       runtime->register_distributed_collectable(did, this);
-      if (notify_remote && !is_owner() && (mutator != NULL))
-        send_remote_registration(mutator);
     }
 
     //--------------------------------------------------------------------------
-    void DistributedCollectable::unregister_with_runtime(void) const
+    bool DistributedCollectable::try_unregister(void)
+    //--------------------------------------------------------------------------
+    {
+      if (!registered_with_runtime)
+      {
+        if ((collective_mapping != NULL) &&
+            (collective_mapping->contains(local_space)))
+          send_unregister_mapping();
+        // If we were never registered with the runtime then we're done
+        AutoLock gc(gc_lock);
+#ifdef DEBUG_LEGION
+        assert(can_delete());
+#endif
+        current_state = DELETED_STATE;
+        return true;
+      }
+      else 
+        return unregister_with_runtime();
+    }
+
+    //--------------------------------------------------------------------------
+    bool DistributedCollectable::unregister_with_runtime(void) const
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
-      assert(is_owner());
       assert(registered_with_runtime);
 #endif
-      runtime->unregister_distributed_collectable(did);
-      if (!remote_instances.empty() || (collective_mapping != NULL))
-        runtime->recycle_distributed_id(did, send_unregister_messages());
+      if (runtime->unregister_distributed_collectable(did))
+      {
+        // Only need to send these messages from the owner node
+        if (is_owner() && !remote_instances.empty())
+          send_unregister_messages();
+        if ((collective_mapping != NULL) &&
+            (collective_mapping->contains(local_space)))
+          send_unregister_mapping();
+        return true;
+      }
       else
-        runtime->recycle_distributed_id(did, RtEvent::NO_RT_EVENT);
+        return false;
+    }
+
+    //--------------------------------------------------------------------------
+    bool DistributedCollectable::confirm_deletion(void)
+    //--------------------------------------------------------------------------
+    {
+      AutoLock gc(gc_lock);
+      if (!can_delete())
+        return false;
+      current_state = DELETED_STATE;
+      return true;
     }
 
     //--------------------------------------------------------------------------
     void DistributedCollectable::UnregisterFunctor::apply(AddressSpaceID target)
     //--------------------------------------------------------------------------
     {
-      RtUserEvent done_event = Runtime::create_rt_user_event();
-      Serializer rez;
-      rez.serialize(did);
-      rez.serialize(done_event); 
-      runtime->send_did_remote_unregister(target, rez);
-      done_events.insert(done_event);
+      const RtEvent precondition = dc->find_unregister_precondition(target);
+      if (precondition.exists() && ! precondition.has_triggered())
+      {
+        DistributedCollectable::DeferRemoteUnregisterArgs args(dc->did, target);
+        runtime->issue_runtime_meta_task(args,
+            LG_LATENCY_MESSAGE_PRIORITY, precondition); 
+      }
+      else
+      {
+        Serializer rez;
+        rez.serialize(dc->did);
+        runtime->send_did_remote_unregister(target, rez);
+      }
     }
 
     //--------------------------------------------------------------------------
-    DistributedCollectable::DeferRemoteUnregisterArgs::
-      DeferRemoteUnregisterArgs(DistributedID id, const NodeSet &n)
-      : LgTaskArgs<DeferRemoteUnregisterArgs>(implicit_provenance),
-        done(Runtime::create_rt_user_event()), did(id), nodes(new NodeSet(n))
-    //--------------------------------------------------------------------------
-    {
-    }
-
-    //--------------------------------------------------------------------------
-    RtEvent DistributedCollectable::send_unregister_messages(void) const
+    void DistributedCollectable::send_unregister_messages(void) const
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(is_owner());
       assert(!remote_instances.empty() || (collective_mapping != NULL));
 #endif
-      // handle the unusual case where the derived type has some precondition
-      // on sending out any unregsiter messages, see the comment on the
-      // 'reentrant_event' member for why we are using it here to detect
-      // this particular event precondition
-      if (reentrant_event.exists() && !reentrant_event.has_triggered())
-      {
-        DeferRemoteUnregisterArgs args(did, remote_instances);
-        runtime->issue_runtime_meta_task(args,
-            LG_LATENCY_MESSAGE_PRIORITY, reentrant_event);
-        return args.done;
-      }
-      std::set<RtEvent> done_events;
-      if (collective_mapping != NULL)
-        send_unregister_mapping(done_events);
-      if (!remote_instances.empty())
-      {
-        UnregisterFunctor functor(runtime, did, done_events); 
-        // No need for the lock since we're being destroyed
-        remote_instances.map(functor);
-      }
-      return Runtime::merge_events(done_events);
+      UnregisterFunctor functor(runtime, this);
+      // No need for the lock since we're being destroyed
+      remote_instances.map(functor);
     }
 
     //--------------------------------------------------------------------------
-    void DistributedCollectable::send_unregister_mapping(
-                                           std::set<RtEvent> &done_events) const
+    void DistributedCollectable::send_unregister_mapping(void) const
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(collective_mapping != NULL);
+      assert(collective_mapping->contains(local_space));
 #endif
       std::vector<AddressSpaceID> children;
       collective_mapping->get_children(owner_space, local_space, children);
+      if (children.empty())
+        return;
+      Serializer rez;
+      rez.serialize(did);
       for (std::vector<AddressSpaceID>::const_iterator it =
             children.begin(); it != children.end(); it++)
-      {
-        RtUserEvent done_event = Runtime::create_rt_user_event();
-        Serializer rez;
-        rez.serialize(did);
-        rez.serialize(done_event); 
         runtime->send_did_remote_unregister(*it, rez);
-        done_events.insert(done_event);
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    void DistributedCollectable::unregister_collectable(
-                                                 std::set<RtEvent> &done_events)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(!is_owner());
-      assert(registered_with_runtime);
-#endif
-      if (collective_mapping != NULL)
-        send_unregister_mapping(done_events);
-      runtime->unregister_distributed_collectable(did);
     }
 
     //--------------------------------------------------------------------------
@@ -1819,23 +1927,14 @@ namespace Legion {
     {
       DistributedID did;
       derez.deserialize(did);
-      RtUserEvent done_event;
-      derez.deserialize(done_event);
       DistributedCollectable *dc = runtime->find_distributed_collectable(did);
-      std::set<RtEvent> done_events;
-      dc->unregister_collectable(done_events);
-      if (!done_events.empty())
-        Runtime::trigger_event(done_event, Runtime::merge_events(done_events));
-      else
-        Runtime::trigger_event(done_event);
       // Now remove the resource reference we were holding
       if (dc->remove_base_resource_ref(REMOTE_DID_REF))
         delete dc;
     }
 
     //--------------------------------------------------------------------------
-    void DistributedCollectable::send_remote_registration(
-                                                      ReferenceMutator *mutator)
+    RtEvent DistributedCollectable::send_remote_registration(void)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -1850,7 +1949,7 @@ namespace Legion {
         rez.serialize(registered_event);
       }
       runtime->send_did_remote_registration(owner_space, rez);     
-      mutator->record_reference_mutation_effect(registered_event);
+      return registered_event;
     }
 
     //--------------------------------------------------------------------------
@@ -1873,7 +1972,7 @@ namespace Legion {
       if (precondition.exists() && !precondition.has_triggered())
       {
         DeferRemoteReferenceUpdateArgs args(this, target, done_event,
-                                            signed_count, true/*valid*/);
+                                            signed_count, VALID_REF_KIND);
         return runtime->issue_runtime_meta_task(args, 
             LG_LATENCY_MESSAGE_PRIORITY, precondition);
       }
@@ -1909,7 +2008,7 @@ namespace Legion {
       if (precondition.exists() && !precondition.has_triggered())
       {
         DeferRemoteReferenceUpdateArgs args(this, target, done_event,
-                                            signed_count, true/*valid*/);
+                                            signed_count, VALID_REF_KIND);
         return runtime->issue_runtime_meta_task(args,
             LG_LATENCY_MESSAGE_PRIORITY, precondition);
       }
@@ -1945,7 +2044,7 @@ namespace Legion {
       if (precondition.exists() && !precondition.has_triggered())
       {
         DeferRemoteReferenceUpdateArgs args(this, target, done_event,
-                                            signed_count, false/*valid*/);
+                                            signed_count, GC_REF_KIND);
         return runtime->issue_runtime_meta_task(args,
             LG_LATENCY_MESSAGE_PRIORITY, precondition);
       }
@@ -1981,7 +2080,7 @@ namespace Legion {
       if (precondition.exists() && !precondition.has_triggered())
       {
         DeferRemoteReferenceUpdateArgs args(this, target, done_event,
-                                            signed_count, false/*valid*/);
+                                            signed_count, GC_REF_KIND);
         return runtime->issue_runtime_meta_task(args,
             LG_LATENCY_MESSAGE_PRIORITY, precondition);
       }
@@ -1995,6 +2094,32 @@ namespace Legion {
       }
       runtime->send_did_remote_gc_update(target, rez);
       return RtEvent::NO_RT_EVENT;
+    }
+
+    //--------------------------------------------------------------------------
+    void DistributedCollectable::send_remote_resource_decrement(
+                    AddressSpaceID target, RtEvent precondition, unsigned count)
+    //--------------------------------------------------------------------------
+    {
+      const int signed_count = -(int(count));
+      if (precondition.exists() && !precondition.has_triggered())
+      {
+        DeferRemoteReferenceUpdateArgs args(this, target,
+            RtUserEvent::NO_RT_USER_EVENT, signed_count, RESOURCE_REF_KIND);
+        runtime->issue_runtime_meta_task(args,
+            LG_LATENCY_MESSAGE_PRIORITY, precondition);
+      }
+      else
+      {
+        Serializer rez;
+        {
+          RezCheck z(rez);
+          rez.serialize(did);
+          rez.serialize(signed_count);
+          rez.serialize<bool>(target == owner_space);
+        }
+        runtime->send_did_remote_resource_update(target, rez);
+      }
     }
 
 #ifdef USE_REMOTE_REFERENCES
@@ -2178,6 +2303,40 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    /*static*/ void DistributedCollectable::handle_did_remote_resource_update(
+                                         Runtime *runtime, Deserializer &derez)
+    //--------------------------------------------------------------------------
+    {
+      DerezCheck z(derez);
+      DistributedID did;
+      derez.deserialize(did);
+      int count;
+      derez.deserialize(count);
+      bool is_owner;
+      derez.deserialize(is_owner);
+      RtUserEvent done_event;
+      derez.deserialize(done_event);
+#ifdef DEBUG_LEGION
+      assert(!done_event.exists());
+      assert(count <= 0);
+#endif
+      DistributedCollectable *target = NULL;
+      if (!is_owner)
+      {
+        RtEvent ready;
+        target = runtime->find_distributed_collectable(did, ready);
+        if (ready.exists() && !ready.has_triggered())
+          ready.wait();
+      }
+      else
+        target = runtime->find_distributed_collectable(did);
+      if (count > 0)
+        target->add_base_resource_ref(REMOTE_DID_REF, unsigned(count));
+      else if(target->remove_base_resource_ref(REMOTE_DID_REF,unsigned(-count)))
+        delete target;
+    }
+
+    //--------------------------------------------------------------------------
     /*static*/ void 
       DistributedCollectable::handle_defer_remote_reference_update(
                                              Runtime *runtime, const void *args)
@@ -2193,10 +2352,26 @@ namespace Legion {
         rez.serialize<bool>(dargs->owner);
         rez.serialize(dargs->done_event);
       }
-      if (dargs->valid)
-        runtime->send_did_remote_valid_update(dargs->target, rez);
-      else
-        runtime->send_did_remote_gc_update(dargs->target, rez);
+      switch (dargs->kind)
+      {
+        case GC_REF_KIND:
+          {
+            runtime->send_did_remote_gc_update(dargs->target, rez);
+            break;
+          }
+        case VALID_REF_KIND:
+          {
+            runtime->send_did_remote_valid_update(dargs->target, rez);
+            break;
+          }
+        case RESOURCE_REF_KIND:
+          {
+            runtime->send_did_remote_resource_update(dargs->target, rez);
+            break;
+          }
+        default:
+          assert(false);
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -2206,14 +2381,9 @@ namespace Legion {
     {
       const DeferRemoteUnregisterArgs *dargs = 
         (const DeferRemoteUnregisterArgs*)args;
-      std::set<RtEvent> done_events;
-      UnregisterFunctor functor(runtime, dargs->did, done_events);
-      dargs->nodes->map(functor);
-      if (!done_events.empty())
-        Runtime::trigger_event(dargs->done, Runtime::merge_events(done_events));
-      else
-        Runtime::trigger_event(dargs->done);
-      delete dargs->nodes;
+      Serializer rez;
+      rez.serialize(dargs->did);
+      runtime->send_did_remote_unregister(dargs->target, rez);
     }
 
     //--------------------------------------------------------------------------
@@ -2580,6 +2750,9 @@ namespace Legion {
                           need_invalidate || need_deactivate);
       if (done)
       {
+#ifdef DEBUG_LEGION
+        assert(in_stable_state());
+#endif
         do_deletion = can_delete();
         reentrant_event = RtEvent::NO_RT_EVENT;
         if (transition_event.exists())

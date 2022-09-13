@@ -49,17 +49,15 @@ namespace Legion {
     public:
       // A helper method for getting access to the runtime's
       // end_task method with private access
-      static inline void end_helper(Runtime *rt, Context ctx,
+      static inline void end_helper(Context ctx,
           const void *result, size_t result_size, bool owned)
       {
-        Runtime::legion_task_postamble(rt, ctx, result, result_size, owned);
+        Runtime::legion_task_postamble(ctx, result, result_size, owned);
       }
-      static inline Future from_value_helper(Runtime *rt, 
-          const void *value, size_t value_size, bool owned,
-          Memory::Kind memkind = Memory::SYSTEM_MEM,
-          void (*freefunc)(void*,size_t) = NULL)
+      static inline Future from_value_helper(
+          const void *value, size_t value_size, bool owned)
       {
-        return rt->from_value(value, value_size, owned, memkind, freefunc);
+        return Future::from_untyped_pointer(value, value_size, owned);
       }
 
       // WARNING: There are two levels of SFINAE (substitution failure is 
@@ -71,26 +69,25 @@ namespace Legion {
       
       template<typename T, bool HAS_SERIALIZE>
       struct NonPODSerializer {
-        static inline void end_task(Runtime *rt, Context ctx,
-                                    T *result)
+        static inline void end_task(Context ctx, T *result)
         {
           size_t buffer_size = result->legion_buffer_size();
           if (buffer_size > 0)
           {
             void *buffer = malloc(buffer_size);
             result->legion_serialize(buffer);
-            end_helper(rt, ctx, buffer, buffer_size, true/*owned*/);
+            end_helper(ctx, buffer, buffer_size, true/*owned*/);
             // No need to free the buffer, the Legion runtime owns it now
           }
           else
-            end_helper(rt, ctx, NULL, 0, false/*owned*/);
+            end_helper(ctx, NULL, 0, false/*owned*/);
         }
-        static inline Future from_value(Runtime *rt, const T *value)
+        static inline Future from_value(const T *value)
         {
           size_t buffer_size = value->legion_buffer_size();
           void *buffer = malloc(buffer_size);
           value->legion_serialize(buffer);
-          return from_value_helper(rt, buffer, buffer_size, true/*owned*/);
+          return from_value_helper(buffer, buffer_size, true/*owned*/);
         }
         static inline T unpack(const Future &f, bool silence_warnings,
                                const char *warning_string)
@@ -107,20 +104,20 @@ namespace Legion {
       // Further specialization for deferred reductions
       template<typename REDOP, bool EXCLUSIVE>
       struct NonPODSerializer<DeferredReduction<REDOP,EXCLUSIVE>,false> {
-        static inline void end_task(Runtime *rt, Context ctx,
+        static inline void end_task(Context ctx,
                                     DeferredReduction<REDOP,EXCLUSIVE> *result)
         {
           static_assert(!IsSerdezType<typename REDOP::RHS>::value, 
               "Legion does not currently support serialize/deserialize "
               "methods on types in DefrredReductions");
-          result->finalize(rt, ctx);
+          result->finalize(ctx);
         }
-        static inline Future from_value(Runtime *rt, 
+        static inline Future from_value(
             const DeferredReduction<REDOP,EXCLUSIVE> *value)
         {
           // Should never be called
           assert(false);
-          return from_value_helper(rt, (const void*)value,
+          return from_value_helper((const void*)value,
             sizeof(DeferredReduction<REDOP,EXCLUSIVE>), false/*owned*/);
         }
         static inline DeferredReduction<REDOP,EXCLUSIVE> 
@@ -138,19 +135,19 @@ namespace Legion {
       // Further specialization to see if this a deferred value
       template<typename T>
       struct NonPODSerializer<DeferredValue<T>,false> {
-        static inline void end_task(Runtime *rt, Context ctx,
+        static inline void end_task(Context ctx,
                                     DeferredValue<T> *result)
         {
           static_assert(!IsSerdezType<T>::value,
               "Legion does not currently support serialize/deserialize "
               "methods on types in DeferredValues");
-          result->finalize(rt, ctx);
+          result->finalize(ctx);
         }
-        static inline Future from_value(Runtime *rt, const DeferredValue<T> *value)
+        static inline Future from_value(const DeferredValue<T> *value)
         {
           // Should never be called
           assert(false);
-          return from_value_helper(rt, (const void*)value,
+          return from_value_helper((const void*)value,
                                    sizeof(DeferredValue<T>), false/*owned*/);
         }
         static inline DeferredValue<T> unpack(const Future &f,
@@ -167,13 +164,13 @@ namespace Legion {
       
       template<typename T>
       struct NonPODSerializer<T,false> {
-        static inline void end_task(Runtime *rt, Context ctx, T *result)
+        static inline void end_task(Context ctx, T *result)
         {
-          end_helper(rt, ctx, (void*)result, sizeof(T), false/*owned*/);
+          end_helper(ctx, (void*)result, sizeof(T), false/*owned*/);
         }
-        static inline Future from_value(Runtime *rt, const T *value)
+        static inline Future from_value(const T *value)
         {
-          return from_value_helper(rt, (const void*)value,
+          return from_value_helper((const void*)value,
                                    sizeof(T), false/*owned*/);
         }
         static inline T unpack(const Future &f, bool silence_warnings,
@@ -203,15 +200,14 @@ namespace Legion {
 
       template<typename T, bool IS_STRUCT>
       struct StructHandler {
-        static inline void end_task(Runtime *rt, Context ctx, T *result)
+        static inline void end_task(Context ctx, T *result)
         {
           // Otherwise this is a struct, so see if it has serialization methods
-          NonPODSerializer<T,IsSerdezType<T>::value>::end_task(rt, ctx, result);
+          NonPODSerializer<T,IsSerdezType<T>::value>::end_task(ctx, result);
         }
-        static inline Future from_value(Runtime *rt, const T *value)
+        static inline Future from_value(const T *value)
         {
-          return NonPODSerializer<T,IsSerdezType<T>::value>::from_value(
-                                                                  rt, value);
+          return NonPODSerializer<T,IsSerdezType<T>::value>::from_value(value);
         }
         static inline T unpack(const Future &f, bool silence_warnings,
                                const char *warning_string)
@@ -223,13 +219,13 @@ namespace Legion {
       // False case of template specialization
       template<typename T>
       struct StructHandler<T,false> {
-        static inline void end_task(Runtime *rt, Context ctx, T *result)
+        static inline void end_task(Context ctx, T *result)
         {
-          end_helper(rt, ctx, (void*)result, sizeof(T), false/*owned*/);
+          end_helper(ctx, (void*)result, sizeof(T), false/*owned*/);
         }
-        static inline Future from_value(Runtime *rt, const T *value)
+        static inline Future from_value(const T *value)
         {
-          return from_value_helper(rt, (const void*)value, 
+          return from_value_helper((const void*)value, 
                                    sizeof(T), false/*owned*/);
         }
         static inline T unpack(const Future &f, bool silence_warnings,
@@ -246,15 +242,15 @@ namespace Legion {
       // Figure out whether this is a struct or not 
       // and call the appropriate Finisher
       template<typename T>
-      static inline void end_task(Runtime *rt, Context ctx, T *result)
+      static inline void end_task(Context ctx, T *result)
       {
-        StructHandler<T,std::is_class<T>::value>::end_task(rt, ctx, result);
+        StructHandler<T,std::is_class<T>::value>::end_task(ctx, result);
       }
 
       template<typename T>
-      static inline Future from_value(Runtime *rt, const T *value)
+      static inline Future from_value(const T *value)
       {
-        return StructHandler<T,std::is_class<T>::value>::from_value(rt, value);
+        return StructHandler<T,std::is_class<T>::value>::from_value(value);
       }
 
       template<typename T>
@@ -2334,7 +2330,22 @@ namespace Legion {
           bool found = false;
           for (int j = 0; j < N; j++) {
             if ((used_mask >> j) & 1) continue;
-            if (strides[j] != exp_offset) continue;
+            if (strides[j] != exp_offset) 
+            {
+              // Mask off any dimensions with stride 0
+              if (strides[j] == 0)
+              {
+                if (bounds.lo[j] != bounds.hi[j])
+                  return false;
+                used_mask |= (1 << j);
+                if (++i == N) 
+                {
+                  found = true;
+                  break;
+                }
+              }
+              continue;
+            }
             found = true;
             // It's possible other dimensions can have the same strides if
             // there are multiple dimensions with extents of size 1. At most
@@ -2377,7 +2388,22 @@ namespace Legion {
           bool found = false;
           for (int j = 0; j < N; j++) {
             if ((used_mask >> j) & 1) continue;
-            if (strides[j] != exp_offset) continue;
+            if (strides[j] != exp_offset) 
+            {
+              // Mask off any dimensions with stride 0
+              if (strides[j] == 0) 
+              {
+                if (bounds.lo[j] != bounds.hi[j])
+                  return false;
+                used_mask |= (1 << j);
+                if (++i == N) 
+                {
+                  found = true;
+                  break;
+                }
+              }
+              continue;
+            }
             found = true;
             // It's possible other dimensions can have the same strides if
             // there are multiple dimensions with extents of size 1. At most
@@ -6176,13 +6202,13 @@ namespace Legion {
 #undef DEFERRED_VALUE_BUFFER_CONSTRUCTORS
 #undef DEFERRED_VALUE_BUFFER_CONSTRUCTORS_WITH_BOUNDS
 
-#define DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(DIM)                     \
+#define DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(DIM, FIELD_CHECK)        \
       ReductionAccessor(const UntypedDeferredValue &value,                    \
                         bool silence_warnings = false,                        \
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         assert(!check_field_size || (actual_field_size == value.field_size)); \
         const Realm::RegionInstance instance = value.instance;                \
@@ -6216,7 +6242,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         assert(!check_field_size || (actual_field_size == value.field_size)); \
         const Realm::RegionInstance instance = value.instance;                \
@@ -6241,7 +6267,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
@@ -6263,7 +6289,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
@@ -6286,7 +6312,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
@@ -6309,7 +6335,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
@@ -6327,13 +6353,13 @@ namespace Legion {
               source_bounds, offset);                                         \
       }
 
-#define DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(DIM)         \
+#define DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(DIM,FIELD_CHECK) \
       ReductionAccessor(const UntypedDeferredValue &value,                    \
                         bool silence_warnings = false,                        \
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         assert(!check_field_size || (actual_field_size == value.field_size)); \
         const Realm::RegionInstance instance = value.instance;                \
@@ -6373,7 +6399,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         assert(!check_field_size || (actual_field_size == value.field_size)); \
         const Realm::RegionInstance instance = value.instance;                \
@@ -6404,7 +6430,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
@@ -6427,7 +6453,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<DIM,T> is = instance.get_indexspace<DIM,T>();           \
@@ -6451,7 +6477,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
@@ -6475,7 +6501,7 @@ namespace Legion {
                         const char *warning_string = NULL,                    \
                         size_t offset = 0,                                    \
                         size_t actual_field_size=sizeof(typename REDOP::RHS), \
-                        bool check_field_size = false)                        \
+                        bool check_field_size = FIELD_CHECK)                  \
       {                                                                       \
         const Realm::RegionInstance instance = buffer.instance;               \
         const DomainT<M,T> is = instance.get_indexspace<M,T>();               \
@@ -6509,7 +6535,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<N,T> is;
         const Realm::RegionInstance instance = 
@@ -6531,7 +6562,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<N,T> is;
         const Realm::RegionInstance instance = 
@@ -6554,7 +6590,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<M,T> is;
         const Realm::RegionInstance instance = 
@@ -6578,7 +6619,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<M,T> is;
         const Realm::RegionInstance instance = 
@@ -6593,7 +6639,11 @@ namespace Legion {
             transform.transform, transform.offset, fid, source_bounds, offset);
       }
     public:
-      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(N)
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(N, false)
+#endif
     public:
       __CUDA_HD__
       inline void reduce(const Point<N,T>& p, 
@@ -6679,7 +6729,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<N,T> is;
@@ -6703,7 +6758,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<N,T> is;
@@ -6728,7 +6788,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<M,T> is;
@@ -6754,7 +6819,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<M,T> is;
@@ -6771,7 +6841,11 @@ namespace Legion {
         bounds = AffineBounds::Tester<N,T>(is, source_bounds, transform);
       }
     public:
-      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(N)
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(N, true)
+#else
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(N, false)
+#endif
     public:
       __CUDA_HD__ 
       inline void reduce(const Point<N,T>& p, 
@@ -6885,7 +6959,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<1,T> is;
         const Realm::RegionInstance instance = 
@@ -6907,7 +6986,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<1,T> is;
         const Realm::RegionInstance instance = 
@@ -6930,7 +7014,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<M,T> is;
         const Realm::RegionInstance instance = 
@@ -6954,7 +7043,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
       {
         DomainT<M,T> is;
         const Realm::RegionInstance instance = 
@@ -6969,7 +7063,11 @@ namespace Legion {
             transform.transform, transform.offset, fid, source_bounds, offset);
       }
     public:
-      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(1)
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS(1, false)
+#endif
     public:
       __CUDA_HD__
       inline void reduce(const Point<1,T>& p, 
@@ -7044,7 +7142,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<1,T> is;
@@ -7068,7 +7171,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<1,T> is;
@@ -7093,7 +7201,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<M,T> is;
@@ -7119,7 +7232,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false)
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       )
         : field(fid)
       {
         DomainT<M,T> is;
@@ -7136,7 +7254,11 @@ namespace Legion {
         bounds = AffineBounds::Tester<1,T>(is, source_bounds, transform);
       }
     public:
-      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(1)
+#ifdef DEBUG_LEGION
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(1, true)
+#else
+      DEFERRED_VALUE_BUFFER_REDUCTION_CONSTRUCTORS_WITH_BOUNDS(1, false)
+#endif
     public:
       __CUDA_HD__
       inline void reduce(const Point<1,T>& p, 
@@ -16712,12 +16834,11 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     template<typename T>
-    inline void DeferredValue<T>::finalize(Runtime *runtime, Context ctx) const
+    inline void DeferredValue<T>::finalize(Context ctx) const
     //--------------------------------------------------------------------------
     {
-      Runtime::legion_task_postamble(runtime, ctx,
-                    accessor.ptr(Point<1,coord_t>(0)), sizeof(T),
-                    true/*owner*/, instance, instance.get_location().kind());
+      Runtime::legion_task_postamble(ctx, accessor.ptr(Point<1,coord_t>(0)),
+                                     sizeof(T), true/*owner*/, instance);
     }
 
     //--------------------------------------------------------------------------
@@ -16811,10 +16932,13 @@ namespace Legion {
       return result;
     }
 
-#ifdef LEGION_BOUNDS_CHECKS
     // DeferredBuffer without bounds checks
     template<typename FT, int N, typename T> 
+#ifdef LEGION_BOUNDS_CHECKS
     class DeferredBuffer<FT,N,T,false> {
+#else
+    class DeferredBuffer<FT,N,T,true> {
+#endif
     public:
       inline DeferredBuffer(void);
       // Memory kinds
@@ -16823,17 +16947,7 @@ namespace Legion {
                             const FT *initial_value = NULL,
                             size_t alignment = 16,
                             bool fortran_order_dims = false);
-      inline DeferredBuffer(Memory::Kind kind, 
-                            IndexSpace bounds,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
       inline DeferredBuffer(const Rect<N,T> &bounds, 
-                            Memory::Kind kind,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      inline DeferredBuffer(IndexSpaceT<N,T> bounds, 
                             Memory::Kind kind,
                             const FT *initial_value = NULL,
                             size_t alignment = 16,
@@ -16844,21 +16958,38 @@ namespace Legion {
                             const FT *initial_value = NULL,
                             size_t alignment = 16,
                             bool fortran_order_dims = false);
-      inline DeferredBuffer(Memory memory, 
-                            IndexSpace bounds,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
       inline DeferredBuffer(const Rect<N,T> &bounds, 
                             Memory memory,
                             const FT *initial_value = NULL,
                             size_t alignment = 16,
                             bool fortran_order_dims = false);
-      inline DeferredBuffer(IndexSpaceT<N,T> bounds, 
-                            Memory memory,
+    public: // Explicit ordering
+      inline DeferredBuffer(Memory::Kind kind,
+                            const Domain &bounds,
+                            std::array<DimensionKind,N> ordering,
                             const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
+                            size_t alignment = 16);
+      inline DeferredBuffer(const Rect<N,T> &bounds,
+                            Memory::Kind kind,
+                            std::array<DimensionKind,N> ordering,
+                            const FT *initial_value = NULL,
+                            size_t alignment = 16);
+      inline DeferredBuffer(Memory memory,
+                            const Domain &bounds,
+                            std::array<DimensionKind,N> ordering,
+                            const FT *initial_value = NULL,
+                            size_t alignment = 16);
+      inline DeferredBuffer(const Rect<N,T> &bounds,
+                            Memory memory,
+                            std::array<DimensionKind,N> ordering,
+                            const FT *initial_value = NULL,
+                            size_t alignment = 16);
+    protected:
+      Memory get_memory_from_kind(Memory::Kind kind);
+      void initialize_layout(size_t alignment, bool fortran_order_dims);
+      void initialize(Memory memory,
+                      DomainT<N,T> bounds,
+                      const FT *initial_value);
     public:
       __CUDA_HD__
       inline FT read(const Point<N,T> &p) const;
@@ -16879,78 +17010,12 @@ namespace Legion {
       friend class OutputRegion;
       Realm::RegionInstance instance;
       Realm::AffineAccessor<FT,N,T> accessor;
-    };
-#else
-    // DeferredBuffer with bounds checks
-    template<typename FT, int N, typename T> 
-    class DeferredBuffer<FT,N,T,true> {
-    public:
-      inline DeferredBuffer(void);
-      // Memory kind
-      inline DeferredBuffer(Memory::Kind kind, 
-                            const Domain &bounds,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      inline DeferredBuffer(Memory::Kind kind, 
-                            IndexSpace bounds,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      inline DeferredBuffer(const Rect<N,T> &bounds, 
-                            Memory::Kind kind,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      inline DeferredBuffer(IndexSpaceT<N,T> bounds, 
-                            Memory::Kind kind,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      // Explicit memory
-      inline DeferredBuffer(Memory memory, 
-                            const Domain &bounds,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      inline DeferredBuffer(Memory memory, 
-                            IndexSpace bounds,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      inline DeferredBuffer(const Rect<N,T> &bounds, 
-                            Memory memory,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-      inline DeferredBuffer(IndexSpaceT<N,T> bounds, 
-                            Memory memory,
-                            const FT *initial_value = NULL,
-                            size_t alignment = 16,
-                            bool fortran_order_dims = false);
-    public:
-      __CUDA_HD__
-      inline FT read(const Point<N,T> &p) const;
-      __CUDA_HD__
-      inline void write(const Point<N,T> &p, FT value) const;
-      __CUDA_HD__
-      inline FT* ptr(const Point<N,T> &p) const;
-      __CUDA_HD__
-      inline FT* ptr(const Rect<N,T> &r) const; // must be dense
-      __CUDA_HD__
-      inline FT* ptr(const Rect<N,T> &r, size_t strides[N]) const;
-      __CUDA_HD__
-      inline FT& operator[](const Point<N,T> &p) const;
-    public:
-      void destroy();
-      Realm::RegionInstance get_instance() const;
-    protected:
-      friend class OutputRegion;
-      Realm::RegionInstance instance;
-      Realm::AffineAccessor<FT,N,T> accessor;
+      std::array<DimensionKind,N> ordering;
+      size_t alignment;
+#ifndef LEGION_BOUNDS_CHECKS
       DomainT<N,T> bounds;
-    };
 #endif
+    };
 
     //--------------------------------------------------------------------------
     template<typename FT, int N, typename T
@@ -16988,142 +17053,15 @@ namespace Legion {
                              bool fortran_order_dims/* = false*/)
     //--------------------------------------------------------------------------
     {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
+      if (!space.dense())
       {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
         assert(false);
       }
-      const Memory memory = finder.first();
-      const DomainT<N,T> bounds = space;
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, space, initial_value);
     }
-
-    //--------------------------------------------------------------------------
-    template<typename FT, int N, typename T
-#ifndef LEGION_BOUNDS_CHECKS
-              , bool CB
-#endif
-              >
-    inline DeferredBuffer<FT,N,T,
-#ifdef LEGION_BOUNDS_CHECKS
-           false
-#else
-            CB
-#endif
-           >::DeferredBuffer(Memory::Kind kind, const IndexSpace space,
-                             const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             bool fortran_order_dims/* = false*/)
-    //--------------------------------------------------------------------------
-    {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
-      {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
-        assert(false);
-      }
-      const Memory memory = finder.first();
-      Runtime *runtime = Runtime::get_runtime();
-      const DomainT<N,T> bounds = 
-        runtime->get_index_space_domain<N,T>(IndexSpaceT<N,T>(space));
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
-    } 
 
     //--------------------------------------------------------------------------
     template<typename FT, int N, typename T
@@ -17143,140 +17081,9 @@ namespace Legion {
                              bool fortran_order_dims /*= false*/)
     //--------------------------------------------------------------------------
     {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
-      {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
-        assert(false);
-      }
-      const Memory memory = finder.first();
-      const DomainT<N,T> bounds(rect);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
-    }
-
-    //--------------------------------------------------------------------------
-    template<typename FT, int N, typename T
-#ifndef LEGION_BOUNDS_CHECKS
-              , bool CB
-#endif
-              >
-    inline DeferredBuffer<FT,N,T,
-#ifdef LEGION_BOUNDS_CHECKS
-           false
-#else
-            CB
-#endif
-           >::DeferredBuffer(const IndexSpaceT<N,T> space, Memory::Kind kind,
-                             const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             bool fortran_order_dims/* = false*/)
-    //--------------------------------------------------------------------------
-    {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
-      {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
-        assert(false);
-      }
-      const Realm::Memory memory = finder.first();
-      Runtime *runtime = Runtime::get_runtime();
-      const DomainT<N,T> bounds = runtime->get_index_space_domain<N,T>(space);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, rect, initial_value);
     }
 
     //--------------------------------------------------------------------------
@@ -17297,106 +17104,14 @@ namespace Legion {
                              bool fortran_order_dims/* = false*/)
     //--------------------------------------------------------------------------
     {
-      const DomainT<N,T> bounds = space;
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
+      if (!space.dense())
       {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
+        assert(false);
       }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, space, initial_value);
     }
-
-    //--------------------------------------------------------------------------
-    template<typename FT, int N, typename T
-#ifndef LEGION_BOUNDS_CHECKS
-              , bool CB
-#endif
-              >
-    inline DeferredBuffer<FT,N,T,
-#ifdef LEGION_BOUNDS_CHECKS
-           false
-#else
-            CB
-#endif
-           >::DeferredBuffer(Memory memory, const IndexSpace space,
-                             const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             bool fortran_order_dims/* = false*/)
-    //--------------------------------------------------------------------------
-    {
-      Runtime *runtime = Runtime::get_runtime();
-      const DomainT<N,T> bounds = 
-        runtime->get_index_space_domain<N,T>(IndexSpaceT<N,T>(space));
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
-    } 
 
     //--------------------------------------------------------------------------
     template<typename FT, int N, typename T
@@ -17416,45 +17131,8 @@ namespace Legion {
                              bool fortran_order_dims /*= false*/)
     //--------------------------------------------------------------------------
     {
-      const DomainT<N,T> bounds(rect);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, rect, initial_value);
     }
 
     //--------------------------------------------------------------------------
@@ -17469,35 +17147,194 @@ namespace Legion {
 #else
             CB
 #endif
-           >::DeferredBuffer(const IndexSpaceT<N,T> space, Memory memory,
+           >::DeferredBuffer(Memory::Kind kind, const Domain &space,
+                             std::array<DimensionKind,N> _ordering,
                              const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             bool fortran_order_dims/* = false*/)
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
     //--------------------------------------------------------------------------
     {
-      Runtime *runtime = Runtime::get_runtime();
-      const DomainT<N,T> bounds = runtime->get_index_space_domain<N,T>(space);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
+      if (!space.dense())
+      {
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
+        assert(false);
+      }
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize(memory, space, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifndef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    inline DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+           false
+#else
+            CB
+#endif
+           >::DeferredBuffer(const Rect<N,T> &rect, Memory::Kind kind,
+                             std::array<DimensionKind,N> _ordering,
+                             const FT *initial_value /*= NULL*/,
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
+    //--------------------------------------------------------------------------
+    {
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize(memory, rect, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifndef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    inline DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+           false
+#else
+            CB
+#endif
+           >::DeferredBuffer(Memory memory, const Domain &space,
+                             std::array<DimensionKind,N> _ordering,
+                             const FT *initial_value/* = NULL*/,
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
+    //--------------------------------------------------------------------------
+    {
+      if (!space.dense())
+      {
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
+        assert(false);
+      }
+      initialize(memory, space, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifndef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    inline DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+           false
+#else
+            CB
+#endif
+           >::DeferredBuffer(const Rect<N,T> &rect, Memory memory,
+                             std::array<DimensionKind,N> _ordering,
+                             const FT *initial_value /*= NULL*/,
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
+    //--------------------------------------------------------------------------
+    {
+      initialize(memory, rect, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifndef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    Memory DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+                          false
+#else
+                          CB
+#endif
+                          >::get_memory_from_kind(Memory::Kind kind)
+    //--------------------------------------------------------------------------
+    {
+      // Construct an instance of the right size in the corresponding memory
+      Machine machine = Realm::Machine::get_machine();
+      Machine::MemoryQuery finder(machine);
+      finder.best_affinity_to(Processor::get_executing_processor());
+      finder.only_kind(kind);
+      if (finder.count() == 0)
+      {
+        finder = Machine::MemoryQuery(machine);
+        finder.has_affinity_to(Processor::get_executing_processor());
+        finder.only_kind(kind);
+      }
+      if (finder.count() == 0)
+      {
+        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d",
+                kind);
+        assert(false);
+      }
+      return finder.first();
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifndef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    void DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+                        false
+#else
+                        CB
+#endif
+                        >::initialize_layout(size_t _alignment,
+                                             bool fortran_order_dims)
+    //--------------------------------------------------------------------------
+    {
       if (fortran_order_dims)
       {
         for (int i = 0; i < N; i++)
-          dim_order[i] = i;
+          ordering[i] =
+            static_cast<DimensionKind>(static_cast<int>(LEGION_DIM_X) + i);
       }
       else
       {
         for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
+          ordering[i] =
+            static_cast<DimensionKind>(
+                static_cast<int>(LEGION_DIM_X) + N - (i + 1));
       }
+
+      alignment = _alignment;
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifndef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    void DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+                        false
+#else
+                        CB
+#endif
+                        >::initialize(Memory memory,
+                                      DomainT<N,T> bounds,
+                                      const FT *initial_value)
+    //--------------------------------------------------------------------------
+    {
+      Runtime *runtime = Runtime::get_runtime();
+      const std::vector<size_t> field_sizes(1,sizeof(FT));
+      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
+      int dim_order[N];
+      for (int i = 0; i < N; ++i)
+        dim_order[i] =
+          static_cast<int>(ordering[i]) - static_cast<int>(LEGION_DIM_X);
       Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
+        Realm::InstanceLayoutGeneric::choose_instance_layout(
+          bounds, constraints, dim_order);
       layout->alignment_reqd = alignment;
       instance = runtime->create_task_local_instance(memory, layout);
       if (initial_value != NULL)
       {
-        Realm::ProfilingRequestSet no_requests; 
+        Realm::ProfilingRequestSet no_requests;
         std::vector<Realm::CopySrcDstField> dsts(1);
         dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
         const Internal::LgEvent wait_on(
@@ -17508,12 +17345,16 @@ namespace Legion {
 #ifdef DEBUG_LEGION
 #ifndef NDEBUG
       const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
+        Realm::AffineAccessor<FT,N,T>::is_compatible(instance,
+                                                     0/*fid*/,
+                                                     bounds.bounds);
 #endif
       assert(is_compatible);
 #endif
       // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      accessor = Realm::AffineAccessor<FT,N,T>(instance,
+                                               0/*field id*/,
+                                               bounds.bounds);
     }
 
     //--------------------------------------------------------------------------
@@ -17715,141 +17556,15 @@ namespace Legion {
                              const bool fortran_order_dims/* = false*/)
     //--------------------------------------------------------------------------
     {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
+      if (!space.dense())
       {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
         assert(false);
       }
-      const Memory memory = finder.first();
-      bounds = space;
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, space, initial_value);
     }
-
-    //--------------------------------------------------------------------------
-    template<typename FT, int N, typename T
-#ifdef LEGION_BOUNDS_CHECKS
-              , bool CB
-#endif
-              >
-    inline DeferredBuffer<FT,N,T,
-#ifdef LEGION_BOUNDS_CHECKS
-            CB
-#else
-            true
-#endif
-           >::DeferredBuffer(Memory::Kind kind, const IndexSpace space,
-                             const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             const bool fortran_order_dims/* = false*/)
-    //--------------------------------------------------------------------------
-    {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
-      {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
-        assert(false);
-      }
-      const Memory memory = finder.first();
-      Runtime *runtime = Runtime::get_runtime();
-      bounds = runtime->get_index_space_domain<N,T>(IndexSpaceT<N,T>(space));
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
-    } 
 
     //--------------------------------------------------------------------------
     template<typename FT, int N, typename T
@@ -17869,140 +17584,9 @@ namespace Legion {
                              const bool fortran_order_dims/* = false*/)
     //--------------------------------------------------------------------------
     {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
-      {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
-        assert(false);
-      }
-      const Memory memory = finder.first();
-      bounds = DomainT<N,T>(rect);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
-    }
-
-    //--------------------------------------------------------------------------
-    template<typename FT, int N, typename T
-#ifdef LEGION_BOUNDS_CHECKS
-              , bool CB
-#endif
-              >
-    inline DeferredBuffer<FT,N,T,
-#ifdef LEGION_BOUNDS_CHECKS
-            CB 
-#else
-            true
-#endif
-           >::DeferredBuffer(const IndexSpaceT<N,T> space, Memory::Kind kind,
-                             const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             const bool fortran_order_dims/* = false*/)
-    //--------------------------------------------------------------------------
-    {
-      // Construct an instance of the right size in the corresponding memory
-      Machine machine = Realm::Machine::get_machine();
-      Machine::MemoryQuery finder(machine);
-      finder.best_affinity_to(Processor::get_executing_processor());
-      finder.only_kind(kind);
-      if (finder.count() == 0)
-      {
-        finder = Machine::MemoryQuery(machine);
-        finder.has_affinity_to(Processor::get_executing_processor());
-        finder.only_kind(kind);
-      }
-      if (finder.count() == 0)
-      {
-        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d", 
-                kind);
-        assert(false);
-      }
-      const Memory memory = finder.first();
-      Runtime *runtime = Runtime::get_runtime();
-      bounds = runtime->get_index_space_domain<N,T>(space);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, rect, initial_value);
     }
 
     //--------------------------------------------------------------------------
@@ -18023,105 +17607,14 @@ namespace Legion {
                              const bool fortran_order_dims/* = false*/)
     //--------------------------------------------------------------------------
     {
-      bounds = space;
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
+      if (!space.dense())
       {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
+        assert(false);
       }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible = 
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, space, initial_value);
     }
-
-    //--------------------------------------------------------------------------
-    template<typename FT, int N, typename T
-#ifdef LEGION_BOUNDS_CHECKS
-              , bool CB
-#endif
-              >
-    inline DeferredBuffer<FT,N,T,
-#ifdef LEGION_BOUNDS_CHECKS
-            CB
-#else
-            true
-#endif
-           >::DeferredBuffer(Memory memory, const IndexSpace space,
-                             const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             const bool fortran_order_dims/* = false*/)
-    //--------------------------------------------------------------------------
-    {
-      Runtime *runtime = Runtime::get_runtime();
-      bounds = runtime->get_index_space_domain<N,T>(IndexSpaceT<N,T>(space));
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
-    } 
 
     //--------------------------------------------------------------------------
     template<typename FT, int N, typename T
@@ -18141,45 +17634,8 @@ namespace Legion {
                              const bool fortran_order_dims/* = false*/)
     //--------------------------------------------------------------------------
     {
-      bounds = DomainT<N,T>(rect);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
-      if (fortran_order_dims)
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = i;
-      }
-      else
-      {
-        for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
-      }
-      Realm::InstanceLayoutGeneric *layout = 
-        Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
-            constraints, dim_order);
-      layout->alignment_reqd = alignment;
-      Runtime *runtime = Runtime::get_runtime();
-      instance = runtime->create_task_local_instance(memory, layout);
-      if (initial_value != NULL)
-      {
-        Realm::ProfilingRequestSet no_requests; 
-        std::vector<Realm::CopySrcDstField> dsts(1);
-        dsts[0].set_field(instance, 0/*field id*/, sizeof(FT));
-        const Internal::LgEvent wait_on(
-            bounds.fill(dsts, no_requests, initial_value, sizeof(FT)));
-        if (wait_on.exists())
-          wait_on.wait();
-      }
-#ifdef DEBUG_LEGION
-#ifndef NDEBUG
-      const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
-#endif
-      assert(is_compatible);
-#endif
-      // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      initialize_layout(alignment, fortran_order_dims);
+      initialize(memory, rect, initial_value);
     }
 
     //--------------------------------------------------------------------------
@@ -18190,31 +17646,191 @@ namespace Legion {
               >
     inline DeferredBuffer<FT,N,T,
 #ifdef LEGION_BOUNDS_CHECKS
-            CB 
+            CB
 #else
             true
 #endif
-           >::DeferredBuffer(const IndexSpaceT<N,T> space, Memory memory,
+           >::DeferredBuffer(Memory::Kind kind, const Domain &space,
+                             std::array<DimensionKind,N> _ordering,
                              const FT *initial_value/* = NULL*/,
-                             size_t alignment/* = 16*/,
-                             const bool fortran_order_dims/* = false*/)
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
     //--------------------------------------------------------------------------
     {
-      Runtime *runtime = Runtime::get_runtime();
-      bounds = runtime->get_index_space_domain<N,T>(space);
-      const std::vector<size_t> field_sizes(1,sizeof(FT));
-      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
-      int dim_order[N];
+      if (!space.dense())
+      {
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
+        assert(false);
+      }
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize(memory, space, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifdef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    inline DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+            CB
+#else
+            true
+#endif
+           >::DeferredBuffer(const Rect<N,T> &rect, Memory::Kind kind,
+                             std::array<DimensionKind,N> _ordering,
+                             const FT *initial_value /*= NULL*/,
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
+    //--------------------------------------------------------------------------
+    {
+      const Realm::Memory memory = get_memory_from_kind(kind);
+      initialize(memory, rect, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifdef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    inline DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+            CB
+#else
+            true
+#endif
+           >::DeferredBuffer(Memory memory, const Domain &space,
+                             std::array<DimensionKind,N> _ordering,
+                             const FT *initial_value/* = NULL*/,
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
+    //--------------------------------------------------------------------------
+    {
+      if (!space.dense())
+      {
+        fprintf(stderr, "DeferredBuffer only allows a dense domain\n");
+        assert(false);
+      }
+      initialize(memory, space, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifdef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    inline DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+            CB
+#else
+            true
+#endif
+           >::DeferredBuffer(const Rect<N,T> &rect, Memory memory,
+                             std::array<DimensionKind,N> _ordering,
+                             const FT *initial_value /*= NULL*/,
+                             size_t _alignment/* = 16*/)
+      : ordering(_ordering), alignment(_alignment)
+    //--------------------------------------------------------------------------
+    {
+      initialize(memory, rect, initial_value);
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifdef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    Memory DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+                          CB
+#else
+                          true
+#endif
+                          >::get_memory_from_kind(Memory::Kind kind)
+    //--------------------------------------------------------------------------
+    {
+      // Construct an instance of the right size in the corresponding memory
+      Machine machine = Realm::Machine::get_machine();
+      Machine::MemoryQuery finder(machine);
+      finder.best_affinity_to(Processor::get_executing_processor());
+      finder.only_kind(kind);
+      if (finder.count() == 0)
+      {
+        finder = Machine::MemoryQuery(machine);
+        finder.has_affinity_to(Processor::get_executing_processor());
+        finder.only_kind(kind);
+      }
+      if (finder.count() == 0)
+      {
+        fprintf(stderr,"DeferredBuffer unable to find a memory of kind %d",
+                kind);
+        assert(false);
+      }
+      return finder.first();
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifdef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    void DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+                        CB
+#else
+                        true
+#endif
+                        >::initialize_layout(size_t _alignment,
+                                             bool fortran_order_dims)
+    //--------------------------------------------------------------------------
+    {
       if (fortran_order_dims)
       {
         for (int i = 0; i < N; i++)
-          dim_order[i] = i;
+          ordering[i] =
+            static_cast<DimensionKind>(static_cast<int>(LEGION_DIM_X) + i);
       }
       else
       {
         for (int i = 0; i < N; i++)
-          dim_order[i] = N - (i+1);
+          ordering[i] =
+            static_cast<DimensionKind>(
+                static_cast<int>(LEGION_DIM_X) + N - (i + 1));
       }
+
+      alignment = _alignment;
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename FT, int N, typename T
+#ifdef LEGION_BOUNDS_CHECKS
+              , bool CB
+#endif
+              >
+    void DeferredBuffer<FT,N,T,
+#ifdef LEGION_BOUNDS_CHECKS
+                        CB
+#else
+                        true
+#endif
+                        >::initialize(Memory memory,
+                                      DomainT<N,T> domain,
+                                      const FT *initial_value)
+    //--------------------------------------------------------------------------
+    {
+      bounds = domain;
+      Runtime *runtime = Runtime::get_runtime();
+      const std::vector<size_t> field_sizes(1,sizeof(FT));
+      Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*blocking*/);
+      int dim_order[N];
+      for (int i = 0; i < N; ++i)
+        dim_order[i] =
+          static_cast<int>(ordering[i]) - static_cast<int>(LEGION_DIM_X);
       Realm::InstanceLayoutGeneric *layout = 
         Realm::InstanceLayoutGeneric::choose_instance_layout(bounds, 
             constraints, dim_order);
@@ -18233,12 +17849,16 @@ namespace Legion {
 #ifdef DEBUG_LEGION
 #ifndef NDEBUG
       const bool is_compatible =
-        Realm::AffineAccessor<FT,N,T>::is_compatible(instance, 0/*fid*/);
+        Realm::AffineAccessor<FT,N,T>::is_compatible(instance,
+                                                     0/*fid*/,
+                                                     bounds.bounds);
 #endif
       assert(is_compatible);
 #endif
       // We can make the accessor
-      accessor = Realm::AffineAccessor<FT,N,T>(instance, 0/*field id*/);
+      accessor = Realm::AffineAccessor<FT,N,T>(instance,
+                                               0/*field id*/,
+                                               bounds.bounds);
     }
 
     //--------------------------------------------------------------------------
@@ -18448,7 +18068,7 @@ namespace Legion {
     template<typename T>
     UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
                                                     Memory::Kind memkind,
-                                                    const Domain &space,
+                                                    IndexSpace space,
                                                     const void *initial_value,
                                                     size_t alignment,
                                                     bool fortran_order_dims)
@@ -18556,7 +18176,7 @@ namespace Legion {
     template<typename T>
     UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
                                                     Memory::Kind memkind,
-                                                    IndexSpace space,
+                                                    const Domain &space,
                                                     const void *initial_value,
                                                     size_t alignment,
                                                     bool fortran_order_dims)
@@ -18660,7 +18280,7 @@ namespace Legion {
     template<typename T>
     UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
                                                     Memory memory,
-                                                    const Domain &space,
+                                                    IndexSpace space,
                                                     const void *initial_value,
                                                     size_t alignment,
                                                     bool fortran_order_dims)
@@ -18735,7 +18355,7 @@ namespace Legion {
     template<typename T>
     UntypedDeferredBuffer<T>::UntypedDeferredBuffer(size_t fs, int d,
                                                     Memory memory,
-                                                    IndexSpace space,
+                                                    const Domain &space,
                                                     const void *initial_value,
                                                     size_t alignment,
                                                     bool fortran_order_dims)
@@ -18851,13 +18471,69 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    template<typename T>
-    void OutputRegion::return_data(FieldID field_id,
-                                   DeferredBuffer<T,1> &buffer,
-                                   const size_t *num_elements /*= NULL*/)
+    template<typename T, int DIM, typename COORD_T, bool CHECK_BOUNDS>
+    DeferredBuffer<T,DIM,COORD_T,CHECK_BOUNDS> OutputRegion::create_buffer(
+                                              const Point<DIM,COORD_T> &extents,
+                                              FieldID field_id,
+                                              const T *initial_value /*= NULL*/,
+                                              bool return_buffer /*= false*/)
     //--------------------------------------------------------------------------
     {
-      return_data(field_id, buffer.instance, sizeof(T), num_elements);
+#ifdef DEBUG_LEGION
+      check_type_tag(
+        Internal::NT_TemplateHelper::encode_tag<DIM, COORD_T>());
+#endif
+
+      Rect<DIM> bounds(Point<DIM>::ZEROES(), extents - Point<DIM>::ONES());
+
+      std::vector<DimensionKind> ordering;
+      size_t alignment;
+      get_layout(field_id, ordering, alignment);
+      std::array<DimensionKind, DIM> ord;
+#ifdef DEBUG_LEGION
+      assert(ordering.size() == DIM);
+#endif
+      std::copy(ordering.begin(), ordering.end(), ord.begin());
+
+      DeferredBuffer<T,DIM,COORD_T,CHECK_BOUNDS> buffer(
+        bounds, target_memory(), ord, initial_value, alignment);
+      if (return_buffer)
+      {
+#ifdef DEBUG_LEGION
+        return_data(extents, field_id, buffer);
+#else
+        // In release mode, we don't check the constraints, as we already know
+        // that the instance satisfies them.
+        return_data(extents, field_id, buffer.instance, NULL, false);
+#endif
+      }
+      return buffer;
+    }
+
+    //--------------------------------------------------------------------------
+    template<typename T, int DIM, typename COORD_T, bool CHECK_BOUNDS>
+    void OutputRegion::return_data(
+                             const Point<DIM,COORD_T> &extents,
+                             FieldID field_id,
+                             DeferredBuffer<T,DIM,COORD_T,CHECK_BOUNDS> &buffer)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      check_type_tag(
+        Internal::NT_TemplateHelper::encode_tag<DIM, COORD_T>());
+      check_field_size(field_id, sizeof(T));
+#endif
+      // Populate the layout constraints for the returned buffer
+      // for the constraint checks.
+      LayoutConstraintSet constraints;
+      std::vector<DimensionKind> ordering(DIM + 1);
+      for (int32_t i = 0; i < DIM; ++i) ordering[i] = buffer.ordering[i];
+      ordering[DIM] = LEGION_DIM_F;
+      constraints.ordering_constraint = OrderingConstraint(ordering, false);
+      constraints.alignment_constraints.push_back(
+        AlignmentConstraint(field_id, LEGION_EQ_EK, buffer.alignment));
+
+      return_data(extents, field_id, buffer.instance, &constraints, true);
     }
 
     //--------------------------------------------------------------------------
@@ -19423,6 +19099,14 @@ namespace Legion {
     {
       region_requirements.push_back(req);
       return region_requirements.back();
+    }
+
+    //--------------------------------------------------------------------------
+    template <int DIM, typename COORD_T>
+    void OutputRequirement::set_type_tag()
+    //--------------------------------------------------------------------------
+    {
+      type_tag = Internal::NT_TemplateHelper::encode_tag<DIM,COORD_T>();
     }
 
     //--------------------------------------------------------------------------
@@ -20691,17 +20375,15 @@ namespace Legion {
     /*static*/ inline Future Future::from_value(Runtime *rt, const T &value)
     //--------------------------------------------------------------------------
     {
-      return LegionSerialization::from_value(rt, &value);
-    }
+      return LegionSerialization::from_value(&value);
+    } 
 
     //--------------------------------------------------------------------------
-    /*static*/ inline Future Future::from_untyped_pointer(Runtime *rt,
-                           const void *buffer, size_t bytes, bool owned,
-                           Memory::Kind memkind, void (*freefunc)(void*,size_t))
+    template<typename T>
+    /*static*/ inline Future Future::from_value(const T &value)
     //--------------------------------------------------------------------------
     {
-      return LegionSerialization::from_value_helper(rt, buffer, bytes, owned,
-                                                    memkind, freefunc);
+      return LegionSerialization::from_value(&value);
     }
 
     //--------------------------------------------------------------------------
@@ -22163,408 +21845,13 @@ namespace Legion {
     }
 
 #ifdef LEGION_GPU_REDUCTIONS
-#if defined (__CUDACC__) || defined (__HIPCC__)
-#define LEGION_THREADS_PER_BLOCK 256
-#define LEGION_MIN_BLOCKS_PER_SM 4
-    namespace Internal {
-
-      template<int N>
-      struct DimOrder {
-        int index[N];
-      };
-
-      template<typename REDOP, int N, typename T, bool EXCLUSIVE>
-      __global__ void
-      __launch_bounds__(LEGION_THREADS_PER_BLOCK,LEGION_MIN_BLOCKS_PER_SM)
-      fold_kernel(const Realm::AffineAccessor<typename REDOP::RHS,N,T> dst,
-                  const Realm::AffineAccessor<typename REDOP::RHS,N,T> src,
-                  const Realm::AffineAccessor<Rect<N,T>,1,coord_t> piece_rects,
-                  const Realm::AffineAccessor<size_t,1,coord_t> scan_volumes,
-                  const DimOrder<N> order,
-                  const size_t max_offset, const size_t max_rects)
-      {
-        size_t offset = blockIdx.x * blockDim.x + threadIdx.x;
-        if (offset >= max_offset)
-          return;
-        // Perform a binary search for the rectangle that we are in
-        coord_t first = 0;
-        coord_t last = max_rects - 1;
-        coord_t mid = 0;
-        while (first <= last) {
-          mid = (first + last) / 2;
-          if (scan_volumes[mid+1] <= offset)
-            first = mid + 1;
-          else if (offset < scan_volumes[mid])
-            last = mid - 1;
-          else
-            break;
-        }
-        const Rect<N,T> rect = piece_rects[mid];
-        Point<N,T> point = rect.lo;
-        size_t pitch = 1;
-        for (int i = 0; i < N; i++)
-        {
-          const int index = order.index[i];
-          point[index] += (offset / pitch);
-          offset = offset % pitch;
-          pitch *= ((rect.hi[index] - rect.lo[index]) + 1);
-        }
-        REDOP::template fold<EXCLUSIVE>(dst[point], src[point]);
-      }
-
-      template<typename REDOP, int N, typename T, bool EXCLUSIVE>
-      __global__ void
-      __launch_bounds__(LEGION_THREADS_PER_BLOCK,LEGION_MIN_BLOCKS_PER_SM)
-      apply_kernel(const Realm::AffineAccessor<typename REDOP::LHS,N,T> dst,
-                   const Realm::AffineAccessor<typename REDOP::RHS,N,T> src,
-                   const Realm::AffineAccessor<Rect<N,T>,1,coord_t> piece_rects,
-                   const Realm::AffineAccessor<size_t,1,coord_t> scan_volumes,
-                   const DimOrder<N> order,
-                   const size_t max_offset, const size_t max_rects)
-      {
-        size_t offset = blockIdx.x * blockDim.x + threadIdx.x;
-        if (offset >= max_offset)
-          return;
-        // Perform a binary search for the rectangle that we are in
-        int first = 0;
-        int last = max_rects - 1;
-        int mid = 0;
-        while (first <= last) {
-          mid = (first + last) / 2;
-          if (scan_volumes[mid+1] <= offset)
-            first = mid + 1;
-          else if (offset < scan_volumes[mid])
-            last = mid - 1;
-          else
-            break;
-        }
-        const Rect<N,T> rect = piece_rects[mid];
-        Point<N,T> point = rect.lo;
-        size_t pitch = 1;
-        for (int i = 0; i < N; i++)
-        {
-          const int index = order.index[i];
-          point[index] += (offset / pitch);
-          offset = offset % pitch;
-          pitch *= ((rect.hi[index] - rect.lo[index]) + 1);
-        }
-        REDOP::template apply<EXCLUSIVE>(dst[point], src[point]);
-      } 
-
-      template<typename REDOP>
-      struct ReductionRunner {
-      public:
-        __host__
-        ReductionRunner(const void *b, size_t s) 
-          : buffer(((const char*)b)), index(0), size(s) { }
-        __host__
-        ~ReductionRunner(void)
-        {
-          assert(index == size);
-        }
-      public: 
-        template<typename T> __host__
-        inline void deserialize(T &element)
-        {
-          assert((index + sizeof(T)) <= size);
-          element = *((const T*)(buffer+index));
-          index += sizeof(T);
-        }
-        __host__
-        inline void deserialize_bool(bool &element)
-        {
-          // bools are stored with 4 bytes in the serializer
-          assert((index + 4) <= size);
-          element = *((const bool*)(buffer+index));
-          index += 4;
-        }
-        template<typename FT>
-        inline Realm::AffineAccessor<FT,1,coord_t> create_temporary_buffer(
-                              Memory memory, const Rect<1,coord_t> &bounds)
-        {
-          Realm::IndexSpace<1,coord_t> space(bounds);
-          const std::vector<size_t> field_sizes(1,sizeof(FT));
-          Realm::InstanceLayoutConstraints constraints(field_sizes, 0/*fid*/);
-          const int dim_order[1] = { 0 };
-          Realm::InstanceLayoutGeneric *layout = 
-            Realm::InstanceLayoutGeneric::choose_instance_layout(space,
-                constraints, dim_order);
-          Realm::RegionInstance instance;
-          Realm::ProfilingRequestSet no_requests;
-          const LgEvent wait_on(Realm::RegionInstance::create_instance(
-                instance, memory, layout, no_requests));
-          assert(instance.exists());
-          if (wait_on.exists() && !wait_on.has_triggered())
-            wait_on.wait();
-          // Can destroy this instance as soon as the task is done
-          instance.destroy(Processor::get_current_finish_event());
-          return Realm::AffineAccessor<FT,1,coord_t>(instance, 0/*fid*/);
-        }
-        template<int N, typename T> __host__
-        inline void run(void)
-        {
-          Realm::IndexSpace<N,T> space;
-          deserialize(space);
-          Realm::Event ready = space.make_valid();
-          bool fold, exclusive;;
-          deserialize_bool(fold);
-          deserialize_bool(exclusive);
-          size_t num_fields;
-          deserialize(num_fields);
-          std::vector<FieldID> src_fields(num_fields);
-          std::vector<FieldID> dst_fields(num_fields);;
-          std::vector<Realm::RegionInstance> src_insts(num_fields);
-          std::vector<Realm::RegionInstance> dst_insts(num_fields);
-          for (unsigned idx = 0; idx < num_fields; idx++)
-          {
-            deserialize(dst_insts[idx]);
-            deserialize(src_insts[idx]);
-            deserialize(dst_fields[idx]);
-            deserialize(src_fields[idx]);
-          }
-          size_t num_pieces;
-          deserialize(num_pieces);
-          if (ready.exists() && !ready.has_triggered())
-            ready.wait();
-          // Iterate over all the pieces
-          for (unsigned pidx = 0; pidx < num_pieces; pidx++)
-          {
-            Rect<N,T> piece_rect;
-            deserialize(piece_rect);
-            std::vector<Rect<N,T> > piece_rects;
-            std::vector<size_t> scan_volumes;
-            size_t sum_volume = 0;
-            for (Realm::IndexSpaceIterator<N,T> itr(space);itr.valid;itr.step())
-            {
-              const Rect<N,T> intersection = piece_rect.intersection(itr.rect);
-              if (intersection.empty())
-                continue;
-              piece_rects.push_back(intersection);
-              scan_volumes.push_back(sum_volume);
-              sum_volume += intersection.volume();
-            }
-            if (piece_rects.empty())
-              continue;
-            scan_volumes.push_back(sum_volume);
-            assert(scan_volumes.size() == (piece_rects.size() + 1));
-            const Rect<1,coord_t> bounds(0, piece_rects.size()-1);
-            const Rect<1,coord_t> scan_bounds(0, piece_rects.size());
-            Machine machine = Realm::Machine::get_machine();
-            Machine::MemoryQuery finder(machine);
-            finder.best_affinity_to(Processor::get_executing_processor());
-            finder.only_kind(Memory::GPU_FB_MEM);
-            assert(finder.count() > 0);
-            const Memory memory = finder.first();
-            Realm::AffineAccessor<Rect<N,T>,1,coord_t> device_piece_rects =
-              create_temporary_buffer<Rect<N,T> >(memory, bounds);
-            Realm::AffineAccessor<size_t,1,coord_t> device_scan_volumes =
-              create_temporary_buffer<size_t>(memory, scan_bounds);
-#ifdef LEGION_USE_CUDA            
-            cudaMemcpyAsync(device_piece_rects.ptr(bounds.lo),
-                &piece_rects.front(), piece_rects.size() * sizeof(Rect<N,T>),
-                cudaMemcpyHostToDevice);
-            cudaMemcpyAsync(device_scan_volumes.ptr(scan_bounds.lo), 
-                &scan_volumes.front(), scan_volumes.size() * sizeof(size_t), 
-                cudaMemcpyHostToDevice);
-#endif
-#ifdef LEGION_USE_HIP
-#ifdef __HIP_PLATFORM_HCC__
-            hipMemcpyAsync(device_piece_rects.ptr(bounds.lo),
-                &piece_rects.front(), piece_rects.size() * sizeof(Rect<N,T>),
-                hipMemcpyHostToDevice, hipGetTaskStream());
-            hipMemcpyAsync(device_scan_volumes.ptr(scan_bounds.lo),
-                &scan_volumes.front(), scan_volumes.size() * sizeof(size_t),
-                hipMemcpyHostToDevice, hipGetTaskStream());
-#else
-            cudaMemcpyAsync(device_piece_rects.ptr(bounds.lo),
-                &piece_rects.front(), piece_rects.size() * sizeof(Rect<N,T>),
-                cudaMemcpyHostToDevice, hipGetTaskStream());
-            cudaMemcpyAsync(device_scan_volumes.ptr(scan_bounds.lo),
-                &scan_volumes.front(), scan_volumes.size() * sizeof(size_t),
-                cudaMemcpyHostToDevice, hipGetTaskStream());
-#endif
-#endif
-            const size_t blocks = (sum_volume + LEGION_THREADS_PER_BLOCK - 1) / 
-              LEGION_THREADS_PER_BLOCK;
-            // Iterate over all the fields we should handle
-            for (unsigned fidx = 0; fidx < num_fields; fidx++)
-            {
-              // Make accessors for the source and destination for this piece
-              const Realm::AffineAccessor<typename REDOP::RHS,N,T>
-                src_accessor(src_insts[fidx], src_fields[fidx], piece_rect);
-              // Compute the order of dimensions to walk based on sorting the 
-              // strides for the source accessor, we'll optimistically assume 
-              // the two instances are laid out the same way, if we're wrong
-              // it will still be correct, just slow
-              std::map<size_t,int> strides;
-              for (int i = 0; i < N; i++)
-              {
-                std::pair<std::map<size_t,int>::iterator,bool> result = 
-                  strides.insert(std::pair<size_t,int>(
-                        src_accessor.strides[i],i));
-                // Strides should be unique across dimensions unless extent is 1
-                assert(result.second || (piece_rect.hi[i] == piece_rect.lo[i]));
-              }
-              // Put the dimensions in order from largest to smallest
-              DimOrder<N> order;
-              std::map<size_t,int>::const_reverse_iterator rit = 
-                strides.rbegin();
-              for (int i = 0; i < N; i++, rit++)
-                order.index[i] = rit->second;
-              // See if we are folding or applying
-              if (fold)
-              {
-                const Realm::AffineAccessor<typename REDOP::RHS,N,T> 
-                  dst_accessor(dst_insts[fidx], dst_fields[fidx], piece_rect);
-                // Now launch the kernel
-                if (exclusive) {
-#ifdef LEGION_USE_CUDA
-                  fold_kernel<REDOP,N,T,true>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#ifdef LEGION_USE_HIP
-#ifdef __HIP_PLATFORM_HCC__
-                  hipLaunchKernelGGL(
-                    HIP_KERNEL_NAME(fold_kernel<REDOP,N,T,true>), 
-                    dim3(blocks), dim3(LEGION_THREADS_PER_BLOCK), 
-                    0, hipGetTaskStream(),
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#else
-                  fold_kernel<REDOP,N,T,true>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK, 0, hipGetTaskStream()>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#endif
-                } else {
-#ifdef LEGION_USE_CUDA
-                  fold_kernel<REDOP,N,T,false>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#ifdef LEGION_USE_HIP
-#ifdef __HIP_PLATFORM_HCC__
-                  hipLaunchKernelGGL(
-                    HIP_KERNEL_NAME(fold_kernel<REDOP,N,T,false>), 
-                    dim3(blocks), dim3(LEGION_THREADS_PER_BLOCK), 
-                    0, hipGetTaskStream(),
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#else
-                  fold_kernel<REDOP,N,T,false>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK, 0, hipGetTaskStream()>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#endif
-                } 
-              }
-              else
-              {
-                const Realm::AffineAccessor<typename REDOP::LHS,N,T> 
-                  dst_accessor(dst_insts[fidx], dst_fields[fidx], piece_rect);
-                // Now launch the kernel
-                if (exclusive) {
-#ifdef LEGION_USE_CUDA
-                  apply_kernel<REDOP,N,T,true>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#ifdef LEGION_USE_HIP
-#ifdef __HIP_PLATFORM_HCC__
-                  hipLaunchKernelGGL(
-                    HIP_KERNEL_NAME(apply_kernel<REDOP,N,T,true>), 
-                    dim3(blocks), dim3(LEGION_THREADS_PER_BLOCK), 
-                    0, hipGetTaskStream(),
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#else
-                  apply_kernel<REDOP,N,T,true>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK, 0, hipGetTaskStream()>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#endif 
-                } else {
-#ifdef LEGION_USE_CUDA
-                  apply_kernel<REDOP,N,T,false>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#ifdef LEGION_USE_HIP
-#ifdef __HIP_PLATFORM_HCC__
-                  hipLaunchKernelGGL(
-                    HIP_KERNEL_NAME(apply_kernel<REDOP,N,T,false>), 
-                    dim3(blocks), dim3(LEGION_THREADS_PER_BLOCK), 0, 
-                    hipGetTaskStream(),
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#else
-                  apply_kernel<REDOP,N,T,false>
-                    <<<blocks,LEGION_THREADS_PER_BLOCK, 0, hipGetTaskStream()>>>(
-                    dst_accessor, src_accessor, device_piece_rects,
-                    device_scan_volumes, order, sum_volume, piece_rects.size());
-#endif
-#endif 
-                }
-              }
-            }
-          }
-#ifdef LEGION_USE_HIP
-#ifdef __HIP_PLATFORM_HCC__
-          hipStreamSynchronize(hipGetTaskStream());
-#else
-          cudaStreamSynchronize(hipGetTaskStream());
-#endif
-#endif
-        }
-
-        template<typename N, typename T>
-        __host__
-        static inline void demux(ReductionRunner<REDOP> *runner)
-        {
-          runner->run<N::N,T>();
-        }
-      public:
-        const char *buffer;
-        size_t index;
-        size_t size;
-      };
-
-      // This is a Realm task function signature that we use for launching
-      // off kernels that perform reductions between a reduction instance
-      // and a normal instance on a GPU since Realm does not support this yet.
-      template<typename REDOP>
-      __host__ 
-      void gpu_reduction_helper(const void *args, size_t arglen,
-          const void *user_data,size_t user_data_size, Processor proc)
-      {
-        implicit_context = NULL;
-        ReductionRunner<REDOP> runner(args, arglen);
-        TypeTag type_tag;
-        runner.deserialize(type_tag);
-        NT_TemplateHelper::demux<ReductionRunner<REDOP> >(type_tag, &runner);
-      }
-
-    }; // namespace Internal
-
     //--------------------------------------------------------------------------
     template<typename REDOP>
     /*static*/ void Runtime::preregister_gpu_reduction_op(ReductionOpID redop)
     //--------------------------------------------------------------------------
     {
-      CodeDescriptor desc(Internal::gpu_reduction_helper<REDOP>);
-      preregister_gpu_reduction_op(redop, desc);
+      Runtime::register_reduction_op<REDOP>(redop, false/*permit duplicates*/);
     }
-#undef LEGION_THREADS_PER_BLOCK
-#undef LEGION_MIN_BLOCKS_PER_SM
-#endif // __CUDACC__ || __HIPCC__
 #endif // LEGION_GPU_REDUCTIONS
 
     //--------------------------------------------------------------------------
@@ -22704,7 +21991,7 @@ namespace Legion {
 				       const std::vector<PhysicalRegion> *& ptr,
 				       Context& ctx,
 				       Runtime *& runtime);
-      static void legion_task_postamble(Runtime *runtime, Context ctx,
+      static void legion_task_postamble(Context ctx,
 					const void *retvalptr = NULL,
 					size_t retvalsize = 0);
     };
@@ -22733,7 +22020,7 @@ namespace Legion {
       T return_value = (*TASK_PTR)(task, *regions, ctx, rt);
 
       // Send the return value back
-      LegionSerialization::end_task<T>(rt, ctx, &return_value);
+      LegionSerialization::end_task<T>(ctx, &return_value);
     }
 
     //--------------------------------------------------------------------------
@@ -22753,7 +22040,7 @@ namespace Legion {
 
       (*TASK_PTR)(task, *regions, ctx, rt);
 
-      Runtime::legion_task_postamble(rt, ctx);
+      Runtime::legion_task_postamble(ctx);
     }
 
     //--------------------------------------------------------------------------
@@ -22785,7 +22072,7 @@ namespace Legion {
       T return_value = (*TASK_PTR)(task, *regions, ctx, rt, *user_data); 
 
       // Send the return value back
-      LegionSerialization::end_task<T>(rt, ctx, &return_value);
+      LegionSerialization::end_task<T>(ctx, &return_value);
     }
 
     //--------------------------------------------------------------------------
@@ -22810,7 +22097,7 @@ namespace Legion {
       (*TASK_PTR)(task, *regions, ctx, rt, *user_data); 
 
       // Send an empty return value back
-      Runtime::legion_task_postamble(rt, ctx);
+      Runtime::legion_task_postamble(ctx);
     }
 
     //--------------------------------------------------------------------------
@@ -22830,12 +22117,12 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     inline void LegionTaskWrapper::legion_task_postamble(
-                  Runtime *runtime, Context ctx,
+                  Context ctx,
 		  const void *retvalptr /*= NULL*/,
 		  size_t retvalsize /*= 0*/)
     //--------------------------------------------------------------------------
     {
-      Runtime::legion_task_postamble(runtime, ctx, retvalptr, retvalsize);
+      Runtime::legion_task_postamble(ctx, retvalptr, retvalsize);
     }
 
     //--------------------------------------------------------------------------

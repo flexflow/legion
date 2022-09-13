@@ -805,7 +805,7 @@ legion_index_space_attach_semantic_information(legion_runtime_t runtime_,
   runtime->attach_semantic_information(handle, tag, buffer, size, is_mutable);
 }
 
-void
+bool
 legion_index_space_retrieve_semantic_information(
                                          legion_runtime_t runtime_,
                                          legion_index_space_t handle_,
@@ -818,7 +818,7 @@ legion_index_space_retrieve_semantic_information(
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   IndexSpace handle = CObjectWrapper::unwrap(handle_);
 
-  runtime->retrieve_semantic_information(
+  return runtime->retrieve_semantic_information(
                        handle, tag, *result, *size, can_fail, wait_until_ready);
 }
 
@@ -1826,7 +1826,7 @@ legion_index_partition_attach_semantic_information(
   runtime->attach_semantic_information(handle, tag, buffer, size, is_mutable);
 }
 
-void
+bool
 legion_index_partition_retrieve_semantic_information(
                                          legion_runtime_t runtime_,
                                          legion_index_partition_t handle_,
@@ -1839,7 +1839,7 @@ legion_index_partition_retrieve_semantic_information(
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   IndexPartition handle = CObjectWrapper::unwrap(handle_);
 
-  runtime->retrieve_semantic_information(
+  return runtime->retrieve_semantic_information(
                        handle, tag, *result, *size, can_fail, wait_until_ready);
 }
 
@@ -1983,7 +1983,7 @@ legion_field_space_attach_semantic_information(
   runtime->attach_semantic_information(handle, tag, buffer, size, is_mutable);
 }
 
-void
+bool
 legion_field_space_retrieve_semantic_information(
                                          legion_runtime_t runtime_,
                                          legion_field_space_t handle_,
@@ -1996,8 +1996,26 @@ legion_field_space_retrieve_semantic_information(
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   FieldSpace handle = CObjectWrapper::unwrap(handle_);
 
-  runtime->retrieve_semantic_information(
+  return runtime->retrieve_semantic_information(
                        handle, tag, *result, *size, can_fail, wait_until_ready);
+}
+
+legion_field_id_t *
+legion_field_space_get_fields(legion_runtime_t runtime_,
+                              legion_context_t ctx_,
+                              legion_field_space_t handle_,
+                              size_t *size)
+{
+  Runtime *runtime = CObjectWrapper::unwrap(runtime_);
+  Context ctx = CObjectWrapper::unwrap(ctx_)->context();
+  FieldSpace handle = CObjectWrapper::unwrap(handle_);
+
+  std::vector<FieldID> fields;
+  runtime->get_field_space_fields(ctx, handle, fields);
+  legion_field_id_t *result = (legion_field_id_t *)malloc(sizeof(legion_field_id_t) * fields.size());
+  std::copy(fields.begin(), fields.end(), result);
+  *size = fields.size();
+  return result;
 }
 
 bool
@@ -2034,7 +2052,7 @@ legion_field_id_attach_semantic_information(legion_runtime_t runtime_,
                                      handle, id, tag, buffer, size, is_mutable);
 }
 
-void
+bool
 legion_field_id_retrieve_semantic_information(
                                          legion_runtime_t runtime_,
                                          legion_field_space_t handle_,
@@ -2048,7 +2066,7 @@ legion_field_id_retrieve_semantic_information(
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   FieldSpace handle = CObjectWrapper::unwrap(handle_);
 
-  runtime->retrieve_semantic_information(
+  return runtime->retrieve_semantic_information(
                    handle, id, tag, *result, *size, can_fail, wait_until_ready);
 }
 
@@ -2225,7 +2243,7 @@ legion_logical_region_attach_semantic_information(
   runtime->attach_semantic_information(handle, tag, buffer, size, is_mutable);
 }
 
-void
+bool
 legion_logical_region_retrieve_semantic_information(
                                          legion_runtime_t runtime_,
                                          legion_logical_region_t handle_,
@@ -2238,7 +2256,7 @@ legion_logical_region_retrieve_semantic_information(
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   LogicalRegion handle = CObjectWrapper::unwrap(handle_);
 
-  runtime->retrieve_semantic_information(
+  return runtime->retrieve_semantic_information(
                        handle, tag, *result, *size, can_fail, wait_until_ready);
 }
 
@@ -2271,16 +2289,14 @@ legion_logical_region_retrieve_name(legion_runtime_t runtime_,
 
 legion_logical_partition_t
 legion_logical_partition_create(legion_runtime_t runtime_,
-                                legion_context_t ctx_,
                                 legion_logical_region_t parent_,
                                 legion_index_partition_t handle_)
 {
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
-  Context ctx = CObjectWrapper::unwrap(ctx_)->context();
   LogicalRegion parent = CObjectWrapper::unwrap(parent_);
   IndexPartition handle = CObjectWrapper::unwrap(handle_);
 
-  LogicalPartition r = runtime->get_logical_partition(ctx, parent, handle);
+  LogicalPartition r = runtime->get_logical_partition(parent, handle);
   return CObjectWrapper::wrap(r);
 }
 
@@ -2418,7 +2434,7 @@ legion_logical_partition_attach_semantic_information(
   runtime->attach_semantic_information(handle, tag, buffer, size, is_mutable);
 }
 
-void
+bool
 legion_logical_partition_retrieve_semantic_information(
                                          legion_runtime_t runtime_,
                                          legion_logical_partition_t handle_,
@@ -2431,7 +2447,7 @@ legion_logical_partition_retrieve_semantic_information(
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   LogicalPartition handle = CObjectWrapper::unwrap(handle_);
 
-  runtime->retrieve_semantic_information(
+  return runtime->retrieve_semantic_information(
                        handle, tag, *result, *size, can_fail, wait_until_ready);
 }
 
@@ -2689,6 +2705,7 @@ legion_output_requirement_t
 legion_output_requirement_create(legion_field_space_t field_space_,
                                  legion_field_id_t *fields_,
                                  size_t fields_size,
+                                 int dim,
                                  bool global_indexing)
 {
   FieldSpace field_space = CObjectWrapper::unwrap(field_space_);
@@ -2698,6 +2715,7 @@ legion_output_requirement_create(legion_field_space_t field_space_,
 
   OutputRequirement *req = new OutputRequirement(field_space,
                                                  fields,
+                                                 dim,
                                                  global_indexing);
   return CObjectWrapper::wrap(req);
 }
@@ -3097,10 +3115,8 @@ legion_future_from_untyped_pointer(legion_runtime_t runtime_,
                                    const void *buffer,
                                    size_t size)
 {
-  Runtime *runtime = CObjectWrapper::unwrap(runtime_);
-
   Future *result = new Future(
-    Future::from_untyped_pointer(runtime, buffer, size));
+    Future::from_untyped_pointer(buffer, size));
   return CObjectWrapper::wrap(result);
 }
 
@@ -3298,6 +3314,26 @@ legion_future_map_construct_from_futures(legion_runtime_t runtime_,
   return CObjectWrapper::wrap(new FutureMap(
     runtime->construct_future_map(ctx, domain, futures, collective, sid,
                                   implicit_sharding)));
+}
+
+legion_future_map_t
+legion_future_map_transform(legion_runtime_t runtime_,
+                            legion_context_t ctx_,
+                            legion_future_map_t fm_,
+                            legion_index_space_t new_domain_,
+                            legion_point_transform_functor_t functor_,
+                            bool take_ownership)
+{
+  Runtime *runtime = CObjectWrapper::unwrap(runtime_);
+  Context ctx = CObjectWrapper::unwrap(ctx_)->context();
+  IndexSpace new_domain = CObjectWrapper::unwrap(new_domain_);
+  FutureMap *fm = CObjectWrapper::unwrap(fm_);
+  PointTransformFunctor *functor = CObjectWrapper::unwrap(functor_);
+
+  FutureMap result =
+    runtime->transform_future_map(
+      ctx, *fm, new_domain, functor, take_ownership);
+  return CObjectWrapper::wrap(new FutureMap(result));
 }
 
 // -----------------------------------------------------------------------
@@ -6132,7 +6168,8 @@ legion_runtime_local_shard(legion_runtime_t runtime_, legion_context_t ctx_)
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   Context ctx = CObjectWrapper::unwrap(ctx_)->context();
 
-  return runtime->local_shard(ctx);
+  const Task *task = runtime->get_local_task(ctx);
+  return task->get_shard_id();
 }
 
 legion_shard_id_t
@@ -6142,7 +6179,8 @@ legion_runtime_local_shard_without_context(void)
   if (ctx == NULL)
     return 0; // no shard if we're not inside a task
   Runtime *runtime = Runtime::get_runtime();
-  return runtime->local_shard(ctx);
+  const Task *task = runtime->get_local_task(ctx);
+  return task->get_shard_id();
 }
 
 size_t
@@ -6151,7 +6189,8 @@ legion_runtime_total_shards(legion_runtime_t runtime_, legion_context_t ctx_)
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   Context ctx = CObjectWrapper::unwrap(ctx_)->context();
 
-  return runtime->total_shards(ctx);
+  const Task *task = runtime->get_local_task(ctx);
+  return task->get_total_shards();
 }
 
 legion_shard_id_t
@@ -6886,7 +6925,7 @@ legion_task_id_attach_semantic_information(legion_runtime_t runtime_,
   runtime->attach_semantic_information(task_id, tag, buffer, size, is_mutable);
 }
 
-void
+bool
 legion_task_id_retrieve_semantic_information(
                                          legion_runtime_t runtime_,
                                          legion_task_id_t task_id,
@@ -6898,7 +6937,7 @@ legion_task_id_retrieve_semantic_information(
 {
   Runtime *runtime = CObjectWrapper::unwrap(runtime_);
 
-  runtime->retrieve_semantic_information(
+  return runtime->retrieve_semantic_information(
                       task_id, tag, *result, *size, can_fail, wait_until_ready);
 }
 
@@ -7633,6 +7672,12 @@ private:
 };
 
 legion_projection_id_t
+legion_runtime_generate_static_projection_id()
+{
+  return Runtime::generate_static_projection_id();
+}
+
+legion_projection_id_t
 legion_runtime_generate_library_projection_ids(
     legion_runtime_t runtime_,
     const char *library_name,
@@ -8021,13 +8066,11 @@ legion_task_postamble(
   const void *retval,
   size_t retsize)
 {
-  Runtime *runtime = CObjectWrapper::unwrap(runtime_);
   CContext *cctx = CObjectWrapper::unwrap(ctx_);
   Context ctx = cctx->context();
   delete cctx;
 
-  Runtime::legion_task_postamble(runtime,
-				 ctx,
+  Runtime::legion_task_postamble(ctx,
 				 retval,
 				 retsize);
 }

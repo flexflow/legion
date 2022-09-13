@@ -19,18 +19,12 @@ from __future__ import print_function
 import argparse, hashlib, multiprocessing, os, platform, re, subprocess, sys, tempfile, traceback
 
 def discover_llvm_version():
-    if os.environ.get('LMOD_SYSTEM_NAME') == 'summit': # Summit doesn't set hostname
-        return '60'
-    elif os.environ.get('NERSC_HOST') == 'perlmutter':
-        return '110'
-    else:
-        return '60'
+    # standardize on LLVM 13.0 everywhere
+    return '130'
 
 def discover_skip_certificate_check():
-    if platform.node().startswith('titan'):
-        return True
-    else:
-        return False
+    # Elliott: I don't think any systems are sensitive to this anymore
+    return False
 
 def discover_conduit():
     if 'CONDUIT' in os.environ:
@@ -45,10 +39,17 @@ def discover_conduit():
         return 'psm'
     elif os.environ.get('LMOD_SYSTEM_NAME') == 'summit': # Summit doesn't set hostname
         return 'ibv'
+    elif os.environ.get('LMOD_SYSTEM_NAME') == 'crusher': # Crusher doesn't set hostname
+        return 'ofi-slingshot11'
     elif os.environ.get('NERSC_HOST') == 'perlmutter':
-        return 'ucx'
+        return 'ofi-slingshot11'
     else:
         raise Exception('Please set CONDUIT in your environment')
+
+def short_conduit(conduit):
+    if conduit is not None and conduit.startswith('ofi-'):
+        return 'ofi'
+    return conduit
 
 def gasnet_enabled():
     if 'USE_GASNET' in os.environ:
@@ -87,9 +88,13 @@ def extract(dest_dir, archive_path, format):
 def apply_patch(dest_dir, diff_path, strip_levels=1):
     subprocess.check_call(['patch', '-p%d' % strip_levels, '-i', diff_path], cwd=dest_dir)
 
-def git_clone(repo_dir, url, branch=None):
+def git_clone(repo_dir, url, branch=None, commit_id=None):
     if branch is not None:
+        assert commit_id is None
         subprocess.check_call(['git', 'clone', '-b', branch, url, repo_dir])
+    elif commit_id is not None:
+        subprocess.check_call(['git', 'clone', url, repo_dir])
+        subprocess.check_call(['git', '-C', repo_dir, 'checkout', commit_id])
     else:
         subprocess.check_call(['git', 'clone', url, repo_dir])
 
@@ -98,10 +103,14 @@ def git_update(repo_dir):
         ['git', 'pull', '--ff-only'],
         cwd=repo_dir)
 
-def build_gasnet(gasnet_dir, conduit):
-    subprocess.check_call(['make', 'CONDUIT=%s' % conduit], cwd=gasnet_dir)
+def build_gasnet(gasnet_dir, conduit, gasnet_version):
+    subprocess.check_call(
+        ['make',
+         'CONDUIT=%s' % conduit,
+         'GASNET_VERSION=%s' % gasnet_version],
+        cwd=gasnet_dir)
 
-def build_llvm(source_dir, build_dir, install_dir, use_cmake, cmake_exe, thread_count, is_cray):
+def build_llvm(source_dir, build_dir, install_dir, is_project_build, use_cmake, cmake_exe, thread_count, is_cray):
     env = None
     if is_cray:
         env = dict(list(os.environ.items()) + [
@@ -109,15 +118,23 @@ def build_llvm(source_dir, build_dir, install_dir, use_cmake, cmake_exe, thread_
             ('CXX', os.environ['HOST_CXX']),
         ])
     if use_cmake:
+        extra_flags = []
+        if is_project_build:
+            extra_flags = [
+                '-DLLVM_ENABLE_PROJECTS=clang;lld',
+                '-DLLVM_ENABLE_RUNTIMES=libunwind',
+            ]
         subprocess.check_call(
             [cmake_exe,
              '-DCMAKE_INSTALL_PREFIX=%s' % install_dir,
              '-DCMAKE_BUILD_TYPE=Release',
              '-DLLVM_ENABLE_ASSERTIONS=OFF',
              '-DLLVM_ENABLE_ZLIB=OFF',
+             '-DLLVM_ENABLE_LIBXML2=OFF',
              '-DLLVM_ENABLE_TERMINFO=OFF',
-             '-DLLVM_ENABLE_LIBEDIT=OFF',
-             source_dir],
+             '-DLLVM_ENABLE_LIBEDIT=OFF'] +
+            extra_flags +
+            [source_dir],
             cwd=build_dir,
             env=env)
     else:
@@ -196,6 +213,8 @@ def build_hdf(source_dir, install_dir, thread_count, is_cray):
 
 def build_regent(root_dir, use_cmake, cmake_exe, extra_flags,
                  gasnet_dir, llvm_dir, terra_dir, hdf_dir, conduit, thread_count):
+    conduit = short_conduit(conduit)
+
     env = dict(list(os.environ.items()) +
         ([('CONDUIT', conduit),
           ('GASNET', gasnet_dir),
@@ -227,14 +246,9 @@ def install_llvm(llvm_dir, llvm_install_dir, scratch_dir, llvm_version, llvm_use
 
     # mirror = 'http://sapling.stanford.edu/~eslaught/llvm'
     mirror = 'https://releases.llvm.org'
-    if llvm_version == '35':
-        llvm_tarball = os.path.join(llvm_dir, 'llvm-3.5.2.src.tar.xz')
-        llvm_source_dir = os.path.join(llvm_dir, 'llvm-3.5.2.src')
-        clang_tarball = os.path.join(llvm_dir, 'cfe-3.5.2.src.tar.xz')
-        clang_source_dir = os.path.join(llvm_dir, 'cfe-3.5.2.src')
-        download(llvm_tarball, '%s/3.5.2/llvm-3.5.2.src.tar.xz' % mirror, '44196156d5749eb4b4224fe471a29cc3984df92570a4a89fa859f7394fc0c575', insecure=insecure)
-        download(clang_tarball, '%s/3.5.2/cfe-3.5.2.src.tar.xz' % mirror, '4feb575f74fb3a74b6245400460230141bf610f235ef3a25008cfe6137828620', insecure=insecure)
-    elif llvm_version == '38':
+    if llvm_version == '38':
+        if not os.environ.get('SETUP_ENV_ENABLE_LLVM_38_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT') == 1:
+            raise Exception('LLVM 3.8 is about to be removed from Terra. If you still rely on this version is it VERY IMPORANT that you contact the Legion team IMMEDIATELY so that your use case can be addressed. If you want to TEMPORARILY work around this warning, you can set the environment variable SETUP_ENV_ENABLE_LLVM_38_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT=1')
         llvm_tarball = os.path.join(llvm_dir, 'llvm-3.8.1.src.tar.xz')
         llvm_source_dir = os.path.join(llvm_dir, 'llvm-3.8.1.src')
         clang_tarball = os.path.join(llvm_dir, 'cfe-3.8.1.src.tar.xz')
@@ -242,6 +256,8 @@ def install_llvm(llvm_dir, llvm_install_dir, scratch_dir, llvm_version, llvm_use
         download(llvm_tarball, '%s/3.8.1/llvm-3.8.1.src.tar.xz' % mirror, '6e82ce4adb54ff3afc18053d6981b6aed1406751b8742582ed50f04b5ab475f9', insecure=insecure)
         download(clang_tarball, '%s/3.8.1/cfe-3.8.1.src.tar.xz' % mirror, '4cd3836dfb4b88b597e075341cae86d61c63ce3963e45c7fe6a8bf59bb382cdf', insecure=insecure)
     elif llvm_version == '39':
+        if not os.environ.get('SETUP_ENV_ENABLE_LLVM_39_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT') == 1:
+            raise Exception('LLVM 3.9 is about to be removed from Terra. If you still rely on this version is it VERY IMPORANT that you contact the Legion team IMMEDIATELY so that your use case can be addressed. If you want to TEMPORARILY work around this warning, you can set the environment variable SETUP_ENV_ENABLE_LLVM_39_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT=1')
         llvm_tarball = os.path.join(llvm_dir, 'llvm-3.9.1.src.tar.xz')
         llvm_source_dir = os.path.join(llvm_dir, 'llvm-3.9.1.src')
         clang_tarball = os.path.join(llvm_dir, 'cfe-3.9.1.src.tar.xz')
@@ -249,6 +265,8 @@ def install_llvm(llvm_dir, llvm_install_dir, scratch_dir, llvm_version, llvm_use
         download(llvm_tarball, '%s/3.9.1/llvm-3.9.1.src.tar.xz' % mirror, '1fd90354b9cf19232e8f168faf2220e79be555df3aa743242700879e8fd329ee', insecure=insecure)
         download(clang_tarball, '%s/3.9.1/cfe-3.9.1.src.tar.xz' % mirror, 'e6c4cebb96dee827fa0470af313dff265af391cb6da8d429842ef208c8f25e63', insecure=insecure)
     elif llvm_version == '60':
+        if not os.environ.get('SETUP_ENV_ENABLE_LLVM_60_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT') == 1:
+            raise Exception('LLVM 6.0 is pending deprecation in Terra. If you still rely on this version is it VERY IMPORANT that you contact the Legion team IMMEDIATELY so that your use case can be addressed. If you want to TEMPORARILY work around this warning, you can set the environment variable SETUP_ENV_ENABLE_LLVM_60_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT=1')
         llvm_tarball = os.path.join(llvm_dir, 'llvm-6.0.1.src.tar.xz')
         llvm_source_dir = os.path.join(llvm_dir, 'llvm-6.0.1.src')
         clang_tarball = os.path.join(llvm_dir, 'cfe-6.0.1.src.tar.xz')
@@ -256,6 +274,8 @@ def install_llvm(llvm_dir, llvm_install_dir, scratch_dir, llvm_version, llvm_use
         download(llvm_tarball, '%s/6.0.1/llvm-6.0.1.src.tar.xz' % mirror, 'b6d6c324f9c71494c0ccaf3dac1f16236d970002b42bb24a6c9e1634f7d0f4e2', insecure=insecure)
         download(clang_tarball, '%s/6.0.1/cfe-6.0.1.src.tar.xz' % mirror, '7c243f1485bddfdfedada3cd402ff4792ea82362ff91fbdac2dae67c6026b667', insecure=insecure)
     elif llvm_version == '90':
+        if not os.environ.get('SETUP_ENV_ENABLE_LLVM_90_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT') == 1:
+            raise Exception('LLVM 9.0 is pending deprecation in Terra. If you still rely on this version is it VERY IMPORANT that you contact the Legion team IMMEDIATELY so that your use case can be addressed. If you want to TEMPORARILY work around this warning, you can set the environment variable SETUP_ENV_ENABLE_LLVM_90_TEMPORARILY_THIS_IS_JUST_A_WORKAROUND_AND_WILL_GO_AWAY_SO_DONT_RELY_ON_IT=1')
         llvm_tarball = os.path.join(llvm_dir, 'llvm-9.0.0.src.tar.xz')
         llvm_source_dir = os.path.join(llvm_dir, 'llvm-9.0.0.src')
         clang_tarball = os.path.join(llvm_dir, 'cfe-9.0.0.src.tar.xz')
@@ -272,27 +292,25 @@ def install_llvm(llvm_dir, llvm_install_dir, scratch_dir, llvm_version, llvm_use
         download(clang_tarball, '%s/llvmorg-11.1.0/clang-11.1.0.src.tar.xz' % mirror, '0a8288f065d1f57cb6d96da4d2965cbea32edc572aa972e466e954d17148558b', insecure=insecure)
     elif llvm_version == '130':
         mirror = 'https://github.com/llvm/llvm-project/releases/download'
-        llvm_tarball = os.path.join(llvm_dir, 'llvm-13.0.0.src.tar.xz')
-        llvm_source_dir = os.path.join(llvm_dir, 'llvm-13.0.0.src')
-        clang_tarball = os.path.join(llvm_dir, 'clang-13.0.0.src.tar.xz')
-        clang_source_dir = os.path.join(llvm_dir, 'clang-13.0.0.src')
-        download(llvm_tarball, '%s/llvmorg-13.0.0/llvm-13.0.0.src.tar.xz' % mirror, '408d11708643ea826f519ff79761fcdfc12d641a2510229eec459e72f8163020', insecure=insecure)
-        download(clang_tarball, '%s/llvmorg-13.0.0/clang-13.0.0.src.tar.xz' % mirror, '5d611cbb06cfb6626be46eb2f23d003b2b80f40182898daa54b1c4e8b5b9e17e', insecure=insecure)
+        llvm_tarball = os.path.join(llvm_dir, 'llvm-project-13.0.0.src.tar.xz')
+        llvm_source_dir = os.path.join(llvm_dir, 'llvm-project-13.0.0.src', 'llvm')
+        clang_tarball = None
+        download(llvm_tarball, '%s/llvmorg-13.0.0/llvm-project-13.0.0.src.tar.xz' % mirror, '6075ad30f1ac0e15f07c1bf062c1e1268c241d674f11bd32cdf0e040c71f2bf3', insecure=insecure)
     else:
         assert False
 
     if not cache:
         extract(llvm_dir, llvm_tarball, 'xz')
-        extract(llvm_dir, clang_tarball, 'xz')
-        if llvm_version == '35':
-            apply_patch(llvm_source_dir, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'llvm-3.5-gcc.patch'))
-        elif llvm_version == '38':
+        if clang_tarball:
+            extract(llvm_dir, clang_tarball, 'xz')
+        if llvm_version == '38':
             apply_patch(llvm_source_dir, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'llvm-3.8-gcc.patch'))
-        os.rename(clang_source_dir, os.path.join(llvm_source_dir, 'tools', 'clang'))
+        if clang_tarball:
+            os.rename(clang_source_dir, os.path.join(llvm_source_dir, 'tools', 'clang'))
 
         llvm_build_dir = tempfile.mkdtemp(prefix='setup_env_llvm_build', dir=scratch_dir or llvm_dir)
         os.mkdir(llvm_install_dir)
-        build_llvm(llvm_source_dir, llvm_build_dir, llvm_install_dir, llvm_use_cmake, cmake_exe, thread_count, is_cray)
+        build_llvm(llvm_source_dir, llvm_build_dir, llvm_install_dir, clang_tarball is None, llvm_use_cmake, cmake_exe, thread_count, is_cray)
 
 def install_hdf(hdf_dir, hdf_install_dir, thread_count, cache, is_cray, insecure):
     try:
@@ -355,6 +373,7 @@ def check_dirty_build(name, build_result, component_dir):
 def driver(prefix_dir=None, scratch_dir=None, cache=False,
            legion_use_cmake=False, extra_flags=[], llvm_version=None,
            terra_url=None, terra_branch=None, terra_lua=None, terra_use_cmake=None,
+           gasnet_version=None, gasnet_config_version=None,
            thread_count=None, insecure=False):
     if not cache:
         if 'CC' not in os.environ:
@@ -379,7 +398,7 @@ def driver(prefix_dir=None, scratch_dir=None, cache=False,
         if 'HOST_CXX' not in os.environ:
             raise Exception('Please set HOST_CXX in your environment')
 
-    if llvm_version in ('35', '38'):
+    if llvm_version in ('38'):
         llvm_use_cmake = False
     elif llvm_version in ('39', '60', '90', '110', '130'):
         llvm_use_cmake = True
@@ -410,16 +429,20 @@ def driver(prefix_dir=None, scratch_dir=None, cache=False,
     if gasnet_enabled():
         gasnet_dir = os.path.realpath(os.path.join(prefix_dir, 'gasnet'))
         if not os.path.exists(gasnet_dir):
-            git_clone(gasnet_dir, 'https://github.com/StanfordLegion/gasnet.git')
+            git_clone(
+                gasnet_dir,
+                'https://github.com/StanfordLegion/gasnet.git',
+                commit_id=gasnet_config_version)
         if not cache:
             conduit = discover_conduit()
+            conduit_short = short_conduit(conduit)
             gasnet_release_dir = os.path.join(gasnet_dir, 'release')
             gasnet_build_result = os.path.join(
-                gasnet_release_dir, '%s-conduit' % conduit,
-                'libgasnet-%s-par.a' % conduit)
+                gasnet_release_dir, '%s-conduit' % conduit_short,
+                'libgasnet-%s-par.a' % conduit_short)
             if not os.path.exists(gasnet_release_dir):
                 try:
-                    build_gasnet(gasnet_dir, conduit)
+                    build_gasnet(gasnet_dir, conduit, gasnet_version)
                 except Exception as e:
                     report_build_failure('gasnet', gasnet_dir, e)
             else:
@@ -477,11 +500,10 @@ def driver(prefix_dir=None, scratch_dir=None, cache=False,
         assert os.path.exists(llvm_build_result)
 
     terra_dir = os.path.join(prefix_dir, 'terra.build')
-    terra_build_dir = os.path.join(terra_dir, 'build', 'bin')
     terra_build_result = os.path.join(terra_dir, 'release', 'bin', 'terra')
     if not os.path.exists(terra_dir):
         git_clone(terra_dir, terra_url, terra_branch)
-    if not os.path.exists(terra_build_dir):
+    if not os.path.exists(terra_build_result):
         try:
             build_terra(terra_dir, terra_branch, terra_lua, terra_use_cmake, cmake_exe, llvm_install_dir, cache, is_cray, thread_count)
         except Exception as e:
@@ -536,16 +558,16 @@ if __name__ == '__main__':
         default=[],
         help='Extra flags for Make/CMake command.')
     parser.add_argument(
-        '--llvm-version', dest='llvm_version', required=False, choices=('35', '38', '39', '60', '90', '110', '130'),
+        '--llvm-version', dest='llvm_version', required=False, choices=('38', '39', '60', '90', '110', '130'),
         default=discover_llvm_version(),
         help='Select LLVM version.')
     parser.add_argument(
         '--terra-url', dest='terra_url', required=False,
-        default='https://github.com/StanfordLegion/terra.git',
+        default='https://github.com/terralang/terra.git',
         help='URL of Terra repository to clone from.')
     parser.add_argument(
         '--terra-branch', dest='terra_branch', required=False,
-        default='luajit2.1',
+        default='release-1.0.5',
         help='Branch of Terra repository to checkout.')
     parser.add_argument(
         '--terra-lua', dest='terra_lua', required=False,
@@ -557,6 +579,14 @@ if __name__ == '__main__':
     parser.add_argument(
         '--no-terra-cmake', dest='terra_use_cmake', action='store_false', default=None,
         help='Use CMake to build Terra.')
+    parser.add_argument(
+        '--gasnet-version', dest='gasnet_version', required=False,
+        default=os.environ.get('GASNET_VERSION', 'GASNet-2022.3.0'),
+        help='Select GASNet version.')
+    parser.add_argument(
+        '--gasnet-config-version', dest='gasnet_config_version', required=False,
+        default='ea8576d9f3ac00b9af50715078f83cf6a3d2abce',
+        help='Select version of the GASNet configuration/build tool.')
     parser.add_argument(
         '-j', dest='thread_count', nargs='?', type=int,
         help='Number threads used to compile.')

@@ -27,6 +27,10 @@ namespace Realm {
     // CUDA device memory - extra is a uintptr_t'd pointer to the GPU
     //  object
     static const MemoryType CudaDeviceMem = 2;
+
+    // CUDA managed memory - extra is a uintptr_t'd pointer to _one of_
+    //  the GPU objects
+    static const MemoryType CudaManagedMem = 4;
   };
 
   namespace Cuda {
@@ -77,6 +81,8 @@ namespace Realm {
       size_t cfg_zc_mem_size, cfg_zc_ib_size;
       size_t cfg_fb_mem_size, cfg_fb_ib_size;
       size_t cfg_uvm_mem_size;
+      bool cfg_use_dynamic_fb;
+      size_t cfg_dynfb_max_size;
       unsigned cfg_num_gpus;
       std::string cfg_gpu_idxs;
       unsigned cfg_task_streams, cfg_d2d_streams;
@@ -86,6 +92,8 @@ namespace Realm {
       unsigned cfg_skip_gpu_count;
       bool cfg_skip_busy_gpus;
       size_t cfg_min_avail_mem;
+      int cfg_task_legacy_sync; // 0 = no, 1 = yes
+      int cfg_task_context_sync; // 0 = no, 1 = yes, -1 = default (based on hijack)
       int cfg_max_ctxsync_threads;
       bool cfg_lmem_resize_to_max;
       bool cfg_multithread_dma;

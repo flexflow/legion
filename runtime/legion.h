@@ -1060,8 +1060,9 @@ namespace Legion {
         { return (flags & LEGION_NO_ACCESS_FLAG); }
       inline bool is_restricted(void) const 
         { return (flags & LEGION_RESTRICTED_FLAG); }
+      LEGION_DEPRECATED("Premapping regions is no longer supported.") 
       inline bool must_premap(void) const
-        { return (flags & LEGION_MUST_PREMAP_FLAG); }
+        { return false; }
     public:
       const void* get_projection_args(size_t *size) const;
       void set_projection_args(const void *args, size_t size, bool own = false);
@@ -1094,7 +1095,7 @@ namespace Legion {
      * \struct OutputRequirement
      * Output requirements are a special kind of region requirement to inform
      * the runtime that the task will be producing new instances as part of its
-     * execution that will be attached to the logical region at the end of the 
+     * execution that will be attached to the logical region at the end of the
      * task, and are therefore not mapped ahead of the task's execution.
      *
      * Output region requirements come in two flavors: those that are already
@@ -1106,33 +1107,50 @@ namespace Legion {
      * right after the task is launched. Output requirements still pick
      * field IDs and the field space for the output regions.
      *
-     * Output regions are always 1D in case of individual task launch and no
-     * partitions will be created by the runtime. For index space launches,
-     * the runtime gives back a fresh region and partition, whose construction
-     * is controlled by the indexing mode specified the output requirement:
+     * In case of individual task launch, the dimension of an output region
+     * is chosen by the `dim` argument to the output requirement , and
+     * and no partitions will be created by the runtime. For index space
+     * launches, the runtime gives back a fresh region and partition,
+     * whose construction is controlled by the indexing mode specified
+     * the output requirement:
      *
-     * 0) For either indexing mode, the output partition is a disjoint
-     *    partition whose color space is identical to the launch domain.
+     * 0) For either indexing mode, the output partition is always a disjoint
+     *    complete partition. The color space of the partition is identical to
+     *    to the launch domain by default, but must be explicitly specified
+     *    if the output requirement uses a non-identity projection functor.
+     *    (see `set_projection`) Any projection functor associated with an
+     *    output requirement must be bijective.
      *
-     * 1) When the global indexing is requested, the output region has
-     *    a contiguous 1D index space whose volume is the sum of the sizes of
-     *    the outputs produced by point tasks. The range of the i-th subregion
-     *    is [S, S+n), where S is the sum of the previous i-1 subregions' sizes
-     *    and n is the output size of the i-th point task. The launch domain
-     *    must be 1D for the global indexing to be used.
+     * 1) When the global indexing is requested, the dimension of the output
+     *    region must be the same as the color space. The index space is
+     *    constructed such that the extent of each dimension is a sum of
+     *    that dimension's extents of the outputs produced by point tasks;
+     *    i.e., the range of the i-th subregion on dimension k
+     *    is [S, S+n), where S is the sum of the previous i-1 subregions'
+     *    extents on the k dimension and n is the extent of the output of
+     *    the i-th point task on the k dimension. Outputs are well-formed
+     *    only when their extents are aligned with their neighbors'. For
+     *    example, outputs of extents (3, 4) and (5, 4), respectively,
+     *    are valid if the producers' points are (0, 0) and (1, 0),
+     *    respectively, whereas they are not well-formed if the colors
+     *    are (0, 0) and (0, 1); for the former, the bounds of the output
+     *    subregions are ([0, 2], [0, 3]) and ([3, 7], [0, 3]),
+     *    respectively.
      *
-     * 2) With the local indexing, the output region has an (N+1)-D index
-     *    space for an N-D launch domain. The range of the subregion produced
+     * 2) With the local indexing, the output region has an (N+k)-D index
+     *    space for an N-D launch domain, where k is the dimension chosen
+     *    by the output requirement. The range of the subregion produced
      *    by the point task p (where p is a point in an N-D space) is
-     *    [<0, p>, <n-1, p>] where n is the output size of the point task p.
+     *    [<p,lo>, <p,hi>] where [lo, hi] is the bounds of the point task p
+     *    and <v1,v2> denotes a concatenation of points v1 and v2.
      *    The root index space is simply a union of all subspaces.
      *
      * 3) In the case of local indexing, the output region can either have a
      *    "loose" convex hull parent index space or a "tight" index space that
      *    contains exactly the points in the child space. With the convex hull,
-     *    the runtime computes an upper bound 2-D rectangle with as many rows as
+     *    the runtime computes an upper bound rectangle with as many rows as
      *    children and as many columns as the extent of the larges child space.
-     *    If convex_hull is set to false, the runtime will compute a more 
+     *    If convex_hull is set to false, the runtime will compute a more
      *    expensive sparse index space containing exactly the children points.
      *
      * Note that the global indexing has performance consequences since
@@ -1147,6 +1165,7 @@ namespace Legion {
       OutputRequirement(const RegionRequirement &req);
       OutputRequirement(FieldSpace field_space,
                         const std::set<FieldID> &fields,
+                        int dim = 1,
                         bool global_indexing = false);
     public:
       OutputRequirement(const OutputRequirement &rhs);
@@ -1157,9 +1176,20 @@ namespace Legion {
       bool operator==(const OutputRequirement &req) const;
       bool operator<(const OutputRequirement &req) const;
     public:
+      template <int DIM, typename COORD_T>
+      void set_type_tag();
+      // Specifies a projection functor id for this requirement.
+      // For a projection output requirement, a color space must be specified.
+      // The projection functor must be a bijective mapping from the launch
+      // domain to the color space. This implies that the launch domain's
+      // volume must be the same as the color space's.
+      void set_projection(ProjectionID projection, IndexSpace color_space);
+    public:
+      TypeTag type_tag;
       FieldSpace field_space; /**< field space for the output region */
       bool global_indexing; /**< global indexing is used when true */
       bool valid_requirement; /**< indicate requirement is valid */
+      IndexSpace color_space; /**< color space for the output partition */
     };
 
     /**
@@ -1393,16 +1423,23 @@ namespace Legion {
        * and to always have concrete values.
        */
       template<typename T>
+      LEGION_DEPRECATED("Use the version without a runtime pointer argument")
       static inline Future from_value(Runtime *rt, const T &value);
+      template<typename T>
+      static inline Future from_value(const T &value);
 
       /**
        * Generates a future from an untyped pointer.  No
        * serialization is performed.
        */
-      static inline Future from_untyped_pointer(Runtime *rt,
-          const void *buffer, size_t bytes, bool take_ownership = false,
-          Memory::Kind mem = Memory::SYSTEM_MEM, 
-          void (*freefunc)(void*,size_t) = NULL);
+      LEGION_DEPRECATED("Use the version without a runtime pointer argument")
+      static Future from_untyped_pointer(Runtime *rt,
+          const void *buffer, size_t bytes, bool take_ownership = false);
+      static Future from_untyped_pointer(
+          const void *buffer, size_t bytes, bool take_ownership = false);
+      static Future from_value(const void *buffer, size_t bytes, bool owned,
+          const Realm::ExternalInstanceResource &resource,
+          void (*freefunc)(const Realm::ExternalInstanceResource&) = NULL);
     private:
       // This should only be available for accessor classes
       template<PrivilegeMode, typename, int, typename, typename, bool>
@@ -2875,7 +2912,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
       // For Realm::AffineAccessor specializations there are additional
       // methods for creating accessors with limited bounding boxes and
       // affine transformations for using alternative coordinates spaces
@@ -2887,7 +2929,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
       // Specify a specific Affine transform to use for interpreting points
       // Not available for Realm::MultiAffineAccessor specializations
       template<int M>
@@ -2898,7 +2945,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
       // Specify both a transform and a bounds to use
       // Not available for Realm::MultiAffineAccessor specializations
       template<int M>
@@ -2910,7 +2962,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
     public:
       // Create a ReductionAccessor for an UntypedDeferredValue
       // (only with AffineAccessors)
@@ -2919,7 +2976,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
       // Create a ReductionAccessor for an UntypedDeferredValue
       // Specify a specific bounds rectangle to use for the accessor
       // (only with AffineAccessors)
@@ -2929,7 +2991,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
     public:
       // Create a ReductionAccessor for an UntypedDeferredBuffer
       // (only with AffineAccessors)
@@ -2938,7 +3005,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
       // Create a ReductionAccessor for an UntypedDeferredBuffer
       // Specify a specific bounds rectangle to use for the accessor
       // (only with AffineAccessors)
@@ -2948,7 +3020,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
       // Create a ReductionAccessor for an UntypedDeferredBuffer
       // Specify a specific Affine transform to use for interpreting points
       // (only with AffineAccessors)
@@ -2959,7 +3036,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
       // Create a ReductionAccessor for an UntypedDeferredBuffer
       // Specify both a transform and a bounds to use
       // (only with AffineAccessors)
@@ -2971,7 +3053,12 @@ namespace Legion {
                         const char *warning_string = NULL,
                         size_t subfield_offset = 0,
                         size_t actual_field_size = sizeof(typename REDOP::RHS),
-                        bool check_field_size = false) { }
+#ifdef DEBUG_LEGION
+                        bool check_field_size = true
+#else
+                        bool check_field_size = false
+#endif
+                       ) { }
     public:
       typedef typename REDOP::RHS value_type;
       typedef typename REDOP::RHS& reference;
@@ -3324,7 +3411,7 @@ namespace Legion {
       __CUDA_HD__
       inline DeferredValue<T>& operator=(T value);
     public:
-      inline void finalize(Runtime *runtime, Context ctx) const;
+      inline void finalize(Context ctx) const;
     protected:
       friend class UntypedDeferredValue;
       DeferredValue(void);
@@ -3376,7 +3463,8 @@ namespace Legion {
       template<typename REDOP, bool EXCLUSIVE>
       inline operator DeferredReduction<REDOP,EXCLUSIVE>(void) const;
     public:
-      void finalize(Runtime *runtime, Context ctx) const;
+      void finalize(Context ctx) const;
+      Realm::RegionInstance get_instance() const;
     private:
       template<PrivilegeMode,typename,int,typename,typename,bool>
       friend class FieldAccessor;
@@ -3421,17 +3509,7 @@ namespace Legion {
                      const T *initial_value = NULL,
                      size_t alignment = 16,
                      bool fortran_order_dims = false);
-      DeferredBuffer(Memory::Kind kind, 
-                     IndexSpace bounds,
-                     const T *initial_value = NULL,
-                     size_t alignment = 16,
-                     bool fortran_order_dims = false);
       DeferredBuffer(const Rect<DIM,COORD_T> &bounds, 
-                     Memory::Kind kind,
-                     const T *initial_value = NULL,
-                     size_t alignment = 16,
-                     bool fortran_order_dims = false);
-      DeferredBuffer(IndexSpaceT<DIM,COORD_T> bounds, 
                      Memory::Kind kind,
                      const T *initial_value = NULL,
                      size_t alignment = 16,
@@ -3442,21 +3520,38 @@ namespace Legion {
                      const T *initial_value = NULL,
                      size_t alignment = 16,
                      bool fortran_order_dims = false);
-      DeferredBuffer(Memory memory, 
-                     IndexSpace bounds,
-                     const T *initial_value = NULL,
-                     size_t alignment = 16,
-                     bool fortran_order_dims = false);
       DeferredBuffer(const Rect<DIM,COORD_T> &bounds, 
                      Memory memory,
                      const T *initial_value = NULL,
                      size_t alignment = 16,
                      bool fortran_order_dims = false);
-      DeferredBuffer(IndexSpaceT<DIM,COORD_T> bounds, 
-                     Memory memory,
+    public: // Constructors specifying a specific ordering
+      DeferredBuffer(Memory::Kind kind,
+                     const Domain &bounds,
+                     std::array<DimensionKind,DIM> ordering,
                      const T *initial_value = NULL,
-                     size_t alignment = 16,
-                     bool fortran_order_dims = false);
+                     size_t alignment = 16);
+      DeferredBuffer(const Rect<DIM,COORD_T> &bounds,
+                     Memory::Kind kind,
+                     std::array<DimensionKind,DIM> ordering,
+                     const T *initial_value = NULL,
+                     size_t alignment = 16);
+      DeferredBuffer(Memory memory,
+                     const Domain &bounds,
+                     std::array<DimensionKind,DIM> ordering,
+                     const T *initial_value = NULL,
+                     size_t alignment = 16);
+      DeferredBuffer(const Rect<DIM,COORD_T> &bounds,
+                     Memory memory,
+                     std::array<DimensionKind,DIM> ordering,
+                     const T *initial_value = NULL,
+                     size_t alignment = 16);
+    protected:
+      Memory get_memory_from_kind(Memory::Kind kind);
+      void initialize_layout(size_t alignment, bool fortran_order_dims);
+      void initialize(Memory memory,
+                      DomainT<DIM,COORD_T> bounds,
+                      const T *initial_value);
     public:
       __CUDA_HD__
       inline T read(const Point<DIM,COORD_T> &p) const;
@@ -3478,6 +3573,8 @@ namespace Legion {
       friend class UntypedDeferredBuffer<COORD_T>;
       Realm::RegionInstance instance;
       Realm::AffineAccessor<T,DIM,COORD_T> accessor;
+      std::array<DimensionKind,DIM> ordering;
+      size_t alignment;
 #ifdef LEGION_BOUNDS_CHECKS
       DomainT<DIM,COORD_T> bounds;
 #endif
@@ -3566,21 +3663,52 @@ namespace Legion {
       LogicalRegion get_logical_region(void) const;
       bool is_valid_output_region(void) const;
     public:
-      void return_data(size_t num_elements,
+      // Returns a deferred buffer that satisfies the layout constraints of
+      // this output region. The caller still needs to pass this buffer to
+      // a return_data call if the buffer needs to be bound to this output
+      // region. The caller can optionally choose to bind the returned buffer
+      // to the output region; such a call cannot be made more than once.
+      template<typename T,
+               int DIM,
+               typename COORD_T = coord_t,
+#ifdef LEGION_BOUNDS_CHECKS
+               bool CHECK_BOUNDS = true>
+#else
+               bool CHECK_BOUNDS = false>
+#endif
+      DeferredBuffer<T,DIM,COORD_T,CHECK_BOUNDS>
+      create_buffer(const Point<DIM, COORD_T> &extents,
+                    FieldID field_id,
+                    const T *initial_value = NULL,
+                    bool return_buffer = false);
+    private:
+      void check_type_tag(TypeTag type_tag) const;
+      void check_field_size(FieldID field_id, size_t field_size) const;
+      void get_layout(FieldID field_id,
+                      std::vector<DimensionKind> &ordering,
+                      size_t &alignment) const;
+    public:
+      template<typename T,
+               int DIM,
+               typename COORD_T = coord_t,
+#ifdef LEGION_BOUNDS_CHECKS
+               bool CHECK_BOUNDS = true>
+#else
+               bool CHECK_BOUNDS = false>
+#endif
+      void return_data(const Point<DIM,COORD_T> &extents,
                        FieldID field_id,
-                       void *ptr,
-                       size_t alignment = 0);
-      void return_data(size_t num_elements,
-                       std::map<FieldID,void*> ptrs,
-                       std::map<FieldID,size_t> *alignments = NULL);
-      template<typename T>
-      void return_data(FieldID field_id,
-                       DeferredBuffer<T,1> &buffer,
-                       const size_t *num_elements = NULL);
-      void return_data(FieldID field_id,
+                       DeferredBuffer<T,DIM,COORD_T,CHECK_BOUNDS> &buffer);
+      void return_data(const DomainPoint &extents,
+                       FieldID field_id,
                        Realm::RegionInstance instance,
-                       size_t field_size,
-                       const size_t *num_elements);
+                       bool check_constraints = true);
+    private:
+      void return_data(const DomainPoint &extents,
+                       FieldID field_id,
+                       Realm::RegionInstance instance,
+                       const LayoutConstraintSet *constraints,
+                       bool check_constraints);
     };
 
     //==========================================================================
@@ -3917,9 +4045,31 @@ namespace Legion {
     public:
       Task(void);
     public:
-      // Check whether this task has a parent task
+      // Check whether this task has a parent task.
       virtual bool has_parent_task(void) const = 0;
+      // Return the name of the task.
       virtual const char* get_task_name(void) const = 0;
+      // Returns the current slice of the index domain that this
+      // task is operating over. This method will only return a
+      // valid domain if this is part of an index space task.
+      virtual Domain get_slice_domain(void) const = 0;
+      //------------------------------------------------------------------------
+      // Control Replication methods
+      // In general SPMD-style programming in Legion is wrong. If you find
+      // yourself writing SPMD-style code for large fractions of your program
+      // then you're probably doing something wrong. There are a few exceptions:
+      // 1. index attach/detach operations are collective and may need
+      //    to do per-shard work
+      // 2. I/O in general often needs to do per-shard work
+      // 3. interaction with collective frameworks like MPI and NCCL
+      // 4. others?
+      // For these reasons we allow users to get access to sharding information
+      // Please, please, please be careful with how you use it
+      //------------------------------------------------------------------------
+      virtual ShardID get_shard_id(void) const = 0;
+      virtual size_t get_total_shards(void) const = 0;
+      virtual DomainPoint get_shard_point(void) const = 0;
+      virtual Domain get_shard_domain(void) const = 0;
     public:
       virtual MappableType get_mappable_type(void) const 
         { return LEGION_TASK_MAPPABLE; }
@@ -3929,7 +4079,7 @@ namespace Legion {
       TaskID                              task_id; 
       std::vector<IndexSpaceRequirement>  indexes;
       std::vector<RegionRequirement>      regions;
-      std::vector<RegionRequirement>      output_regions;
+      std::vector<OutputRequirement>      output_regions;
       std::vector<Future>                 futures;
       std::vector<Grant>                  grants;
       std::vector<PhaseBarrier>           wait_barriers;
@@ -4182,6 +4332,17 @@ namespace Legion {
     };
 
     /**
+     * \struct RegistrationCallbackArgs
+     * A struct containing arguments for a registration callback
+     */
+    struct RegistrationCallbackArgs {
+      Machine machine;
+      Runtime *runtime;
+      std::set<Processor> local_procs;
+      UntypedBuffer buffer;
+    };
+
+    /**
      * \struct TaskConfigOptions
      * A class for describing the configuration options
      * for a task being registered with the runtime.  
@@ -4430,16 +4591,34 @@ namespace Legion {
       ShardingFunctor(void);
       virtual ~ShardingFunctor(void);
     public:
-      virtual ShardID shard(const DomainPoint &point,
-                            const Domain &full_space,
-                            const size_t total_shards) = 0;
+      // Indicate whether this functor wants to use the ShardID or 
+      // DomainPoint versions of these methods
+      virtual bool use_points(void) const { return false; }
+    public:
+      // The ShardID version of this method
+      virtual ShardID shard(const DomainPoint &index_point,
+                            const Domain &index_domain,
+                            const size_t total_shards);
+      // The DomainPoint version of this method
+      virtual DomainPoint shard_points(const DomainPoint &index_point,
+                            const Domain &index_domain,
+                            const std::vector<DomainPoint> &shard_points,
+                            const Domain &shard_domain);
     public:
       virtual bool is_invertible(void) const { return false; }
+      // The ShardID version of this method
       virtual void invert(ShardID shard,
-                          const Domain &shard_domain,
-                          const Domain &full_domain,
+                          const Domain &sharding_domain,
+                          const Domain &index_domain,
                           const size_t total_shards,
-                          std::vector<DomainPoint> &points) { }
+                          std::vector<DomainPoint> &points);
+      // The DomainPoint version of this method
+      virtual void invert_points(const DomainPoint &shard_point,
+                          const std::vector<DomainPoint> &shard_points,
+                          const Domain &shard_domain,
+                          const Domain &index_domain,
+                          const Domain &sharding_domain,
+                          std::vector<DomainPoint> &index_points);
     };
 
     /**
@@ -4459,17 +4638,13 @@ namespace Legion {
      */
     class FutureFunctor {
     public:
-      virtual ~FutureFunctor(void);
+      virtual ~FutureFunctor(void) { }
     public:
-      virtual void* callback_get_future(Memory::Kind &kind,
-          size_t &size, bool &owned, void (*&freefunc)(void*,size_t),
-          const void *&metadata, size_t &metasize);
+      virtual const void* callback_get_future(size_t &size, bool &owned,
+          const Realm::ExternalInstanceResource *&resource,
+          void (*&freefunc)(const Realm::ExternalInstanceResource&),
+          const void *&metadata, size_t &metasize) = 0;
       virtual void callback_release_future(void) = 0;
-    public:
-      // These two are deprecated and will be invoked only if 
-      // callback_get_future_instance is not overridden
-      virtual size_t callback_get_future_size(void);
-      virtual void callback_pack_future(void *buffer, size_t size); 
     };
 
     /**
@@ -7886,38 +8061,6 @@ namespace Legion {
       void yield(Context ctx);
     public:
       //------------------------------------------------------------------------
-      // Control Replication
-      // In general SPMD-style programming in Legion is wrong. If you find
-      // yourself writing SPMD-style code for large fractions of your program
-      // then you're probably doing something wrong. There are a few exceptions:
-      // 1. index attach/detach operations are collective and may need
-      //    to do per-shard work
-      // 2. I/O in general often needs to do per-shard work
-      // 3. interaction with collective frameworks like MPI and NCCL
-      // 4. others?
-      // For these reasons we allow users to get access to their shard ID and
-      // the total number of shards and to make a future map collectively
-      // Please, please, please be careful with how you use them
-      //------------------------------------------------------------------------
-      /**
-       * Return the ShardID for the execution of this task in a
-       * control-replicated context. If the task is not control
-       * replicated then the ShardID will always be zero.
-       * @param ctx enclosing task context
-       * @return the ShardID for this execution of the task
-       */
-      ShardID local_shard(Context ctx);
-
-      /**
-       * Return the total number of shards for the execution of this task in
-       * a control-replicated context. If the task is not control-replicated
-       * then the total number of shards will always be one.
-       * @param enclosing task context
-       * @return the total number of shards in the execution of the task
-       */
-      size_t total_shards(Context ctx); 
-    public:
-      //------------------------------------------------------------------------
       // MPI Interoperability 
       //------------------------------------------------------------------------
       /**
@@ -8549,12 +8692,9 @@ namespace Legion {
       static const ReductionOp* get_reduction_op(ReductionOpID redop_id);
 
 #ifdef LEGION_GPU_REDUCTIONS
-#if defined (__CUDACC__) || defined (__HIPCC__)
       template<typename REDOP>
+        LEGION_DEPRECATED("Use register_reduction_op instead")
       static void preregister_gpu_reduction_op(ReductionOpID redop_id);
-#endif
-      static void preregister_gpu_reduction_op(ReductionOpID redop_id,
-                                               const CodeDescriptor &desc);
 #endif
     public:
       /**
@@ -8891,7 +9031,8 @@ namespace Legion {
                                   const char *task_name = NULL,
                                   bool control_replicable = false,
                                   unsigned shard_per_address_space = 1,
-                                  int shard_id = -1);
+                                  int shard_id = -1,
+                                  DomainPoint shard_point = DomainPoint());
 
       /**
        * Unbind an implicit context from the external thread it is 
@@ -9009,8 +9150,18 @@ namespace Legion {
        * configure any other static runtime variables prior to beginning
        * the application.
        * @param callback function pointer to the callback function to be run
+       * @param buffer optional argument buffer to pass to the callback
+       * @param dedup whether to deduplicate this with other registration
+       *              callbacks for the same function
+       * @param dedup_tag a tag to use for deduplication in the case where
+       *              applications may want to deduplicate across multiple 
+       *              callbacks with the same function pointer
        */
-      static void add_registration_callback(RegistrationCallbackFnptr callback);
+      static void add_registration_callback(RegistrationCallbackFnptr callback,
+                                      bool dedup = true, size_t dedup_tag = 0);
+      static void add_registration_callback(
+       RegistrationWithArgsCallbackFnptr callback, const UntypedBuffer &buffer,
+                                      bool dedup = true, size_t dedup_tag = 0);
 
       /**
        * This call allows applications to request a registration callback
@@ -9029,11 +9180,20 @@ namespace Legion {
        * @param ctx enclosing task context
        * @param global whether this registration needs to be performed
        *               in all address spaces or just the local one
+       * @param buffer optional buffer of data to pass to callback
+       * @param dedup whether to deduplicate this with other registration
+       *              callbacks for the same function
+       * @param dedup_tag a tag to use for deduplication in the case where
+       *              applications may want to deduplicate across multiple 
+       *              callbacks with the same function pointer
        */
-#ifdef LEGION_USE_LIBDL
       static void perform_registration_callback(
-                               RegistrationCallbackFnptr callback, bool global);
-#endif
+                               RegistrationCallbackFnptr callback, bool global,
+                               bool deduplicate = true, size_t dedup_tag = 0);
+      static void perform_registration_callback(
+                               RegistrationWithArgsCallbackFnptr callback,
+                               const UntypedBuffer &buffer, bool global,
+                               bool deduplicate = true , size_t dedup_tag = 0);
 
       /**
        * @deprecated
@@ -9374,46 +9534,62 @@ namespace Legion {
        * This is the necessary postamble call to use when registering a task
        * variant with an explicit CodeDescriptor. It passes back the task
        * return value and completes the task. It should be the last thing
-       * called before the task finishes.
-       * @param runtime the runtime pointer
+       * called before the task finishes. Note that if the return value is
+       * not backed by an instance, then it must be in host-visible memory.
        * @param ctx the context for the task
        * @param retvalptr pointer to the return value
        * @param retvalsize the size of the return value in bytes
-       * @param owned whether the runtime now owns this result
+       * @param owned whether the runtime takes ownership of this result
        * @param inst optional Realm instance containing the data that
        *              Legion should take ownership of
-       * @param memory the kind of memory in which the retval resides
-       * @param freefunc a callback function for freeing owned memory
-       *              if this is NULL and owned is true the runtime
-       *              will free the memory using the system 'free' function
        * @param metadataptr a pointer to host memory that contains metadata
        *              for the future. The runtime will always make a copy
        *              of this data if it is not NULL.
        * @param metadatasize the size of the metadata buffer if non-NULL
        */
-      static void legion_task_postamble(Runtime *runtime, Context ctx,
+      static void legion_task_postamble(Context ctx,
                                         const void *retvalptr = NULL,
                                         size_t retvalsize = 0,
                                         bool owned = false,
                                         Realm::RegionInstance inst = 
                                           Realm::RegionInstance::NO_INST,
-                                        Memory::Kind memory = 
-                                          Memory::SYSTEM_MEM,
-                                        void (*freefunc)(void*,size_t) = NULL,
                                         const void *metadataptr = NULL,
                                         size_t metadatasize = 0);
+
+      /**
+       * This variant of the Legion task postamble allows clients to
+       * return data in arbitrary memory locations as a future result.
+       * Realm::ExternalInstanceResource objects provide ways of describing
+       * all kinds of external allocations that Legion can understand
+       * @param ctx the context for the task
+       * @param retvalptr raw pointer for the allocation (can be NULL)
+       * @param retvalsize the size of the return value in bytes
+       * @param owned whether the runtime takes ownership of this result
+       * @param allocation an external instance resource description of 
+       *                   the future result data
+       * @param freefunc optional function pointer to invoke to free the
+       *                 resources associated with an external resource
+       * @param metadataptr a pointer to host memory that contains metadata
+       *              for the future. The runtime will always make a copy
+       *              of this data if it is not NULL.
+       * @param metadatasize the size of the metadata buffer if non-NULL
+       */
+      static void legion_task_postamble(Context ctx,
+            const void *retvalptr, size_t retvalsize, bool owned,
+            const Realm::ExternalInstanceResource &allocation,
+            void (*freefunc)(const Realm::ExternalInstanceResource&) = NULL,
+            const void *metadataptr = NULL, size_t metadatasize = 0);
 
       /**
        * This variant of the Legion task postamble allows users to pass in
        * a future functor object to serve as a callback interface for Legion
        * to query so that it is only invoked in the case where futures actually
        * need to be serialized. 
-       * @param runtime the runtime pointer
        * @param ctx the context for the task
        * @param callback_functor pointer to the callback object
        * @param owned whether Legion should take ownership of the object
        */
-      static void legion_task_postamble(Runtime *runtime, Context ctx,
+      static void legion_task_postamble(Context ctx,
                                         FutureFunctor *callback_functor,
                                         bool owned = false);
     public:
@@ -9610,9 +9786,6 @@ namespace Legion {
       // Methods for the wrapper functions to get information from the runtime
       friend class LegionTaskWrapper;
       friend class LegionSerialization;
-      Future from_value(const void *value, size_t value_size, bool owned, 
-                        Memory::Kind memory_kind = Memory::SYSTEM_MEM,
-                        void (*freefunc)(void*,size_t) = NULL);
     private:
       template<typename T>
       friend class DeferredValue;

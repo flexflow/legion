@@ -37,7 +37,7 @@ from legion_serializer import LegionProfASCIIDeserializer, LegionProfBinaryDeser
 
 root_dir = os.path.dirname(os.path.realpath(__file__))
 
-# Make sure this is up to date with lowlevel.h
+# Make sure this is up to date with realm_c.h
 processor_kinds = {
     1 : 'GPU',
     2 : 'CPU',
@@ -49,7 +49,7 @@ processor_kinds = {
     8 : 'Python',
 }
 
-# Make sure this is up to date with lowlevel.h
+# Make sure this is up to date with realm_c.h
 memory_kinds = {
     0 : 'No MemKind',
     1 : 'GASNet Global',
@@ -64,6 +64,8 @@ memory_kinds = {
     10 : 'L3 Cache',
     11 : 'L2 Cache',
     12 : 'L1 Cache',
+    13 : 'GPU Managed',
+    14 : 'GPU Dynamic',
 }
 # Make sure this is up to date with memory_kinds
 memory_node_proc = {
@@ -80,6 +82,8 @@ memory_node_proc = {
     'L3 Cache': 'Node_id',
     'L2 Cache': 'Proc_id',
     'L1 Cache': 'Proc_id',
+    'GPU Managed': 'Node_id',
+    'GPU Dynamic': 'GPU_proc_id',
 }
 
 memory_kinds_abbr = {
@@ -96,6 +100,8 @@ memory_kinds_abbr = {
     'L3 Cache': ' l3',
     'L2 Cache': ' l2',
     'L1 Cache': ' l1',
+    'GPU Managed': ' uvm',
+    'GPU Dynamic': ' gpu-dyn'
 }
 
 # Make sure this is up to date with legion_types.h
@@ -932,13 +938,18 @@ class Memory(object):
         return self.__cmp__(other) > 0
 
 class MemProcAffinity(object):
-    __slots__ = ['mem', 'proc']
-    def __init__(self, mem, proc):
+    __slots__ = ['mem', 'bandwidth', 'latency', 'best_proc_aff']
+    def __init__(self, mem, proc, bandwidth, latency):
         self.mem = mem
-        self.proc = list()
+        self.best_proc_aff = proc
+        self.bandwidth = bandwidth
+        self.latency = latency
 
-    def add_proc_id(self, proc):
-        self.proc.append(proc)
+    def update_best_affinity(self, bandwidth, latency, proc):
+        if (bandwidth > self.bandwidth):
+            self.best_proc_aff = proc
+            self.bandwidth = bandwidth
+            self.latency = latency
 
     def get_short_text(self):
         if memory_node_proc[self.mem.kind] == "None":
@@ -946,9 +957,9 @@ class MemProcAffinity(object):
         elif memory_node_proc[self.mem.kind] == "Node_id":
             return "[n" + str(self.mem.node_id) + "]" + memory_kinds_abbr[self.mem.kind]
         elif memory_node_proc[self.mem.kind] == "GPU_proc_id":
-            return "[n" + str(self.proc[0].node_id) + "][gpu" + str(self.proc[0].proc_in_node) + "]" + memory_kinds_abbr[self.mem.kind]
+            return "[n" + str(self.best_proc_aff.node_id) + "][gpu" + str(self.best_proc_aff.proc_in_node) + "]" + memory_kinds_abbr[self.mem.kind]
         elif memory_node_proc[self.mem.kind] == "Proc_id":
-            return "[n" + str(self.proc[0].node_id) + "][cpu" + str(self.proc[0].proc_in_node) + "]" + memory_kinds_abbr[self.mem.kind]
+            return "[n" + str(self.best_proc_aff.node_id) + "][cpu" + str(self.best_proc_aff.proc_in_node) + "]" + memory_kinds_abbr[self.mem.kind]
         else:
             return ""
 
@@ -965,27 +976,48 @@ class Channel(object):
         self.last_time = None
 
     def node_id(self):
-        if self.src is not None:
+        if self.src is not None and self.src.mem_id != 0:
             # MEMORY:      tag:8 = 0x1e, owner_node:16,   (unused):32, mem_idx: 8
             # owner_node = mem_id[55:40]
             # (mem_id >> 40) & ((1 << 16) - 1)
             return (self.src.mem_id >> 40) & ((1 << 16) - 1)
-        elif self.dst is not None:
+        elif self.dst is not None and self.dst.mem_id != 0:
             return (self.dst.mem_id >> 40) & ((1 << 16) - 1)
         else:
             return None
 
     def node_id_src(self):
-        if self.src is not None:
+        if self.src is not None and self.src.mem_id != 0:
             # MEMORY:      tag:8 = 0x1e, owner_node:16,   (unused):32, mem_idx: 8
             # owner_node = mem_id[55:40]
             # (mem_id >> 40) & ((1 << 16) - 1)
             return (self.src.mem_id >> 40) & ((1 << 16) - 1)
         else:
             return None
+    # mem_idx: 8
+    def mem_idx_str(self, mem):
+        if mem is not None:
+            if mem.mem_id == 0:
+                return "[all n]"
+            return str(mem.mem_id & 0xff)
+        return "none"
+
+    def node_idx_str(self, mem_id):
+        if mem_id == 0:
+            return "[all n]"
+        return str((mem_id >> 40) & ((1 << 16) - 1))
+
+    def mem_str(self, mem):
+        if mem and mem.mem_id == 0:
+            return "[all n]"
+        elif mem and mem.affinity is not None:
+            return mem.affinity.get_short_text()
+        elif  mem and mem.affinity is None:
+            return "[n" +self.node_idx_str(mem.mem_id) + "] unknown " + self.mem_idx_str(mem)
+        assert False
 
     def node_id_dst(self):
-        if self.dst is not None:
+        if self.dst is not None and self.dst.mem_id != 0:
             # MEMORY:      tag:8 = 0x1e, owner_node:16,   (unused):32, mem_idx: 8
             # owner_node = mem_id[55:40]
             # (mem_id >> 40) & ((1 << 16) - 1)
@@ -994,18 +1026,19 @@ class Channel(object):
             return None
 
     def get_short_text(self):
-        if self.src is not None:
-            if self.src.affinity is not None and self.dst.affinity is not None:
-                return self.src.affinity.get_short_text() + " to " + self.dst.affinity.get_short_text()
-            else:
-                return "Mem to Mem Channel"
-        elif self.dst is not None:
+        if self.dst is None and self.src is None:
+            return "Dependent Partition Channel"
+        # fill channel
+        elif self.src is None:
             if self.dst.affinity is not None:
                 return self.dst.affinity.get_short_text()
             else:
                 return "Fill Channel"
+        # normal channels
+        elif self.src is not None and self.dst is not None:
+            return self.mem_str(self.src) + " to " + self.mem_str(self.dst)
         else:
-            return "Dependent Partition Channel"
+            assert False
 
     def add_copy(self, copy):
         copy.chan = self
@@ -1244,12 +1277,14 @@ class StatObject(object):
                 print()
 
 class Variant(StatObject):
-    __slots__ = ['variant_id', 'name', 'op', 'task_kind', 'color', 'message', 'ordered_vc']
+    __slots__ = ['variant_id', 'name', 'ops', 'task_kind', 'color', 'message', 'ordered_vc']
     def __init__(self, variant_id, name, message = False, ordered_vc= False):
         StatObject.__init__(self)
         self.variant_id = variant_id
         self.name = name
-        self.op = dict()
+        # For task variants this dictionary is from op_id -> Task
+        # For meta-task variants, this diction is from op_id -> list[MetaTask]
+        self.ops = dict()
         self.task_kind = None
         self.color = None
         self.message = message
@@ -2750,8 +2785,10 @@ class State(object):
         variant = self.find_meta_variant(lg_id)
         assert wait_ready >= wait_start
         assert wait_end >= wait_ready
-        assert op_id in variant.op
-        variant.op[op_id].add_wait_interval(wait_start, wait_ready, wait_end)
+        assert op_id in variant.ops
+        # We know that meta wait infos are logged in order so we always add
+        # the wait intervals to the last element in the list
+        variant.ops[op_id][-1].add_wait_interval(wait_start, wait_ready, wait_end)
 
     def log_kind(self, task_id, name, overwrite):
         if task_id not in self.task_kinds:
@@ -2811,12 +2848,14 @@ class State(object):
             self.memories[mem_id] = Memory(mem_id, kind, capacity)
         else:
             self.memories[mem_id].kind = kind
+            self.memories[mem_id].capacity = capacity
 
-    def log_mem_proc_affinity_desc(self, mem_id, proc_id):
+    def log_mem_proc_affinity_desc(self, mem_id, proc_id, bandwidth, latency):
         if mem_id not in self.mem_proc_affinity:
-            self.mem_proc_affinity[mem_id] = MemProcAffinity(self.memories[mem_id], self.processors[proc_id])
+            self.mem_proc_affinity[mem_id] = MemProcAffinity(self.memories[mem_id], self.processors[proc_id],
+                                                             bandwidth, latency)
             self.memories[mem_id].add_affinity(self.mem_proc_affinity[mem_id])
-        self.mem_proc_affinity[mem_id].add_proc_id(self.processors[proc_id])
+        self.mem_proc_affinity[mem_id].update_best_affinity(bandwidth,latency,self.processors[proc_id])
 
     def log_op_desc(self, kind, name):
         if kind not in self.op_kinds:
@@ -2870,8 +2909,8 @@ class State(object):
 
     def find_memory(self, mem_id):
         if mem_id not in self.memories:
-            # use 'system memory' as the default kind
-            self.memories[mem_id] = Memory(mem_id, 1, None)
+            # use 'No MemKind' as the default kind
+            self.memories[mem_id] = Memory(mem_id, "No MemKind", None)
         return self.memories[mem_id]
 
     def find_mem_proc_affinity(self, mem_id):
@@ -2930,7 +2969,7 @@ class State(object):
             assert start is not None
             assert stop is not None
             task = Task(variant, task, create, ready, start, stop) 
-            variant.op[op_id] = task
+            variant.ops[op_id] = task
             self.operations[op_id] = task
             # update prof_uid map
             self.prof_uid_map[task.prof_uid] = task
@@ -3049,7 +3088,9 @@ class State(object):
 
     def create_meta(self, variant, op, create, ready, start, stop):
         meta = MetaTask(variant, op, create, ready, start, stop)
-        variant.op[op.op_id] = meta
+        if op.op_id not in variant.ops:
+            variant.ops[op.op_id] = list()
+        variant.ops[op.op_id].append(meta)
         # update prof_uid map
         self.prof_uid_map[meta.prof_uid] = meta
         return meta
@@ -3156,13 +3197,15 @@ class State(object):
                 continue
             if variant.ordered_vc:
                 continue
-            total_messages += len(variant.op)
-            for op in itervalues(variant.op):
-                latency = op.ready - op.create
-                if threshold <= latency:
-                    bad_messages += 1
-                if longest_latency < latency:
-                    longest_latency = latency
+            # Iterate over the lists of meta-tasks for each op_id
+            for ops in itervalues(variant.ops):
+                total_messages += len(ops)
+                for op in ops:
+                    latency = op.ready - op.create
+                    if threshold <= latency:
+                        bad_messages += 1
+                    if longest_latency < latency:
+                        longest_latency = latency
         if total_messages == 0:
             return
         percentage = 100.0 * bad_messages / total_messages
@@ -3412,14 +3455,13 @@ class State(object):
                 groups = [str(proc.node_id), "all"]
                 for node in groups:
                     group = node + " (" + proc.kind + ")"
-                    if group not in timepoints_dict:
-                        if len(proc.tasks) > 0:
-                            timepoints_dict[group] = [proc.util_time_points]
-                        proc_count[group] = 1;
-                    else:
-                        if len(proc.tasks) > 0:
-                            timepoints_dict[group].append(proc.util_time_points)
-                        proc_count[group] = proc_count[group]+1;
+                    if group not in proc_count:
+                        proc_count[group] = 0
+                    proc_count[group] = proc_count[group]+1
+                    if len(proc.tasks) > 0:
+                        if group not in timepoints_dict:
+                            timepoints_dict[group] = []
+                        timepoints_dict[group].append(proc.util_time_points)
         # memories
         for mem in itervalues(self.memories):
             if len(mem.time_points) > 0:
@@ -3884,7 +3926,7 @@ class State(object):
 
         ops_file = open(ops_file_name, "w")
         ops_file.write("op_id\tdesc\tproc\tlevel\n")
-        for op_id, operation in iteritems(self.operations):
+        for op_id, operation in sorted(iteritems(self.operations)):
             if operation.is_trimmed():
                 continue
             proc = ""

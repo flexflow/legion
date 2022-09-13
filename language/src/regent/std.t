@@ -17,7 +17,7 @@
 local affine_helper = require("regent/affine_helper")
 local ast = require("regent/ast")
 local base = require("regent/std_base")
-local cudahelper = require("regent/cudahelper")
+local gpuhelper = require("regent/gpu/helper")
 local data = require("common/data")
 local ffi = require("ffi")
 local header_helper = require("regent/header_helper")
@@ -46,7 +46,8 @@ std.replicable_whitelist = base.replicable_whitelist
 std.file_read_only = c.LEGION_FILE_READ_ONLY
 std.file_read_write = c.LEGION_FILE_READ_WRITE
 std.file_create = c.LEGION_FILE_CREATE
-std.check_cuda_available = cudahelper.check_cuda_available
+std.check_gpu_available = gpuhelper.check_gpu_available
+std.check_cuda_available = gpuhelper.check_gpu_available
 
 -- #####################################
 -- ## Utilities
@@ -623,6 +624,8 @@ std.update_reduction_op = base.update_reduction_op
 std.is_reduction_op = base.is_reduction_op
 std.get_reduction_op = base.get_reduction_op
 std.get_reduction_op_name = base.get_reduction_op_name
+std.get_type_id = base.get_type_id
+std.get_type_semantic_tag = base.get_type_semantic_tag
 std.meet_privilege = base.meet_privilege
 std.meet_coherence = base.meet_coherence
 std.meet_flag = base.meet_flag
@@ -1315,7 +1318,7 @@ function std.check_read(cx, node)
   local t = node.expr_type
   assert(terralib.types.istype(t))
   if std.is_ref(t) then
-    local region_types, error_message = t:bounds()
+    local region_types, error_message = t:bounds(node)
     if region_types == nil then report.error(node, error_message) end
     local field_path = t.field_path
     for i, region_type in ipairs(region_types) do
@@ -1336,7 +1339,7 @@ function std.check_write(cx, node)
   local t = node.expr_type
   assert(terralib.types.istype(t))
   if std.is_ref(t) then
-    local region_types, error_message = t:bounds()
+    local region_types, error_message = t:bounds(node)
     if region_types == nil then report.error(node, error_message) end
     local field_path = t.field_path
     for i, region_type in ipairs(region_types) do
@@ -1361,7 +1364,7 @@ function std.check_reduce(cx, op, node)
   local t = node.expr_type
   assert(terralib.types.istype(t))
   if std.is_ref(t) then
-    local region_types, error_message = t:bounds()
+    local region_types, error_message = t:bounds(node)
     if region_types == nil then report.error(node, error_message) end
     local field_path = t.field_path
     for i, region_type in ipairs(region_types) do
@@ -1506,36 +1509,43 @@ end
 -- #################
 
 local function need_dynamic_serialization(value_type)
-  return std.is_list(value_type) or std.is_string(value_type)
+  return std.is_list(value_type) or
+    (value_type:isarray() and need_dynamic_serialization(value_type.type)) or
+    -- Supports the extensible serialization interface.
+    (rawget(value_type, "__compute_serialized_size") and
+       rawget(value_type, "__serialize") and
+       rawget(value_type, "__deserialize"))
 end
 
-local function compute_serialized_size_inner(value_type, value)
-  if std.is_list(value_type) then
+function std.compute_serialized_size_inner(value_type, value)
+  -- Only dynamically serialize arrays whose elements need custom serialization.
+  if value_type:isarray() and
+    need_dynamic_serialization(value_type.type)
+  then
     local result = terralib.newsymbol(c.size_t, "result")
-    local element_type = value_type.element_type
-    local element = terralib.newsymbol(&element_type)
+    local element_type = value_type.type
+    local i = terralib.newsymbol(int64)
 
-    local size_actions, size_value = compute_serialized_size_inner(
-      element_type, `(@element))
+    local size_actions, size_value = std.compute_serialized_size_inner(
+      element_type, `([value][i]))
     local actions = quote
       var [result] = 0
-      for i = 0, [value].__size do
-        var [element] = ([&element_type]([value].__data)) + i
+      for [i] = 0, [value_type.N] do
         [size_actions]
-        [result] = [result] + terralib.sizeof(element_type) + [size_value]
+        [result] = [result] + [size_value]
       end
     end
     return actions, result
-  elseif std.is_string(value_type) then
-    return quote end, `(c.strlen([rawstring](value)) + 1)
+  elseif rawget(value_type, "__compute_serialized_size") then
+    return value_type:__compute_serialized_size(value_type, value)
   else
     return quote end, 0
   end
 end
 
-local compute_serialized_size_helper = terralib.memoize(function(value_type)
+local compute_serialized_size_helper = data.weak_memoize(function(value_type)
   local value = terralib.newsymbol(value_type, "value")
-  local actions, result = compute_serialized_size_inner(value_type, value)
+  local actions, result = std.compute_serialized_size_inner(value_type, value)
   if actions then
     local terra compute_serialized_size([value]) : c.size_t
       [actions];
@@ -1559,48 +1569,49 @@ function std.compute_serialized_size(value_type, value)
   return actions, result
 end
 
-local function serialize_inner(value_type, value, fixed_ptr, data_ptr)
+function std.serialize_simple(value_type, value, fixed_ptr, data_ptr)
   -- Force unaligned access because malloc does not provide
   -- blocks aligned for all purposes (e.g. SSE vectors).
   local value_type_alignment = 1 -- data.min(terralib.sizeof(value_type), 8)
-  local actions = quote
+  return quote
     terralib.attrstore(
       [&value_type](fixed_ptr), value,
       { align = [value_type_alignment] })
   end
+end
 
-  if std.is_list(value_type) then
-    local element_type = value_type.element_type
+function std.serialize_inner(value_type, value, fixed_ptr, data_ptr)
+  -- Only dynamically serialize arrays whose elements need custom serialization.
+  if value_type:isarray() and
+    need_dynamic_serialization(value_type.type)
+  then
+    local element_type = value_type.type
     local element = terralib.newsymbol(element_type)
     local element_ptr = terralib.newsymbol(&element_type)
 
-    local ser_actions = std.serialize(
+    local ser_actions = std.serialize_inner(
       element_type, element, element_ptr, data_ptr)
-    actions = quote
-      [actions]
-      for i = 0, [value].__size do
-        var [element] = ([&element_type]([value].__data))[i]
-        var [element_ptr] = [&element_type](@[data_ptr])
-        @[data_ptr] = @[data_ptr] + terralib.sizeof(element_type)
+    return quote
+      for i = 0, [value_type.N] do
+        var [element] = [value][i]
+        var [element_ptr] = [&element_type]([fixed_ptr]) + i
         [ser_actions]
       end
     end
-  elseif std.is_string(value_type) then
-    actions = quote
-      [actions]
-      c.strcpy([rawstring](@[data_ptr]), [rawstring]([value]))
-      @[data_ptr] = @[data_ptr] + c.strlen([rawstring]([value])) + 1
-    end
+  elseif rawget(value_type, "__serialize") then
+    return value_type:__serialize(value_type, value, fixed_ptr, data_ptr)
+  else
+    return std.serialize_simple(value_type, value, fixed_ptr, data_ptr)
   end
 
   return actions
 end
 
-local serialize_helper = terralib.memoize(function(value_type)
+local serialize_helper = data.weak_memoize(function(value_type)
   local value = terralib.newsymbol(value_type, "value")
   local fixed_ptr = terralib.newsymbol(&opaque, "fixed_ptr")
   local data_ptr = terralib.newsymbol(&&uint8, "data_ptr")
-  local actions = serialize_inner(value_type, value, fixed_ptr, data_ptr)
+  local actions = std.serialize_inner(value_type, value, fixed_ptr, data_ptr)
   local terra serialize([value], [fixed_ptr], [data_ptr])
     [actions]
   end
@@ -1610,7 +1621,7 @@ end)
 
 function std.serialize(value_type, value, fixed_ptr, data_ptr)
   if not need_dynamic_serialization(value_type) then
-    return serialize_inner(value_type, value, fixed_ptr, data_ptr)
+    return std.serialize_simple(value_type, value, fixed_ptr, data_ptr)
   end
 
   local helper = serialize_helper(value_type)
@@ -1620,7 +1631,7 @@ function std.serialize(value_type, value, fixed_ptr, data_ptr)
   return actions
 end
 
-local function deserialize_simple(value_type, fixed_ptr, data_ptr)
+function std.deserialize_simple(value_type, fixed_ptr, data_ptr)
   -- Force unaligned access because malloc does not provide
   -- blocks aligned for all purposes (e.g. SSE vectors).
   local value_type_alignment = 1 -- data.min(terralib.sizeof(value_type), 8)
@@ -1629,45 +1640,41 @@ local function deserialize_simple(value_type, fixed_ptr, data_ptr)
     { align = [value_type_alignment] })
 end
 
-local function deserialize_inner(value_type, fixed_ptr, data_ptr)
+function std.deserialize_inner(value_type, fixed_ptr, data_ptr)
   local result = terralib.newsymbol(value_type, "result")
-  local actions = quote
-    var [result] = [deserialize_simple(value_type, fixed_ptr, data_ptr)]
-  end
 
-  if std.is_list(value_type) then
-    local element_type = value_type.element_type
+  -- Only dynamically serialize arrays whose elements need custom serialization.
+  if value_type:isarray() and
+    need_dynamic_serialization(value_type.type)
+  then
+    local element_type = value_type.type
     local element_ptr = terralib.newsymbol(&element_type)
 
-    local deser_actions, deser_value = deserialize_inner(
+    local deser_actions, deser_value = std.deserialize_inner(
       element_type, element_ptr, data_ptr)
-    actions = quote
-      [actions]
-      [result].__data = c.malloc(
-        terralib.sizeof(element_type) * [result].__size)
-      std.assert([result].__data ~= nil, "malloc failed in deserialize")
-      for i = 0, [result].__size do
-        var [element_ptr] = [&element_type](@[data_ptr])
-        @[data_ptr] = @[data_ptr] + terralib.sizeof(element_type)
+    local actions = quote
+      var [result]
+      for i = 0, [value_type.N] do
+        var [element_ptr] = [&element_type]([fixed_ptr]) + i
         [deser_actions]
-        ([&element_type]([result].__data))[i] = [deser_value]
+        [result][i] = [deser_value]
       end
     end
-  elseif std.is_string(value_type) then
-    actions = quote
-      [actions]
-      [result] = c.strdup([rawstring](@[data_ptr]))
-      @[data_ptr] = @[data_ptr] + c.strlen([rawstring]([result])) + 1
+    return actions, result
+  elseif rawget(value_type, "__deserialize") then
+    return value_type:__deserialize(value_type, fixed_ptr, data_ptr)
+  else
+    local actions = quote
+      var [result] = [std.deserialize_simple(value_type, fixed_ptr, data_ptr)]
     end
+    return actions, result
   end
-
-  return actions, result
 end
 
-local deserialize_helper = terralib.memoize(function(value_type)
+local deserialize_helper = data.weak_memoize(function(value_type)
   local fixed_ptr = terralib.newsymbol(&opaque, "fixed_ptr")
   local data_ptr = terralib.newsymbol(&&uint8, "data_ptr")
-  local actions, result = deserialize_inner(value_type, fixed_ptr, data_ptr)
+  local actions, result = std.deserialize_inner(value_type, fixed_ptr, data_ptr)
   -- Force unaligned access because malloc does not provide
   -- blocks aligned for all purposes (e.g. AVX vectors).
   local value_type_alignment = 1 -- data.min(terralib.sizeof(value_type),8)
@@ -1686,7 +1693,7 @@ end)
 
 function std.deserialize(value_type, fixed_ptr, data_ptr)
   if not need_dynamic_serialization(value_type) then
-    return quote end, deserialize_simple(value_type, fixed_ptr, data_ptr)
+    return quote end, std.deserialize_simple(value_type, fixed_ptr, data_ptr)
   end
 
   local helper = deserialize_helper(value_type)
@@ -1806,13 +1813,13 @@ end
 -- ## Types
 -- #################
 
-local arithmetic_combinators = {
-  ["__add"] = function(a, b) return `([a] + [b]) end,
-  ["__sub"] = function(a, b) return `([a] - [b]) end,
-  ["__mul"] = function(a, b) return `([a] * [b]) end,
-  ["__div"] = function(a, b) return `([a] / [b]) end,
-  ["__mod"] = function(a, b) return `([a] % [b]) end,
-}
+local arithmetic_combinators = data.dict({
+  {"__add", function(a, b) return `([a] + [b]) end},
+  {"__sub", function(a, b) return `([a] - [b]) end},
+  {"__mul", function(a, b) return `([a] * [b]) end},
+  {"__div", function(a, b) return `([a] / [b]) end},
+  {"__mod", function(a, b) return `([a] % [b]) end},
+})
 
 local function generate_arithmetic_metamethod_body(ty, method, e1, e2)
   local combinator = arithmetic_combinators[method]
@@ -1849,8 +1856,8 @@ function std.generate_arithmetic_metamethod(ty, method)
 end
 
 function std.generate_arithmetic_metamethods(ty)
-  local methods = {}
-  for method, _ in pairs(arithmetic_combinators) do
+  local methods = data.newmap()
+  for _, method in arithmetic_combinators:keys() do
     local f =  std.generate_arithmetic_metamethod(ty, method)
     f:setname(method .. "_" .. tostring(ty))
     methods[method] = f
@@ -1860,8 +1867,8 @@ function std.generate_arithmetic_metamethods(ty)
 end
 
 function std.generate_arithmetic_metamethods_for_bounded_type(ty)
-  local methods = {}
-  for method, _ in pairs(arithmetic_combinators) do
+  local methods = data.newmap()
+  for _, method in arithmetic_combinators:keys() do
     local prefix = method .. "_" .. tostring(ty)
     local overload1 =
       terra(a : ty, b : ty) : ty.index_type
@@ -1893,20 +1900,26 @@ end
 
 local and_combinator = function(a, b) return `(([a]) and ([b])) end
 local or_combinator = function(a, b) return `(([a]) or ([b])) end
-local conditional_combinators = {
-  ["__eq"] = { elem_comb = function(a, b) return `([a] == [b]) end,
-               res_comb = and_combinator, },
-  ["__ne"] = { elem_comb = function(a, b) return `([a] ~= [b]) end,
-               res_comb = or_combinator, },
-  ["__le"] = { elem_comb = function(a, b) return `([a] <= [b]) end,
-               res_comb = and_combinator, },
-  ["__lt"] = { elem_comb = function(a, b) return `([a] < [b]) end,
-               res_comb = and_combinator, },
-  ["__ge"] = { elem_comb = function(a, b) return `([a] >= [b]) end,
-               res_comb = and_combinator, },
-  ["__gt"] = { elem_comb = function(a, b) return `([a] > [b]) end,
-               res_comb = and_combinator, },
-}
+local conditional_combinators = data.dict({
+  {"__eq", { elem_comb = function(a, b) return `([a] == [b]) end,
+             res_comb = and_combinator, }
+  },
+  {"__ne", { elem_comb = function(a, b) return `([a] ~= [b]) end,
+               res_comb = or_combinator, }
+  },
+  {"__le", { elem_comb = function(a, b) return `([a] <= [b]) end,
+               res_comb = and_combinator, }
+  },
+  {"__lt", { elem_comb = function(a, b) return `([a] < [b]) end,
+               res_comb = and_combinator, }
+  },
+  {"__ge", { elem_comb = function(a, b) return `([a] >= [b]) end,
+               res_comb = and_combinator, }
+  },
+  {"__gt", { elem_comb = function(a, b) return `([a] > [b]) end,
+               res_comb = and_combinator, }
+  },
+})
 
 local function generate_conditional_metamethod_body(ty, method, e1, e2)
   local combinators = conditional_combinators[method]
@@ -1953,8 +1966,8 @@ function std.generate_conditional_metamethod(ty, method)
 end
 
 function std.generate_conditional_metamethods(ty)
-  local methods = {}
-  for method, _ in pairs(conditional_combinators) do
+  local methods = data.newmap()
+  for _, method in conditional_combinators:keys() do
     methods[method] = std.generate_conditional_metamethod(ty, method)
   end
   return methods
@@ -1978,11 +1991,18 @@ function std.generate_conditional_metamethod_for_bounded_type(ty, method)
 end
 
 function std.generate_conditional_metamethods_for_bounded_type(ty)
-  local methods = {}
-  for method, _ in pairs(conditional_combinators) do
+  local methods = data.newmap()
+  for _, method in conditional_combinators:keys() do
     methods[method] = std.generate_conditional_metamethod_for_bounded_type(ty, method)
   end
   return methods
+end
+
+-- This function is equivalent to writing ty:bounds(node), but makes
+-- it more clear that we're *CHECKING* the bounds, i.e., this will
+-- fail with an error if it doesn't work.
+function std.check_bounds(node, ty)
+  return ty:bounds(node)
 end
 
 -- WARNING: Bounded types are NOT unique. If two regions are aliased
@@ -1994,9 +2014,9 @@ end
 -- var y = new(ptr(t, s))
 --
 -- The types of x and y are distinct objects, but are still type_eq.
-local bounded_type = terralib.memoize(function(index_type, ...)
+local bounded_type = data.weak_memoize(function(index_type, ...)
   assert(std.is_index_type(index_type))
-  local bounds = data.newtuple(...)
+  local bounds = terralib.newlist({...})
   local points_to_type = false
   if #bounds > 0 then
     if terralib.types.istype(bounds[1]) then
@@ -2004,6 +2024,7 @@ local bounded_type = terralib.memoize(function(index_type, ...)
       bounds:remove(1)
     end
   end
+  bounds = data.newtuple(unpack(bounds))
   if #bounds <= 0 then
     error(tostring(index_type) .. " expected at least one ispace or region, got none")
   end
@@ -2054,8 +2075,8 @@ local bounded_type = terralib.memoize(function(index_type, ...)
     return self.points_to_type ~= false
   end
 
-  function st:bounds()
-    local bounds = data.newtuple()
+  function st:bounds(node)
+    local bounds = terralib.newlist()
     local is_ispace = false
     local is_region = false
     for i, bound_symbol in ipairs(self.bounds_symbols) do
@@ -2066,9 +2087,11 @@ local bounded_type = terralib.memoize(function(index_type, ...)
       if not (terralib.types.istype(bound) and
               (bound == std.wild_type or std.is_ispace(bound) or std.is_region(bound)))
       then
-        return nil, tostring(self.index_type) ..
-                    " expected an ispace or region as argument " ..
-                    tostring(i+1) .. ", got " .. tostring(bound)
+        local message = tostring(self.index_type) ..
+          " expected an ispace or region as argument " ..
+          tostring(i+1) .. ", got " .. tostring(bound)
+        if node then report.error(node, message) end
+        assert(false, message)
       end
       if std.is_region(bound) then
         if not std.type_eq(bound:ispace().index_type, self.index_type) or
@@ -2081,9 +2104,11 @@ local bounded_type = terralib.memoize(function(index_type, ...)
           if not std.type_eq(self.index_type, std.ptr) then
             index_message = tostring(self.index_type) .. ", "
           end
-          return nil, tostring(self.index_type) .. " expected region(" ..
-                      index_message .. tostring(self.points_to_type) .. ") as argument " ..
-                      tostring(i+1) .. ", got " .. tostring(bound)
+          local message = tostring(self.index_type) .. " expected region(" ..
+            index_message .. tostring(self.points_to_type) .. ") as argument " ..
+            tostring(i+1) .. ", got " .. tostring(bound)
+          if node then report.error(node, message) end
+          assert(false, message)
         end
       end
       if std.is_ispace(bound) then is_ispace = true end
@@ -2091,10 +2116,11 @@ local bounded_type = terralib.memoize(function(index_type, ...)
       bounds:insert(bound)
     end
     if is_ispace and is_region then
-      --report.error(nil, tostring(self.index_type) .. " bounds may not mix ispaces and regions")
-      return nil, tostring(self.index_type) .. " bounds may not mix ispaces and regions"
+      local message = tostring(self.index_type) .. " bounds may not mix ispaces and regions"
+      if node then report.error(node, message) end
+      assert(false, message)
     end
-    return bounds
+    return data.newtuple(unpack(bounds))
   end
 
   st.metamethods.__eq = macro(function(a, b)
@@ -2160,10 +2186,10 @@ local bounded_type = terralib.memoize(function(index_type, ...)
 
   -- Important: This has to downgrade the type, because arithmetic
   -- isn't guarranteed to stay within bounds.
-  for method_name, method in pairs(std.generate_arithmetic_metamethods_for_bounded_type(st)) do
+  for method_name, method in std.generate_arithmetic_metamethods_for_bounded_type(st):items() do
     st.metamethods[method_name] = method
   end
-  for method_name, method in pairs(std.generate_conditional_metamethods_for_bounded_type(st)) do
+  for method_name, method in std.generate_conditional_metamethods_for_bounded_type(st):items() do
     st.metamethods[method_name] = method
   end
 
@@ -2228,7 +2254,7 @@ do
   index_type.__metatable = getmetatable(st)
 end
 
-std.transform = terralib.memoize(function(M, N)
+std.transform = data.weak_memoize(function(M, N)
   local st = terralib.types.newstruct("transform(" .. tostring(M) .. "," ..tostring(N) .. ")")
   local impl_type = validate_transform_type(M, N)
   st.entries = terralib.newlist({
@@ -2258,7 +2284,7 @@ std.transform = terralib.memoize(function(M, N)
 
   return st
 end)
-std.rect_type = terralib.memoize(function(index_type)
+std.rect_type = data.weak_memoize(function(index_type)
   local st = terralib.types.newstruct("rect" .. tostring(index_type.dim) .. "d")
   assert(not index_type:is_opaque())
   st.entries = terralib.newlist({
@@ -2288,11 +2314,15 @@ std.rect_type = terralib.memoize(function(index_type)
       elseif std.type_eq(to, c.legion_domain_t) then
         return `([expr]:to_domain())
       end
+    elseif std.is_rect_type(to) then
+      if std.type_eq(from, c["legion_rect_" .. tostring(st.dim) .. "d_t"]) then
+        return `([to] { lo = [expr].lo, hi = [expr].hi })
+      end
     end
     assert(false)
   end
 
-  for method, combinator in pairs(arithmetic_combinators) do
+  for method, combinator in arithmetic_combinators:items() do
     st.metamethods[method] = terra(a : st, b : st.index_type)
       return [st]{ lo = [combinator(`(a.lo), b)], hi = [combinator(`(a.hi), b)] }
     end
@@ -2472,10 +2502,10 @@ function std.index_type(base_type, displayname)
     [make_from_domain_point(pt)]
   end
 
-  for method_name, method in pairs(std.generate_arithmetic_metamethods(st)) do
+  for method_name, method in std.generate_arithmetic_metamethods(st):items() do
     st.metamethods[method_name] = method
   end
-  for method_name, method in pairs(std.generate_conditional_metamethods(st)) do
+  for method_name, method in std.generate_conditional_metamethods(st):items() do
     st.metamethods[method_name] = method
   end
   if not st:is_opaque() then
@@ -2556,11 +2586,6 @@ do
 
     local id = next_ispace_id
     next_ispace_id = next_ispace_id + 1
-
-    local hash_value = "__ispace_#" .. tostring(id)
-    function st:hash()
-      return hash_value
-    end
 
     if std.config["debug"] then
       function st.metamethods.__typename(st)
@@ -2663,11 +2688,6 @@ do
 
     local id = next_region_id
     next_region_id = next_region_id + 1
-
-    local hash_value = "__region_#" .. tostring(id)
-    function st:hash()
-      return hash_value
-    end
 
     if std.config["debug"] then
       function st.metamethods.__typename(st)
@@ -2826,11 +2846,6 @@ do
     local id = next_partition_id
     next_partition_id = next_partition_id + 1
 
-    local hash_value = "__partition_#" .. tostring(id)
-    function st:hash()
-      return hash_value
-    end
-
     if std.config["debug"] then
       function st.metamethods.__typename(st)
         if st:colors():is_opaque() then
@@ -2863,7 +2878,7 @@ function std.cross_product(...)
            "Cross product type requires argument " .. tostring(i) .. " to be a symbol")
     if terralib.types.istype(partition_symbol:gettype()) then
       assert(std.is_partition(partition_symbol:gettype()),
-             "Cross prodcut type requires argument " .. tostring(i) .. " to be a partition")
+             "Cross product type requires argument " .. tostring(i) .. " to be a partition")
     end
   end
 
@@ -2892,6 +2907,10 @@ function std.cross_product(...)
 
   function st:partition(i)
     return self:partitions()[i or 1]
+  end
+
+  function st:colors()
+    return self:partition():colors()
   end
 
   function st:fspace()
@@ -2973,11 +2992,6 @@ function std.cross_product(...)
   local id = next_cross_product_id
   next_cross_product_id = next_cross_product_id + 1
 
-  local hash_value = "__cross_product_#" .. tostring(id)
-  function st:hash()
-    return hash_value
-  end
-
   function st.metamethods.__typename(st)
     return "cross_product(" .. st.partition_symbols:mkstring(", ") .. ")"
   end
@@ -2987,7 +3001,7 @@ end
 end
 
 
-std.vptr = terralib.memoize(function(width, points_to_type, ...)
+std.vptr = data.weak_memoize(function(width, points_to_type, ...)
   local bounds = data.newtuple(...)
 
   local vec = vector(int64, width)
@@ -3028,23 +3042,22 @@ std.vptr = terralib.memoize(function(width, points_to_type, ...)
   st.impl_type = legion_vptr_t
   st.vec_type = vec
 
-  function st:bounds()
+  function st:bounds(node)
     local bounds = terralib.newlist()
     for i, region_symbol in ipairs(self.bounds_symbols) do
       local region = region_symbol:gettype()
       if not (terralib.types.istype(region) and std.is_region(region)) then
-        --report.error(nil, "vptr expected a region as argument " .. tostring(i+1) ..
-        --            ", got " .. tostring(region.type))
-        return nil, "vptr expected a region as argument " .. tostring(i+1) ..
-                    ", got " .. tostring(region.type)
+        local message = "vptr expected a region as argument " .. tostring(i+1) ..
+          ", got " .. tostring(region.type)
+        if node then report.error(node, message) end
+        assert(false, message)
       end
       if not std.type_eq(region.fspace_type, points_to_type) then
-        --report.error(nil, "vptr expected region(" .. tostring(points_to_type) ..
-        --            ") as argument " .. tostring(i+1) ..
-        --            ", got " .. tostring(region))
-        return nil, "vptr expected region(" .. tostring(points_to_type) ..
-                    ") as argument " .. tostring(i+1) ..
-                    ", got " .. tostring(region)
+        local message = "vptr expected region(" .. tostring(points_to_type) ..
+          ") as argument " .. tostring(i+1) ..
+          ", got " .. tostring(region)
+        if node then report.error(node, message) end
+        assert(false, message)
       end
       bounds:insert(region)
     end
@@ -3066,7 +3079,7 @@ std.vptr = terralib.memoize(function(width, points_to_type, ...)
   return st
 end)
 
-std.sov = terralib.memoize(function(struct_type, width)
+std.sov = data.weak_memoize(function(struct_type, width)
   -- Sanity check that referee type is not a ref.
   assert(not std.is_ref(struct_type))
   assert(not std.is_rawref(struct_type))
@@ -3081,7 +3094,7 @@ std.sov = terralib.memoize(function(struct_type, width)
 
   local st = terralib.types.newstruct("sov")
   st.entries = terralib.newlist()
-  for _, entry in pairs(struct_type:getentries()) do
+  for _, entry in ipairs(struct_type:getentries()) do
     local entry_field = entry[1] or entry.field
     local entry_type = entry[2] or entry.type
     if entry_type:isprimitive() then
@@ -3111,7 +3124,7 @@ end)
 -- different from ptr in that it is not intended to be used by code;
 -- it exists mainly to facilitate field-sensitive privilege checks in
 -- the type system.
-std.ref = terralib.memoize(function(pointer_type, ...)
+std.ref = data.weak_memoize(function(pointer_type, ...)
   if not terralib.types.istype(pointer_type) then
     error("ref expected a type as argument 1, got " .. tostring(pointer_type))
   end
@@ -3130,8 +3143,8 @@ std.ref = terralib.memoize(function(pointer_type, ...)
   st.bounds_symbols = pointer_type.bounds_symbols
   st.field_path = data.newtuple(...)
 
-  function st:bounds()
-    return self.pointer_type:bounds()
+  function st:bounds(node)
+    return self.pointer_type:bounds(node)
   end
 
   if std.config["debug"] then
@@ -3151,7 +3164,7 @@ std.ref = terralib.memoize(function(pointer_type, ...)
   return st
 end)
 
-std.rawref = terralib.memoize(function(pointer_type)
+std.rawref = data.weak_memoize(function(pointer_type)
   if not terralib.types.istype(pointer_type) then
     error("rawref expected a type as argument 1, got " .. tostring(pointer_type))
   end
@@ -3174,7 +3187,7 @@ std.rawref = terralib.memoize(function(pointer_type)
   return st
 end)
 
-std.future = terralib.memoize(function(result_type)
+std.future = data.weak_memoize(function(result_type)
   if not terralib.types.istype(result_type) then
     error("future expected a type as argument 1, got " .. tostring(result_type))
   end
@@ -3198,7 +3211,7 @@ end)
 
 do
 local next_list_id = 1
-std.list = terralib.memoize(function(element_type, partition_type, privilege_depth, region_root, shallow, barrier_depth)
+std.list = data.weak_memoize(function(element_type, partition_type, privilege_depth, region_root, shallow, barrier_depth)
   if not terralib.types.istype(element_type) then
     error("list expected a type as argument 1, got " .. tostring(element_type))
   end
@@ -3350,11 +3363,6 @@ std.list = terralib.memoize(function(element_type, partition_type, privilege_dep
   local id = next_list_id
   next_list_id = next_list_id + 1
 
-  local hash_value = "__list_#" .. tostring(id)
-  function st:hash()
-    return hash_value
-  end
-
   function st:force_cast(from, to, expr)
     assert(std.is_list_of_regions(from) and std.is_list_of_regions(to))
     -- FIXME: This would result in memory corruption if we ever freed
@@ -3381,6 +3389,70 @@ std.list = terralib.memoize(function(element_type, partition_type, privilege_dep
     end
   end
 
+  function st:__compute_serialized_size(value_type, value)
+    local result = terralib.newsymbol(c.size_t, "result")
+    local element_type = value_type.element_type
+    local element = terralib.newsymbol(&element_type)
+
+    local size_actions, size_value = std.compute_serialized_size_inner(
+      element_type, `(@element))
+    local actions = quote
+      var [result] = 0
+      for i = 0, [value].__size do
+        var [element] = ([&element_type]([value].__data)) + i
+        [size_actions]
+        [result] = [result] + terralib.sizeof(element_type) + [size_value]
+      end
+    end
+    return actions, result
+  end
+
+  function st:__serialize(value_type, value, fixed_ptr, data_ptr)
+    local actions = std.serialize_simple(value_type, value, fixed_ptr, data_ptr)
+
+    local element_type = value_type.element_type
+    local element = terralib.newsymbol(element_type)
+    local element_ptr = terralib.newsymbol(&element_type)
+
+    local ser_actions = std.serialize_inner(
+      element_type, element, element_ptr, data_ptr)
+    return quote
+      [actions]
+      for i = 0, [value].__size do
+        var [element] = ([&element_type]([value].__data))[i]
+        var [element_ptr] = [&element_type](@[data_ptr])
+        @[data_ptr] = @[data_ptr] + terralib.sizeof(element_type)
+        [ser_actions]
+      end
+    end
+  end
+
+  function st:__deserialize(value_type, fixed_ptr, data_ptr)
+    local result = terralib.newsymbol(value_type, "result")
+    local actions = quote
+      var [result] = [std.deserialize_simple(value_type, fixed_ptr, data_ptr)]
+    end
+
+    local element_type = value_type.element_type
+    local element_ptr = terralib.newsymbol(&element_type)
+
+    local deser_actions, deser_value = std.deserialize_inner(
+      element_type, element_ptr, data_ptr)
+    actions = quote
+      [actions]
+      [result].__data = c.malloc(
+        terralib.sizeof(element_type) * [result].__size)
+      std.assert([result].__data ~= nil, "malloc failed in deserialize")
+      for i = 0, [result].__size do
+        var [element_ptr] = [&element_type](@[data_ptr])
+        @[data_ptr] = @[data_ptr] + terralib.sizeof(element_type)
+        [deser_actions]
+        ([&element_type]([result].__data))[i] = [deser_value]
+      end
+    end
+    return actions, result
+  end
+
   return st
 end)
 end
@@ -3400,7 +3472,7 @@ do
   end
 end
 
-std.dynamic_collective = terralib.memoize(function(result_type)
+std.dynamic_collective = data.weak_memoize(function(result_type)
   if not terralib.types.istype(result_type) then
     error("dynamic_collective expected a type as argument 1, got " .. tostring(result_type))
   end
@@ -3421,7 +3493,7 @@ std.dynamic_collective = terralib.memoize(function(result_type)
   return st
 end)
 
-std.array = terralib.memoize(function(elem_type, N)
+std.array = data.weak_memoize(function(elem_type, N)
   if not (terralib.types.istype(elem_type) and elem_type:isprimitive()) then
     error("array expected a primitive type as argument 1, got " .. tostring(elem_type))
   end
@@ -3557,6 +3629,27 @@ do
     end
     assert(false)
   end
+
+  function st:__compute_serialized_size(value_type, value)
+    return quote end, `(c.strlen([rawstring](value)) + 1)
+  end
+
+  function st:__serialize(value_type, value, fixed_ptr, data_ptr)
+    return quote
+      c.strcpy([rawstring](@[data_ptr]), [rawstring]([value]))
+      @[data_ptr] = @[data_ptr] + c.strlen([rawstring]([value])) + 1
+    end
+  end
+
+  function st:__deserialize(value_type, fixed_ptr, data_ptr)
+    local result = terralib.newsymbol(value_type, "result")
+    local actions = quote
+      var [result] = c.strdup([rawstring](@[data_ptr]))
+      @[data_ptr] = @[data_ptr] + c.strlen([rawstring]([result])) + 1
+    end
+    return actions, result
+  end
+
   std.string = st
 end
 
@@ -3617,7 +3710,7 @@ end
 local fspace = {}
 fspace.__index = fspace
 
-fspace.__call = terralib.memoize(function(fs, ...)
+fspace.__call = data.weak_memoize(function(fs, ...)
   -- Do NOT attempt to access fs.params or fs.fields; they are not ready yet.
 
   local args = data.newtuple(...)
@@ -3727,7 +3820,7 @@ local function make_ordering_constraint(layout, dim)
   -- SOA, Fortran array order
   local dims = terralib.newsymbol(c.legion_dimension_kind_t[dim+1], "dims")
   result:insert(quote var [dims] end)
-  for k, dim in pairs(data.take(dim, std.layout.spatial_dims)) do
+  for k, dim in ipairs(data.take(dim, std.layout.spatial_dims)) do
     result:insert(quote dims[ [k-1] ] = [dim.index] end)
   end
   result:insert(quote dims[ [dim] ] = c.DIM_F end)
@@ -3815,7 +3908,7 @@ local function make_ordering_constraint_from_annotation(layout, dimensions)
 end
 
 -- TODO: Field IDs should really be dynamic
-local generate_static_field_ids = terralib.memoize(function(region_type)
+local generate_static_field_ids = data.weak_memoize(function(region_type)
   local field_ids = data.newmap()
   -- XXX: The following code must be consisten with 'codegen.expr_region'
   local field_paths, field_types = std.flatten_struct_fields(region_type:fspace())
@@ -4196,16 +4289,16 @@ function std.setup(main_task, extra_setup_thunk, task_wrappers, registration_nam
       end
     end)
   local cuda_setup = quote end
-  if std.config["cuda"] and cudahelper.check_cuda_available() then
-    cudahelper.link_driver_library()
+  if gpuhelper.check_gpu_available() then
+    gpuhelper.link_driver_library()
     local all_kernels = terralib.newlist()
     variants:map(function(variant)
       if variant:is_cuda() then
         all_kernels:insertall(variant:get_cuda_kernels())
       end
     end)
-    all_kernels:insertall(cudahelper.get_internal_kernels())
-    cuda_setup = cudahelper.jit_compile_kernels_and_register(all_kernels)
+    all_kernels:insertall(gpuhelper.get_internal_kernels())
+    cuda_setup = gpuhelper.jit_compile_kernels_and_register(all_kernels)
   end
 
   local extra_setup = quote end
@@ -4378,7 +4471,7 @@ local function incremental_compile_tasks()
       -- Save to a temporary file first. This is important to avoid race
       -- conditions in case multiple compilations are proceeding concurrently.
       local objtmp = os.tmpname()
-      terralib.saveobj(objtmp, "object", exports)
+      terralib.saveobj(objtmp, "object", exports, nil, nil, base.opt_profile)
 
       -- Now attempt to move the object file into place. Note: This is atomic,
       -- so we don't need to worry about races.
@@ -4468,7 +4561,7 @@ local function compile_tasks_in_parallel(issave)
         exports[variant:wrapper_name()] = variant:make_wrapper()
 
         profile('compile', variant, function()
-          terralib.saveobj(filename, 'object', exports)
+          terralib.saveobj(filename, 'object', exports, nil, nil, base.opt_profile)
         end)()
       end
       slave2master:close_write_end()
@@ -4649,31 +4742,34 @@ function std.saveobj(main_task, filename, filetype, extra_setup_thunk, link_flag
   end
   if link_flags then flags:insertall(link_flags) end
   if os.getenv('CRAYPE_VERSION') then
-    for flag in os.getenv('CRAY_UGNI_POST_LINK_OPTS'):gmatch("%S+") do
-      flags:insert(flag)
+    local ugni_link_opts = os.getenv('CRAY_UGNI_POST_LINK_OPTS')
+    if ugni_link_opts then
+      for flag in ugni_link_opts:gmatch("%S+") do
+        flags:insert(flag)
+      end
+      flags:insert("-lugni")
     end
-    flags:insert("-lugni")
-    for flag in os.getenv('CRAY_UDREG_POST_LINK_OPTS'):gmatch("%S+") do
-      flags:insert(flag)
+    local udreg_link_opts = os.getenv('CRAY_UDREG_POST_LINK_OPTS')
+    if udreg_link_opts then
+      for flag in udreg_link_opts:gmatch("%S+") do
+        flags:insert(flag)
+      end
+      flags:insert("-ludreg")
     end
-    flags:insert("-ludreg")
-    for flag in os.getenv('CRAY_XPMEM_POST_LINK_OPTS'):gmatch("%S+") do
-      flags:insert(flag)
+    local xpmem_link_opts = os.getenv('CRAY_XPMEM_POST_LINK_OPTS')
+    if xpmem_link_opts then
+      for flag in xpmem_link_opts:gmatch("%S+") do
+        flags:insert(flag)
+      end
+      flags:insert("-lxpmem")
     end
-    flags:insert("-lxpmem")
   end
   flags:insertall({"-L" .. lib_dir, "-lregent"})
   if use_cmake then
     flags:insertall({"-llegion", "-lrealm"})
   end
-  -- If the hijack is turned off, we need extra dependencies to link
-  -- the generated CUDA code correctly
-  if std.config["cuda"] and cudahelper.check_cuda_available() and base.c.REGENT_USE_HIJACK == 0 then
-    flags:insertall({
-      "-L" .. terralib.cudahome .. "/lib64", "-lcudart",
-      "-L" .. terralib.cudahome .. "/lib64/stubs", "-lcuda",
-      "-lpthread", "-lrt"
-    })
+  if gpuhelper.check_gpu_available() then
+    flags:insertall(gpuhelper.driver_library_link_flags())
   end
 
   profile('compile', nil, function()
@@ -4682,7 +4778,7 @@ function std.saveobj(main_task, filename, filetype, extra_setup_thunk, link_flag
       -- that was compiled on different processes, so we have to combine all
       -- the object files manually.
       local mainobj = os.tmpname()
-      terralib.saveobj(mainobj, 'object', names)
+      terralib.saveobj(mainobj, 'object', names, nil, nil, base.opt_profile)
       local cmd = os.getenv('CXX') or 'c++'
       cmd = cmd .. ' -Wl,-r'
       cmd = cmd .. ' ' .. mainobj
@@ -4693,14 +4789,14 @@ function std.saveobj(main_task, filename, filetype, extra_setup_thunk, link_flag
       cmd = cmd .. ' -nostdlib'
       assert(os.execute(cmd) == 0)
     else
-      terralib.saveobj(filename, filetype, names, flags)
+      terralib.saveobj(filename, filetype, names, flags, nil, base.opt_profile)
     end
   end)()
   profile.print_summary()
 end
 
 local function generate_task_interfaces(task_whitelist, need_launcher)
-  local tasks = {}
+  local tasks = data.newmap()
   for _, variant in ipairs(variants) do
     if task_whitelist and data.find_key(task_whitelist, variant.task) then
       tasks[variant.task] = true
@@ -4711,8 +4807,8 @@ local function generate_task_interfaces(task_whitelist, need_launcher)
 
   local task_c_iface = terralib.newlist()
   local task_cxx_iface = terralib.newlist()
-  local task_impl = {}
-  for task, _ in pairs(tasks) do
+  local task_impl = data.newmap()
+  for _, task in tasks:keys() do
     if need_launcher then
       task_c_iface:insert(header_helper.generate_task_c_interface(task))
       task_cxx_iface:insert(header_helper.generate_task_cxx_interface(task))
@@ -4811,7 +4907,7 @@ function std.save_tasks(header_filename, filename, filetype, link_flags, registr
   end
 
   -- Export task interface implementations
-  for k, v in pairs(task_impl) do
+  for k, v in task_impl:items() do
     names[k] = v
   end
 
@@ -4823,9 +4919,9 @@ function std.save_tasks(header_filename, filename, filetype, link_flags, registr
   end
   profile('compile', nil, function()
     if filetype ~= nil then
-      terralib.saveobj(filename, filetype, names, flags)
+      terralib.saveobj(filename, filetype, names, flags, nil, base.opt_profile)
     else
-      terralib.saveobj(filename, names, flags)
+      terralib.saveobj(filename, names, flags, nil, base.opt_profile)
     end
   end)()
   profile.print_summary()
@@ -4849,7 +4945,7 @@ do
   end
 
   local function math_binary_op_factory(fname)
-    return terralib.memoize(function(arg_type)
+    return data.weak_memoize(function(arg_type)
       assert(arg_type:isvector())
       assert((arg_type.type == float and 4 <= arg_type.N and arg_type.N <= 8) or
              (arg_type.type == double and 2 <= arg_type.N and arg_type.N <= 4))
@@ -4861,7 +4957,7 @@ do
   end
 
   local supported_math_binary_ops = { "min", "max", }
-  for _, fname in pairs(supported_math_binary_ops) do
+  for _, fname in ipairs(supported_math_binary_ops) do
     std["v" .. fname] = math_binary_op_factory(fname)
   end
 end
@@ -4872,7 +4968,7 @@ end
 
 std.layout = {}
 std.layout.spatial_dims = terralib.newlist()
-std.layout.spatial_dims_map = {}
+std.layout.spatial_dims_map = data.newmap()
 do
   for k, name in ipairs(data.take(max_dim, std.dim_names)) do
     local regent_name = "dim" .. name
@@ -4906,7 +5002,7 @@ function std.layout.make_index_ordering_from_constraint(constraint)
   return ordering
 end
 
-std.layout.default_layout = terralib.memoize(function(index_type)
+std.layout.default_layout = data.weak_memoize(function(index_type)
   local dimensions = data.take(index_type.dim, std.layout.spatial_dims)
   dimensions:insert(std.layout.dimf)
   return std.layout.ordering_constraint(dimensions)

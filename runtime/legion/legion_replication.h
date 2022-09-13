@@ -78,6 +78,12 @@ namespace Legion {
     };
 #endif
 
+    struct SelectShardingFunctorOutput :
+      public Mapper::SelectShardingFunctorOutput {
+      inline SelectShardingFunctorOutput(void)
+        { chosen_functor = UINT_MAX; slice_recurse = true; }
+    };
+
     /**
      * \class ShardCollective
      * The shard collective is the base class for performing
@@ -139,6 +145,7 @@ namespace Legion {
       virtual void perform_collective_async(RtEvent pre = RtEvent::NO_RT_EVENT);
       virtual RtEvent perform_collective_wait(bool block = true);
       virtual void handle_collective_message(Deserializer &derez);
+      virtual RtEvent post_broadcast(void) { return RtEvent::NO_RT_EVENT; }
     public:
       RtEvent get_done_event(void) const;
       inline bool is_origin(void) const
@@ -172,7 +179,9 @@ namespace Legion {
       // Make sure to call this in the destructor of anything not the target
       virtual RtEvent perform_collective_wait(bool block = true);
       virtual void handle_collective_message(Deserializer &derez);
+      virtual RtEvent post_gather(void) { return RtEvent::NO_RT_EVENT; }
       inline bool is_target(void) const { return (target == local_shard); }
+      inline RtEvent get_done_event(void) const { return done_event; }
       // Use this method in case we don't actually end up using the collective
       void elide_collective(void);
     protected:
@@ -464,24 +473,20 @@ namespace Legion {
      * all the other shards have reached a certain point in the 
      * execution of the program.
      */
-    class ShardSyncTree : public BroadcastCollective {
+    class ShardSyncTree : public GatherCollective {
     public:
       ShardSyncTree(ReplicateContext *ctx, ShardID origin, 
                     CollectiveIndexLocation loc);
-      ShardSyncTree(const ShardSyncTree &rhs) 
-        : BroadcastCollective(rhs), is_origin(false) 
-        { assert(false); }
+      ShardSyncTree(const ShardSyncTree &rhs) = delete;
       virtual ~ShardSyncTree(void);
     public:
-      ShardSyncTree& operator=(const ShardSyncTree &rhs) 
-        { assert(false); return *this; }
+      ShardSyncTree& operator=(const ShardSyncTree &rhs) = delete; 
     public:
       virtual void pack_collective(Serializer &rez) const;
       virtual void unpack_collective(Deserializer &derez);
+      virtual RtEvent post_gather(void);
     protected:
-      RtUserEvent done_event;
-      mutable std::set<RtEvent> done_preconditions;
-      const bool is_origin;
+      std::vector<RtEvent> postconditions;
     };
 
     /**
@@ -494,23 +499,19 @@ namespace Legion {
     public:
       ShardEventTree(ReplicateContext *ctx, ShardID origin, 
                      CollectiveID id);
-      ShardEventTree(const ShardEventTree &rhs) 
-        : BroadcastCollective(rhs), is_origin(false) { assert(false); }
+      ShardEventTree(const ShardEventTree &rhs) = delete; 
       virtual ~ShardEventTree(void);
     public:
-      ShardEventTree& operator=(const ShardEventTree &rhs) 
-        { assert(false); return *this; }
+      ShardEventTree& operator=(const ShardEventTree &rhs) = delete; 
     public:
       void signal_tree(RtEvent precondition); // origin
       RtEvent get_local_event(void);
     public:
       virtual void pack_collective(Serializer &rez) const;
       virtual void unpack_collective(Deserializer &derez);
+      virtual RtEvent post_broadcast(void) { return postcondition; }
     protected:
-      RtUserEvent local_event;
-      RtEvent trigger_event;
-      RtEvent finished_event;
-      const bool is_origin;
+      RtEvent precondition, postcondition;
     };
 
     /**
@@ -522,12 +523,10 @@ namespace Legion {
     public:
       SingleTaskTree(ReplicateContext *ctx, ShardID origin, 
                      CollectiveID id, FutureImpl *impl);
-      SingleTaskTree(const SingleTaskTree &rhs)
-        : ShardEventTree(rhs), future(NULL) { assert(false); }
+      SingleTaskTree(const SingleTaskTree &rhs) = delete;
       virtual ~SingleTaskTree(void);
     public:
-      SingleTaskTree & operator=(const SingleTaskTree &rhs) 
-        { assert(false); return *this; }
+      SingleTaskTree & operator=(const SingleTaskTree &rhs) = delete;
     public:
       void broadcast_future_size(RtEvent precondition, 
           size_t future_size, bool has_size);
@@ -591,45 +590,25 @@ namespace Legion {
      * A class for doing an all-gather of indirect records for 
      * doing gather/scatter/full-indirect copy operations.
      */
-    class IndirectRecordExchange : public AllGatherCollective<false> {
-    public:
-      struct IndirectKey {
-      public:
-        IndirectKey(void) { }
-        IndirectKey(PhysicalInstance i, const Domain &d)
-          : inst(i), domain(d) { }
-      public:
-        inline bool operator<(const IndirectKey &rhs) const 
-        {
-          if (inst.id < rhs.inst.id)
-            return true;
-          if (inst.id > rhs.inst.id)
-            return false;
-          return (domain < rhs.domain);
-        }
-        inline bool operator==(const IndirectKey &rhs) const
-        {
-          if (inst.id != rhs.inst.id)
-            return false;
-          return (domain == rhs.domain);
-        }
-      public:
-        PhysicalInstance inst;
-        Domain domain;
-      };
+    class IndirectRecordExchange : public AllGatherCollective<true> {
     public:
       IndirectRecordExchange(ReplicateContext *ctx, CollectiveID id);
-      IndirectRecordExchange(const IndirectRecordExchange &rhs);
+      IndirectRecordExchange(const IndirectRecordExchange &rhs) = delete;
       virtual ~IndirectRecordExchange(void);
     public:
-      IndirectRecordExchange& operator=(const IndirectRecordExchange &rhs);
+      IndirectRecordExchange& operator=(
+          const IndirectRecordExchange &rhs) = delete;
     public:
-      void exchange_records(LegionVector<IndirectRecord> &records);
+      RtEvent exchange_records(
+          std::vector<std::vector<IndirectRecord>*> &targets,
+          std::vector<IndirectRecord> &local_records);
     public:
       virtual void pack_collective_stage(Serializer &rez, int stage);
       virtual void unpack_collective_stage(Deserializer &derez, int stage);
+      virtual RtEvent post_complete_exchange(void);
     protected:
-      LegionMap<IndirectKey,FieldMask> records;
+      std::vector<std::vector<IndirectRecord>*> local_targets;
+      std::vector<IndirectRecord> all_records;
     };
     
     /**
@@ -1000,8 +979,6 @@ namespace Legion {
           const std::map<T,unsigned> &final_counts,
           const std::map<T,OP*> &ops, std::vector<Operation*> &ready_ops);
     protected:
-      int current_stage;
-    protected:
       std::map<IndexSpace,unsigned> index_space_counts;
       std::map<IndexPartition,unsigned> index_partition_counts;
       std::map<FieldSpace,unsigned> field_space_counts;
@@ -1107,7 +1084,7 @@ namespace Legion {
      */
     class OutputSizeExchange : public AllGatherCollective<false> {
     public:
-      typedef std::map<DomainPoint,size_t> SizeMap;
+      typedef std::map<DomainPoint,DomainPoint> SizeMap;
     public:
       OutputSizeExchange(ReplicateContext *ctx,
                          CollectiveIndexLocation loc,
@@ -1403,7 +1380,7 @@ namespace Legion {
       OutputSizeExchange *output_size_collective;
     protected:
       // Map of output sizes collected by this shard
-      std::map<unsigned,std::map<DomainPoint,size_t> > local_output_sizes;
+      std::map<unsigned,SizeMap> local_output_sizes;
     protected:
       std::set<std::pair<DomainPoint,ShardID> > unique_intra_space_deps;
 #ifdef DEBUG_LEGION
@@ -1413,6 +1390,8 @@ namespace Legion {
     protected:
       ShardingGatherCollective *sharding_collective;
 #endif
+    protected:
+      bool slice_sharding_output;
     };
 
     /**
@@ -1588,7 +1567,7 @@ namespace Legion {
       ShardingFunction *sharding_function;
     public:
       CollectiveID mapped_collective_id;
-      ShardEventTree *mapped_collective;
+      ShardEventTree *mapped_collective; 
 #ifdef DEBUG_LEGION
     public:
       inline void set_sharding_collective(ShardingGatherCollective *collective)
@@ -1619,12 +1598,19 @@ namespace Legion {
       virtual void trigger_ready(void);
       virtual void trigger_replay(void);
       virtual void resolve_false(bool speculated, bool launched);
-      virtual std::pair<ApEvent,ApEvent> exchange_indirect_records(
-          const unsigned index, const ApEvent local_pre,
-          const ApEvent local_post, const PhysicalTraceInfo &trace_info,
-          const InstanceSet &instances, const IndexSpace space,
+      virtual RtEvent exchange_indirect_records(
+          const unsigned index, const ApEvent local_pre, 
+          const ApEvent local_post, ApEvent &collective_pre,
+          ApEvent &collective_post, const TraceInfo &trace_info,
+          const InstanceSet &instances, const RegionRequirement &req,
           const DomainPoint &key,
-          LegionVector<IndirectRecord> &records, const bool sources);
+          std::vector<IndirectRecord> &records, const bool sources);
+      virtual RtEvent finalize_exchange(const unsigned index,const bool source);
+    public:
+      virtual RtEvent find_intra_space_dependence(const DomainPoint &point);
+      virtual void record_intra_space_dependence(const DomainPoint &point,
+                                                 const DomainPoint &next,
+                                                 RtEvent point_mapped);
     public:
       void initialize_replication(ReplicateContext *ctx,
                                   std::vector<ApBarrier> &indirection_bars,
@@ -1634,8 +1620,9 @@ namespace Legion {
       ShardingFunction *sharding_function;
       std::vector<ApBarrier> pre_indirection_barriers;
       std::vector<ApBarrier> post_indirection_barriers;
-      std::vector<CollectiveID> src_collectives;
-      std::vector<CollectiveID> dst_collectives;
+      std::vector<IndirectRecordExchange*> src_collectives;
+      std::vector<IndirectRecordExchange*> dst_collectives;
+      std::set<std::pair<DomainPoint,ShardID> > unique_intra_space_deps;
 #ifdef DEBUG_LEGION
     public:
       inline void set_sharding_collective(ShardingGatherCollective *collective)
@@ -1702,9 +1689,8 @@ namespace Legion {
       virtual void activate(void);
       virtual void deactivate(void);
     public:
-      virtual void request_future_buffers(std::set<RtEvent> &mapped_events,
-                                          std::set<RtEvent> &ready_events);
-      virtual void trigger_complete(void);
+      virtual void populate_sources(const FutureMap &fm);
+      virtual void trigger_execution(void);
     };
 
     /**
@@ -1814,7 +1800,8 @@ namespace Legion {
       void initialize_by_field(ReplicateContext *ctx, ShardID target,
                                ApEvent ready_event, IndexPartition pid,
                                LogicalRegion handle, LogicalRegion parent,
-                               FieldID fid, MapperID id, MappingTagID tag,
+                               IndexSpace color_space, FieldID fid, 
+                               MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
                                RtBarrier &dependent_partition_bar);
       void initialize_by_image(ReplicateContext *ctx,
@@ -1822,7 +1809,7 @@ namespace Legion {
                                ShardID target,
 #endif
                                ApEvent ready_event, IndexPartition pid,
-                               LogicalPartition projection,
+                               IndexSpace handle, LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
@@ -1833,7 +1820,7 @@ namespace Legion {
                                ShardID target,
 #endif
                                ApEvent ready_event, IndexPartition pid,
-                               LogicalPartition projection,
+                               IndexSpace handle, LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
@@ -1962,7 +1949,7 @@ namespace Legion {
       virtual void deactivate(void);
     public:
       virtual void trigger_mapping(void);
-      virtual void deferred_execute(void);
+      virtual void trigger_execution(void);
     public:
       inline void set_timing_collective(ValueBroadcast<long long> *collective) 
         { timing_collective = collective; }
@@ -2210,8 +2197,7 @@ namespace Legion {
       virtual void execute_dependence_analysis(void);
       virtual void sync_for_replayable_check(void);
       virtual bool exchange_replayable(ReplicateContext *ctx, bool replayable);
-      virtual void elide_fences_pre_sync(void);
-      virtual void elide_fences_post_sync(void);
+      virtual void sync_compute_frontiers(RtEvent precondition);
     protected:
       LegionTrace *local_trace;
     };
@@ -2242,15 +2228,13 @@ namespace Legion {
       virtual void trigger_mapping(void);
       virtual void sync_for_replayable_check(void);
       virtual bool exchange_replayable(ReplicateContext *ctx, bool replayable);
-      virtual void elide_fences_pre_sync(void);
-      virtual void elide_fences_post_sync(void);
+      virtual void sync_compute_frontiers(RtEvent precondition);
     protected:
       PhysicalTemplate *current_template;
       RtBarrier recording_fence;
       CollectiveID replayable_collective_id;
       CollectiveID replay_sync_collective_id;
-      CollectiveID pre_elide_fences_collective_id;
-      CollectiveID post_elide_fences_collective_id;
+      CollectiveID sync_compute_frontiers_collective_id;
       bool has_blocking_call;
       bool remove_trace_reference;
       bool is_recording;
@@ -2281,16 +2265,14 @@ namespace Legion {
       virtual void trigger_mapping(void);
       virtual void sync_for_replayable_check(void);
       virtual bool exchange_replayable(ReplicateContext *ctx, bool replayable);
-      virtual void elide_fences_pre_sync(void);
-      virtual void elide_fences_post_sync(void);
+      virtual void sync_compute_frontiers(RtEvent precondition);
     protected:
       PhysicalTemplate *current_template;
       ApEvent template_completion;
       RtBarrier recording_fence;
       CollectiveID replayable_collective_id;
       CollectiveID replay_sync_collective_id;
-      CollectiveID pre_elide_fences_collective_id;
-      CollectiveID post_elide_fences_collective_id;
+      CollectiveID sync_compute_frontiers_collective_id;
       bool replayed;
       bool has_blocking_call;
       bool is_recording;
@@ -2433,6 +2415,7 @@ namespace Legion {
                         std::vector<AddressSpaceID> &children) const;
       inline bool contains(const AddressSpaceID space) const
         { return unique_sorted_spaces.contains(space); }
+      AddressSpaceID find_nearest(AddressSpaceID space) const;
     public:
       void pack(Serializer &rez) const;
     protected:
@@ -2492,13 +2475,17 @@ namespace Legion {
       };
     public:
       ShardManager(Runtime *rt, ReplicationID repl_id, 
-                   bool control, bool top, size_t total_shards,
+                   bool control, bool top, bool isomorphic_points,
+                   const Domain &shard_domain,
+                   std::vector<DomainPoint> &&shard_points,
+                   std::vector<DomainPoint> &&sorted_points,
+                   std::vector<ShardID> &&shard_lookup,
                    AddressSpaceID owner_space, SingleTask *original = NULL,
                    RtBarrier shard_task_barrier = RtBarrier::NO_RT_BARRIER);
-      ShardManager(const ShardManager &rhs);
+      ShardManager(const ShardManager &rhs) = delete;
       ~ShardManager(void);
     public:
-      ShardManager& operator=(const ShardManager &rhs);
+      ShardManager& operator=(const ShardManager &rhs) = delete;
     public:
       inline RtBarrier get_shard_task_barrier(void) const
         { return shard_task_barrier; }
@@ -2561,6 +2548,8 @@ namespace Legion {
         { return (local_shards[0] == task); }
       inline const std::set<AddressSpace>& get_unique_shard_spaces(void) const
         { return unique_shard_spaces; }
+      inline ReplicateContext* find_local_context(void) const
+        { return local_shards[0]->get_shard_execution_context(); }
     public:
       void set_shard_mapping(const std::vector<Processor> &shard_mapping);
       void set_address_spaces(const std::vector<AddressSpaceID> &spaces);
@@ -2616,6 +2605,14 @@ namespace Legion {
       void send_trace_event_response(ShardedPhysicalTemplate *physical_template,
                           AddressSpaceID template_source, ApEvent event,
                           ApBarrier result, RtUserEvent done_event);
+      void send_trace_frontier_request(ShardedPhysicalTemplate *physical_template,
+                          ShardID shard_source, AddressSpaceID template_source, 
+                          size_t template_index, ApEvent event, 
+                          AddressSpaceID event_space, unsigned frontier,
+                          RtUserEvent done_event);
+      void send_trace_frontier_response(ShardedPhysicalTemplate *physical_template,
+                          AddressSpaceID template_source, unsigned frontier,
+                          ApBarrier result, RtUserEvent done_event);
       void send_trace_update(ShardID target, Serializer &rez);
       void handle_trace_update(Deserializer &derez, AddressSpaceID source);
     public:
@@ -2631,9 +2628,6 @@ namespace Legion {
       static void handle_trigger_commit(Deserializer &derez, Runtime *rt);
       static void handle_collective_message(Deserializer &derez, Runtime *rt);
       static void handle_future_map_request(Deserializer &derez, Runtime *rt);
-      static void handle_top_view_request(Deserializer &derez, Runtime *rt,
-                                          AddressSpaceID request_source);
-      static void handle_top_view_response(Deserializer &derez, Runtime *rt);
       static void handle_disjoint_complete_request(Deserializer &derez, 
                                                    Runtime *rt);
       static void handle_intra_space_dependence(Deserializer &derez, 
@@ -2642,31 +2636,36 @@ namespace Legion {
       static void handle_trace_event_request(Deserializer &derez, Runtime *rt,
                                              AddressSpaceID request_source);
       static void handle_trace_event_response(Deserializer &derez);
+      static void handle_trace_frontier_request(Deserializer &derez,Runtime *rt,
+                                                AddressSpaceID request_source);
+      static void handle_trace_frontier_response(Deserializer &derez);
       static void handle_trace_update(Deserializer &derez, Runtime *rt,
                                       AddressSpaceID source);
       static void handle_barrier_refresh(Deserializer &derez, Runtime *rt);
     public:
       ShardingFunction* find_sharding_function(ShardingID sid);
     public:
-      void create_instance_top_view(PhysicalManager *manager, 
-                                    AddressSpaceID source, 
-                                    ReplicateContext *request_context,
-                                    AddressSpaceID request_source,
-                                    bool handle_now = false);
 #ifdef LEGION_USE_LIBDL
       void perform_global_registration_callbacks(
-                     Realm::DSOReferenceImplementation *dso, RtEvent local_done,
-                     RtEvent global_done, std::set<RtEvent> &preconditions);
+                     Realm::DSOReferenceImplementation *dso, const void *buffer,
+                     size_t buffer_size, bool withargs, size_t dedup_tag,
+                     RtEvent local_done, RtEvent global_done,
+                     std::set<RtEvent> &preconditions);
 #endif
       bool perform_semantic_attach(void);
     public:
       Runtime *const runtime;
       const ReplicationID repl_id;
       const AddressSpaceID owner_space;
+      const std::vector<DomainPoint> shard_points;
+      const std::vector<DomainPoint> sorted_points;
+      const std::vector<ShardID> shard_lookup;
+      const Domain shard_domain;
       const size_t total_shards;
       SingleTask *const original_task;
       const bool control_replicated;
       const bool top_level_task;
+      const bool isomorphic_points;
     protected:
       mutable LocalLock                manager_lock;
       // Inheritted from Mapper::SelectShardingFunctorInput
@@ -2730,8 +2729,7 @@ namespace Legion {
       // A unique set of address spaces on which shards exist 
       std::set<AddressSpaceID> unique_shard_spaces;
 #ifdef LEGION_USE_LIBDL
-      std::set<std::pair<std::string,std::string> > 
-                               unique_registration_callbacks;
+      std::set<Runtime::RegistrationKey> unique_registration_callbacks;
 #endif
     protected:
       AttachDeduplication *attach_deduplication;

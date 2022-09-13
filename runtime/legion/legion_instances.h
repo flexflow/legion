@@ -137,8 +137,6 @@ namespace Legion {
       virtual PhysicalInstance get_instance(const DomainPoint &key) const = 0;
       virtual PointerConstraint 
                      get_pointer_constraint(const DomainPoint &key) const = 0;
-      virtual InstanceView* create_instance_top_view(InnerContext *context,
-                                            AddressSpaceID logical_owner) = 0;
     public:
       inline bool is_reduction_manager(void) const;
       inline bool is_physical_manager(void) const;
@@ -195,14 +193,32 @@ namespace Legion {
      * of data; this includes both individual instances and collective instances
      */
     class PhysicalManager : public InstanceManager {
+      struct RemoteCreateViewArgs : public LgTaskArgs<RemoteCreateViewArgs> {
+      public:
+        static const LgTaskID TASK_ID = LG_REMOTE_VIEW_CREATION_TASK_ID;
+      public:
+        RemoteCreateViewArgs(PhysicalManager *man, InnerContext *ctx, 
+                             AddressSpaceID log, CollectiveMapping *map,
+                             std::atomic<DistributedID> *tar, 
+                             AddressSpaceID src, RtUserEvent done)
+          : LgTaskArgs<RemoteCreateViewArgs>(implicit_provenance),
+            manager(man), context(ctx), logical_owner(log), mapping(map),
+            target(tar), source(src), done_event(done) { }
+      public:
+        PhysicalManager *const manager;
+        InnerContext *const context;
+        const AddressSpaceID logical_owner;
+        CollectiveMapping *const mapping;
+        std::atomic<DistributedID> *const target;
+        const AddressSpaceID source;
+        const RtUserEvent done_event;
+      };
     public:
       enum InstanceKind {
         // Normal Realm allocations
         INTERNAL_INSTANCE_KIND,
         // External allocations imported by attach operations
         EXTERNAL_ATTACHED_INSTANCE_KIND,
-        // External allocations from output regions, owned by the runtime
-        EXTERNAL_OWNED_INSTANCE_KIND,
         // Allocations drawn from the eager pool
         EAGER_INSTANCE_KIND,
         // Instance not yet bound
@@ -232,6 +248,13 @@ namespace Legion {
         // Events added since the last collection of view events
         unsigned events_added;
       };
+      enum GarbageCollectionState {
+        VALID_GC_STATE,
+        ACQUIRED_GC_STATE,
+        COLLECTABLE_GC_STATE,
+        PENDING_COLLECTED_GC_STATE,
+        COLLECTED_GC_STATE,
+      };
     public:
       PhysicalManager(RegionTreeForest *ctx, LayoutDescription *layout, 
                       DistributedID did, AddressSpaceID owner_space, 
@@ -240,8 +263,7 @@ namespace Legion {
                       IndexSpaceExpression *index_domain, 
                       const void *piece_list, size_t piece_list_size,
                       RegionTreeID tree_id, ApEvent unique, 
-                      bool register_now, bool shadow_instance = false,
-                      bool output_instance = false);
+                      bool register_now, bool output_instance = false);
       virtual ~PhysicalManager(void);
     public:
       virtual ApEvent get_unique_event(void) const { return unique_event; }
@@ -249,37 +271,53 @@ namespace Legion {
       void log_instance_creation(UniqueID creator_id, Processor proc,
                      const std::vector<LogicalRegion> &regions) const; 
     public:
-      virtual ApEvent fill_from(FillView *fill_view,
+      virtual ApEvent fill_from(FillView *fill_view, InstanceView *dst_view,
                                 ApEvent precondition, PredEvent predicate_guard,
                                 IndexSpaceExpression *expression,
+                                Operation *op, const unsigned index,
                                 const FieldMask &fill_mask,
                                 const PhysicalTraceInfo &trace_info,
-                                const FieldMaskSet<FillView> *tracing_srcs,
-                                const FieldMaskSet<InstanceView> *tracing_dsts,
-                                std::set<RtEvent> &effects_applied,
-                                CopyAcrossHelper *across_helper = NULL) = 0;
-      virtual ApEvent copy_from(PhysicalManager *manager, ApEvent precondition,
+                                std::set<RtEvent> &recorded_events,
+                                std::set<RtEvent> &applied_events,
+                                CopyAcrossHelper *across_helper,
+                                const bool manage_dst_events,
+                                const bool fill_restricted) = 0;
+      virtual ApEvent copy_from(InstanceView *src_view, InstanceView *dst_view,
+                                PhysicalManager *manager, ApEvent precondition,
                                 PredEvent predicate_guard, ReductionOpID redop,
                                 IndexSpaceExpression *expression,
+                                Operation *op, const unsigned index,
                                 const FieldMask &copy_mask,
                                 const PhysicalTraceInfo &trace_info,
-                                const FieldMaskSet<InstanceView> *tracing_srcs,
-                                const FieldMaskSet<InstanceView> *tracing_dsts,
-                                std::set<RtEvent> &effects_applied,
-                                CopyAcrossHelper *across_helper = NULL) = 0;
+                                std::set<RtEvent> &recorded_events,
+                                std::set<RtEvent> &applied_events,
+                                CopyAcrossHelper *across_helper,
+                                const bool manage_dst_events,
+                                const bool copy_restricted) = 0;
       virtual void compute_copy_offsets(const FieldMask &copy_mask,
-                                std::vector<CopySrcDstField> &fields) = 0;
+                             std::vector<CopySrcDstField> &fields) = 0;
     public:
       virtual void send_manager(AddressSpaceID target) = 0; 
       static void handle_manager_request(Deserializer &derez, 
                           Runtime *runtime, AddressSpaceID source);
     public:
-      virtual bool acquire_instance(ReferenceSource source, 
-                                    ReferenceMutator *mutator) = 0;
-      virtual void perform_deletion(RtEvent deferred_event) = 0;
+      virtual void notify_active(ReferenceMutator *mutator);
+      virtual void notify_inactive(ReferenceMutator *mutator);
+      virtual void notify_valid(ReferenceMutator *mutator);
+      virtual void notify_invalid(ReferenceMutator *mutator);
+    public:
+      bool acquire_instance(ReferenceSource source, ReferenceMutator *mutator);
+      bool can_collect(AddressSpaceID source, bool &already_collected);
+      bool collect(RtEvent &collected);
+      RtEvent set_garbage_collection_priority(MapperID mapper_id,
+                                              Processor p, GCPriority priority);
+      virtual void get_instance_pointers(Memory memory, 
+                                    std::vector<uintptr_t> &pointers) const = 0;
+      virtual RtEvent perform_deletion(AddressSpaceID source, 
+                                       AutoLock *i_lock = NULL) = 0;
       virtual void force_deletion(void) = 0;
-      virtual void set_garbage_collection_priority(MapperID mapper_id, 
-                                Processor p, GCPriority priority) = 0; 
+      virtual RtEvent update_garbage_collection_priority(
+                                                       GCPriority priority) = 0;
       virtual RtEvent get_instance_ready_event(void) const = 0;
       virtual RtEvent attach_external_instance(void) = 0;
       virtual RtEvent detach_external_instance(void) = 0;
@@ -288,23 +326,13 @@ namespace Legion {
       size_t get_instance_size(void) const;
       void update_instance_footprint(size_t footprint)
         { instance_footprint = footprint; }
-#ifdef LEGION_GPU_REDUCTIONS
-    public:
-      virtual bool is_gpu_visible(PhysicalManager *other) const = 0;
-      virtual ReductionView* find_or_create_shadow_reduction(unsigned fidx,
-          ReductionOpID redop, AddressSpaceID request_space, UniqueID opid) = 0;
-      virtual void record_remote_shadow_reduction(unsigned fidx,
-          ReductionOpID redop, ReductionView *view) = 0;
-      static void handle_create_shadow_request(Runtime *runtime,
-                                AddressSpaceID source, Deserializer &derez);
-      static void handle_create_shadow_response(Runtime *runtime,
-                                                Deserializer &derez);
-#endif
     public:
       // Methods for creating/finding/destroying logical top views
-      virtual InstanceView* create_instance_top_view(InnerContext *context,
-                                            AddressSpaceID logical_owner);
-      void register_active_context(InnerContext *context);
+      InstanceView* find_or_create_instance_top_view(InnerContext *context,
+          AddressSpaceID logical_owner, CollectiveMapping *mapping);
+      InstanceView* construct_top_view(AddressSpaceID logical_owner,
+                                       DistributedID did, UniqueID uid,
+                                       CollectiveMapping *mapping);
       void unregister_active_context(InnerContext *context); 
     public:
       PieceIteratorImpl* create_piece_iterator(IndexSpaceNode *privilege_node);
@@ -319,8 +347,34 @@ namespace Legion {
                             bool tight_bounds = false) const;
     protected:
       void prune_gc_events(void);
+      void pack_garbage_collection_state(Serializer &rez,
+                                         AddressSpaceID target, bool need_lock);
+      void initialize_remote_gc_state(GarbageCollectionState state);
     public: 
       static ApEvent fetch_metadata(PhysicalInstance inst, ApEvent use_event);
+      static void process_top_view_request(PhysicalManager *manager,
+          InnerContext *context, AddressSpaceID logical_owner,
+          CollectiveMapping *mapping, std::atomic<DistributedID> *target,
+          AddressSpaceID source, RtUserEvent done_event, Runtime *runtime);
+      static void handle_top_view_request(Deserializer &derez, Runtime *runtime,
+                                          AddressSpaceID source);
+      static void handle_top_view_response(Deserializer &derez);
+      static void handle_top_view_creation(const void *args, Runtime *runtime);
+      static void handle_acquire_request(Runtime *runtime,
+          Deserializer &derez, AddressSpaceID source);
+      static void handle_acquire_response(Deserializer &derez, 
+          AddressSpaceID source);
+      static void handle_garbage_collection_request(Runtime *runtime,
+          Deserializer &derez, AddressSpaceID source);
+      static void handle_garbage_collection_response(Deserializer &derez);
+      static void handle_garbage_collection_acquire(Runtime *runtime,
+          Deserializer &derez, AddressSpaceID source);
+      static void handle_garbage_collection_acquired(Deserializer &derez);
+      static void handle_garbage_collection_priority_update(Runtime *runtime,
+          Deserializer &derez, AddressSpaceID source);
+      static void handle_garbage_collection_debug_request(Runtime *runtime,
+          Deserializer &derez, AddressSpaceID source);
+      static void handle_garbage_collection_debug_response(Deserializer &derez);
     public:
       size_t instance_footprint;
       const ReductionOp *reduction_op;
@@ -329,17 +383,25 @@ namespace Legion {
       const ApEvent unique_event;
       const void *const piece_list;
       const size_t piece_list_size;
-      const bool shadow_instance;
     protected:
       mutable LocalLock inst_lock;
       std::set<InnerContext*> active_contexts;
-#ifdef LEGION_GPU_REDUCTIONS
+      typedef std::pair<ReplicationID,UniqueID> ContextKey;
+      typedef std::pair<InstanceView*,unsigned> ViewEntry;
+      std::map<ContextKey,ViewEntry> context_views;
+      std::map<ReplicationID,RtUserEvent> pending_views;
     protected:
-      std::map<std::pair<unsigned/*fidx*/,ReductionOpID>,ReductionView*>
-                                              shadow_reduction_instances;
-      std::map<std::pair<unsigned/*fidx*/,ReductionOpID>,RtEvent>
-                                              pending_reduction_shadows;
-#endif
+      // Stuff for garbage collection
+      GarbageCollectionState gc_state; 
+      unsigned pending_changes;
+      std::atomic<unsigned> remaining_collection_guards;
+      RtEvent collection_ready;
+      RtUserEvent deferred_deletion;
+      bool currently_active;
+      // Garbage collection priorities
+      GCPriority min_gc_priority;
+      RtEvent priority_update_done;
+      std::map<std::pair<MapperID,Processor>,GCPriority> mapper_gc_priorities;
     private:
       // Events that have to trigger before we can remove our GC reference
       std::map<CollectableView*,CollectableInfo> gc_events;
@@ -396,7 +458,7 @@ namespace Legion {
             const PendingRemoteExpression &pending, FieldSpace h, 
             RegionTreeID tid, LayoutConstraintID l, ApEvent use,
             InstanceKind kind, ReductionOpID redop, const void *piece_list,
-            size_t piece_list_size, bool shadow_instance);
+            size_t piece_list_size, GarbageCollectionState state);
       public:
         const DistributedID did;
         const AddressSpaceID owner;
@@ -413,7 +475,7 @@ namespace Legion {
         const ReductionOpID redop;
         const void *const piece_list;
         const size_t piece_list_size;
-        const bool shadow_instance;
+        const GarbageCollectionState state;
       };
     public:
       struct DeferDeleteIndividualManager :
@@ -425,6 +487,7 @@ namespace Legion {
         DeferDeleteIndividualManager(IndividualManager *manager_);
       public:
         IndividualManager *manager;
+        const RtUserEvent done;
       };
     private:
       struct BroadcastFunctor {
@@ -445,16 +508,11 @@ namespace Legion {
                         bool register_now, size_t footprint,
                         ApEvent use_event, InstanceKind kind,
                         const ReductionOp *op = NULL,
-                        bool shadow_instance = false);
-      IndividualManager(const IndividualManager &rhs);
+                        ApEvent producer_event = ApEvent::NO_AP_EVENT);
+      IndividualManager(const IndividualManager &rhs) = delete;
       virtual ~IndividualManager(void);
     public:
-      IndividualManager& operator=(const IndividualManager &rhs);
-    public:
-      virtual void notify_active(ReferenceMutator *mutator);
-      virtual void notify_inactive(ReferenceMutator *mutator);
-      virtual void notify_valid(ReferenceMutator *mutator);
-      virtual void notify_invalid(ReferenceMutator *mutator);
+      IndividualManager& operator=(const IndividualManager &rhs) = delete;
     public:
       virtual LegionRuntime::Accessor::RegionAccessor<
         LegionRuntime::Accessor::AccessorType::Generic>
@@ -471,26 +529,31 @@ namespace Legion {
       virtual PointerConstraint
                      get_pointer_constraint(const DomainPoint &key) const;
     public:
-      virtual ApEvent fill_from(FillView *fill_view,
+      virtual ApEvent fill_from(FillView *fill_view, InstanceView *dst_view,
                                 ApEvent precondition, PredEvent predicate_guard,
                                 IndexSpaceExpression *expression,
+                                Operation *op, const unsigned index,
                                 const FieldMask &fill_mask,
                                 const PhysicalTraceInfo &trace_info,
-                                const FieldMaskSet<FillView> *tracing_srcs,
-                                const FieldMaskSet<InstanceView> *tracing_dsts,
-                                std::set<RtEvent> &effects_applied,
-                                CopyAcrossHelper *across_helper = NULL);
-      virtual ApEvent copy_from(PhysicalManager *manager, ApEvent precondition,
+                                std::set<RtEvent> &recorded_events,
+                                std::set<RtEvent> &applied_events,
+                                CopyAcrossHelper *across_helper,
+                                const bool manage_dst_events,
+                                const bool fill_restricted);
+      virtual ApEvent copy_from(InstanceView *src_view, InstanceView *dst_view,
+                                PhysicalManager *manager, ApEvent precondition,
                                 PredEvent predicate_guard, ReductionOpID redop,
                                 IndexSpaceExpression *expression,
+                                Operation *op, const unsigned index,
                                 const FieldMask &copy_mask,
                                 const PhysicalTraceInfo &trace_info,
-                                const FieldMaskSet<InstanceView> *tracing_srcs,
-                                const FieldMaskSet<InstanceView> *tracing_dsts,
-                                std::set<RtEvent> &effects_applied,
-                                CopyAcrossHelper *across_helper = NULL);
+                                std::set<RtEvent> &recorded_events,
+                                std::set<RtEvent> &applied_events,
+                                CopyAcrossHelper *across_helper,
+                                const bool manage_dst_events,
+                                const bool copy_restricted);
       virtual void compute_copy_offsets(const FieldMask &copy_mask,
-                                std::vector<CopySrcDstField> &fields);
+                             std::vector<CopySrcDstField> &fields);
     public:
       void initialize_across_helper(CopyAcrossHelper *across_helper,
                                     const FieldMask &mask,
@@ -510,26 +573,18 @@ namespace Legion {
           const void *piece_list, size_t piece_list_size,
           FieldSpaceNode *space_node, RegionTreeID tree_id,
           LayoutConstraints *constraints, ApEvent use_event,
-          InstanceKind kind, ReductionOpID redop, bool shadow_instance);
+          InstanceKind kind, ReductionOpID redop, GarbageCollectionState state);
     public:
-      virtual bool acquire_instance(ReferenceSource source, 
-                                    ReferenceMutator *mutator);
-      virtual void perform_deletion(RtEvent deferred_event);
+      virtual void get_instance_pointers(Memory memory, 
+                                    std::vector<uintptr_t> &pointers) const;
+      virtual RtEvent perform_deletion(AddressSpaceID source, 
+                                       AutoLock *i_lock = NULL);
       virtual void force_deletion(void);
-      virtual void set_garbage_collection_priority(MapperID mapper_id, 
-                                Processor p, GCPriority priority); 
+      virtual RtEvent update_garbage_collection_priority(GCPriority);
       virtual RtEvent attach_external_instance(void);
       virtual RtEvent detach_external_instance(void);
       virtual bool has_visible_from(const std::set<Memory> &memories) const;
       virtual Memory get_memory(void) const;
-#ifdef LEGION_GPU_REDUCTIONS
-    public:
-      virtual bool is_gpu_visible(PhysicalManager *other) const;
-      virtual ReductionView* find_or_create_shadow_reduction(unsigned fidx,
-          ReductionOpID redop, AddressSpaceID request_space, UniqueID opid); 
-      virtual void record_remote_shadow_reduction(unsigned fidx,
-          ReductionOpID redop, ReductionView *view);
-#endif
     public:
       inline bool is_unbound() const 
         { return kind == UNBOUND_INSTANCE_KIND; }
@@ -571,13 +626,8 @@ namespace Legion {
       static const AllocationType alloc_type = COLLECTIVE_INST_MANAGER_ALLOC;
     public:
       enum MessageKind {
-        ACTIVATE_MESSAGE,
-        DEACTIVATE_MESSAGE,
-        VALIDATE_MESSAGE,
-        INVALIDATE_MESSAGE,
         PERFORM_DELETE_MESSAGE,
         FORCE_DELETE_MESSAGE,
-        SET_GC_PRIORITY_MESSAGE,
         DETACH_EXTERNAL_MESSAGE,
         FINALIZE_MESSAGE,
       };
@@ -592,7 +642,8 @@ namespace Legion {
             const PendingRemoteExpression &pending, FieldSpace h, 
             RegionTreeID tid, LayoutConstraintID l, ApEvent use, 
             ReductionOpID redop, const void *piece_list,
-            size_t piece_list_size, AddressSpaceID source);
+            size_t piece_list_size, AddressSpaceID source,
+            GarbageCollectionState state);
       public:
         const DistributedID did;
         const AddressSpaceID owner;
@@ -608,6 +659,7 @@ namespace Legion {
         const void *const piece_list;
         const size_t piece_list_size;
         const AddressSpaceID source;
+        const GarbageCollectionState state;
       };
     public:
       CollectiveManager(RegionTreeForest *ctx, DistributedID did,
@@ -618,10 +670,10 @@ namespace Legion {
                         LayoutDescription *desc, ReductionOpID redop, 
                         bool register_now, size_t footprint,
                         ApEvent unique_event, bool external_instance);
-      CollectiveManager(const CollectiveManager &rhs);
+      CollectiveManager(const CollectiveManager &rhs) = delete;
       virtual ~CollectiveManager(void);
     public:
-      CollectiveManager& operator=(const CollectiveManager &rh);
+      CollectiveManager& operator=(const CollectiveManager &rh) = delete;
     public:
       void finalize_collective_instance(ApUserEvent instance_event);
     public:
@@ -630,12 +682,7 @@ namespace Legion {
       virtual RtEvent get_instance_ready_event(void) const;
       virtual PhysicalInstance get_instance(const DomainPoint &key) const;
       virtual PointerConstraint
-                     get_pointer_constraint(const DomainPoint &key) const;
-    public:
-      virtual void notify_active(ReferenceMutator *mutator);
-      virtual void notify_inactive(ReferenceMutator *mutator);
-      virtual void notify_valid(ReferenceMutator *mutator);
-      virtual void notify_invalid(ReferenceMutator *mutator);
+                     get_pointer_constraint(const DomainPoint &key) const; 
     public:
       virtual LegionRuntime::Accessor::RegionAccessor<
         LegionRuntime::Accessor::AccessorType::Generic>
@@ -643,18 +690,13 @@ namespace Legion {
       virtual LegionRuntime::Accessor::RegionAccessor<
         LegionRuntime::Accessor::AccessorType::Generic>
           get_field_accessor(FieldID fid) const;
-    protected:
-      void activate_collective(ReferenceMutator *mutator);
-      void deactivate_collective(ReferenceMutator *mutator);
-      void validate_collective(ReferenceMutator *mutator);
-      void invalidate_collective(ReferenceMutator *mutator);
     public:
-      virtual bool acquire_instance(ReferenceSource source, 
-                                    ReferenceMutator *mutator);
-      virtual void perform_deletion(RtEvent deferred_event);
+      virtual void get_instance_pointers(Memory memory, 
+                                    std::vector<uintptr_t> &pointers) const;
+      virtual RtEvent perform_deletion(AddressSpaceID source,
+                                       AutoLock *i_lock = NULL);
       virtual void force_deletion(void);
-      virtual void set_garbage_collection_priority(MapperID mapper_id, 
-                                    Processor p, GCPriority priority); 
+      virtual RtEvent update_garbage_collection_priority(GCPriority);
       virtual RtEvent attach_external_instance(void);
       virtual RtEvent detach_external_instance(void);
       virtual bool has_visible_from(const std::set<Memory> &memories) const;
@@ -662,46 +704,39 @@ namespace Legion {
     protected:
       void perform_delete(RtEvent deferred_event, bool left); 
       void force_delete(bool left);
-      void set_gc_priority(MapperID mapper_id, Processor p, 
-                           GCPriority priority, bool left);
       void detach_external(RtUserEvent to_trigger, bool left, 
                   RtEvent full_detach = RtEvent::NO_RT_EVENT);
       bool finalize_message(void);
     protected:
       void collective_deletion(RtEvent deferred_event);
       void collective_force(void);
-      void collective_set_gc_priority(MapperID mapper_id, Processor proc,
-                                      GCPriority priority);
       void collective_detach(std::set<RtEvent> &detach_events);
     public:
-      virtual ApEvent fill_from(FillView *fill_view,
+      virtual ApEvent fill_from(FillView *fill_view, InstanceView *dst_view,
                                 ApEvent precondition, PredEvent predicate_guard,
                                 IndexSpaceExpression *expression,
+                                Operation *op, const unsigned index,
                                 const FieldMask &fill_mask,
                                 const PhysicalTraceInfo &trace_info,
-                                const FieldMaskSet<FillView> *tracing_srcs,
-                                const FieldMaskSet<InstanceView> *tracing_dsts,
-                                std::set<RtEvent> &effects_applied,
-                                CopyAcrossHelper *across_helper = NULL);
-      virtual ApEvent copy_from(PhysicalManager *manager, ApEvent precondition,
+                                std::set<RtEvent> &recorded_events,
+                                std::set<RtEvent> &applied_events,
+                                CopyAcrossHelper *across_helper,
+                                const bool manage_dst_events,
+                                const bool fill_restricted);
+      virtual ApEvent copy_from(InstanceView *src_view, InstanceView *dst_view,
+                                PhysicalManager *manager, ApEvent precondition,
                                 PredEvent predicate_guard, ReductionOpID redop,
                                 IndexSpaceExpression *expression,
+                                Operation *op, const unsigned index,
                                 const FieldMask &copy_mask,
                                 const PhysicalTraceInfo &trace_info,
-                                const FieldMaskSet<InstanceView> *tracing_srcs,
-                                const FieldMaskSet<InstanceView> *tracing_dsts,
-                                std::set<RtEvent> &effects_applied,
-                                CopyAcrossHelper *across_helper = NULL);
+                                std::set<RtEvent> &recorded_events,
+                                std::set<RtEvent> &applied_events,
+                                CopyAcrossHelper *across_helper,
+                                const bool manage_dst_events,
+                                const bool copy_restricted);
       virtual void compute_copy_offsets(const FieldMask &copy_mask,
-                                std::vector<CopySrcDstField> &fields);
-#ifdef LEGION_GPU_REDUCTIONS
-    public:
-      virtual bool is_gpu_visible(PhysicalManager *other) const;
-      virtual ReductionView* find_or_create_shadow_reduction(unsigned fidx,
-          ReductionOpID redop, AddressSpaceID request_space, UniqueID opid);
-      virtual void record_remote_shadow_reduction(unsigned fidx,
-          ReductionOpID redop, ReductionView *view);
-#endif
+                             std::vector<CopySrcDstField> &fields);
     public:
       virtual void send_manager(AddressSpaceID target);
     public:
@@ -716,7 +751,8 @@ namespace Legion {
           size_t inst_footprint, IndexSpaceExpression *inst_domain, 
           const void *piece_list, size_t piece_list_size, 
           FieldSpaceNode *space_node, RegionTreeID tree_id, 
-          LayoutConstraints *constraints,ApEvent use_event,ReductionOpID redop);
+          LayoutConstraints *constraints, ApEvent use_event,
+          ReductionOpID redop, GarbageCollectionState state);
     public:
       IndexSpaceNode *const point_space;
     protected:
@@ -766,8 +802,6 @@ namespace Legion {
       virtual PointerConstraint
                      get_pointer_constraint(const DomainPoint &key) const;
       virtual void send_manager(AddressSpaceID target);
-      virtual InstanceView* create_instance_top_view(InnerContext *context,
-                                            AddressSpaceID logical_owner);
     };
 
     /**
@@ -783,20 +817,20 @@ namespace Legion {
           creator_id(cid), instance(PhysicalInstance::NO_INST), 
           field_space_node(NULL), instance_domain(NULL), tree_id(0),
           redop_id(0), reduction_op(NULL), realm_layout(NULL), piece_list(NULL),
-          piece_list_size(0), shadow_instance(false), valid(false) { }
+          piece_list_size(0), valid(false) { }
       InstanceBuilder(const std::vector<LogicalRegion> &regs,
                       IndexSpaceExpression *expr, FieldSpaceNode *node,
                       RegionTreeID tree_id, const LayoutConstraintSet &cons, 
                       Runtime *rt, MemoryManager *memory, UniqueID cid,
-                      const void *piece_list, size_t piece_list_size, 
-                      bool shadow_instance);
+                      const void *piece_list, size_t piece_list_size); 
       virtual ~InstanceBuilder(void);
     public:
       void initialize(RegionTreeForest *forest);
       PhysicalManager* create_physical_instance(RegionTreeForest *forest,
                         CollectiveManager *collective, DomainPoint *point,
                         LayoutConstraintKind *unsat_kind,
-                        unsigned *unsat_index, size_t *footprint = NULL);
+                        unsigned *unsat_index, size_t *footprint = NULL,
+                        RtEvent precondition = RtEvent::NO_RT_EVENT);
       CollectiveManager* create_collective_instance(RegionTreeForest *forest,
                         Memory::Kind mem_kind, IndexSpaceNode *point_space,
                         LayoutConstraintKind *unsat_kind, unsigned *unsat_index,
@@ -832,7 +866,6 @@ namespace Legion {
       Realm::InstanceLayoutGeneric *realm_layout;
       void *piece_list;
       size_t piece_list_size;
-      bool shadow_instance;
     public:
       bool valid;
     };

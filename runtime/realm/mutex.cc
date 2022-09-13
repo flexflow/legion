@@ -82,14 +82,18 @@ struct RWLockImpl {
 
 #include "realm/mutex.h"
 #include "realm/timers.h"
+#include "realm/faults.h"
 
 #include <assert.h>
 #include <new>
 
+#if defined(REALM_ON_LINUX) || defined(REALM_ON_MACOS) || defined(REALM_ON_FREEBSD)
+#include <unistd.h>
+#endif
+
 #if defined(REALM_ON_LINUX) && !defined(REALM_NO_USE_FUTEX)
 #include <linux/futex.h>
 #include <sys/time.h>
-#include <unistd.h>
 #include <sys/syscall.h>
 #endif
 
@@ -100,7 +104,75 @@ struct RWLockImpl {
 #include <xmmintrin.h>
 #endif
 
+#ifdef REALM_ON_WINDOWS
+static void sleep(long seconds) { Sleep(seconds * 1000); }
+#endif
+
 namespace Realm {
+
+  Logger log_mutex("mutex");
+
+
+  ////////////////////////////////////////////////////////////////////////
+  //
+  // class MutexChecker
+  //
+
+  namespace {
+    // only have one of the lock_fail or unlock_fail threads call abort so
+    //  that we don't mess up attempts to dump stack traces (which can take
+    //  quite a while)
+    atomic<int> abort_count(0);
+  };
+
+  void MutexChecker::lock_fail(int actval, CheckedScope *cs)
+  {
+    {
+      LoggerMessage msg = log_mutex.fatal();
+      msg << "over limit on entry into MutexChecker("
+          << (name ? name : "") << "," << object << ") limit="
+          << limit << " actval=" << actval;
+      if(cs)
+        msg << " on scope(" << (cs->name ? cs->name : "") << "," << cs->object << ")";
+      Backtrace bt;
+      bt.capture_backtrace();
+      bt.lookup_symbols();
+      msg << " at " << bt;
+    }
+    // wait a couple seconds so that threads in the guarded section hopefully
+    //  try to leave and declare who they are too
+    sleep(2);
+    while(abort_count.fetch_add(1) > 0) {
+      // if we're in this loop we'll never actually leave
+      sleep(60);
+    }
+    abort();
+  }
+
+  void MutexChecker::unlock_fail(int actval, CheckedScope *cs)
+  {
+    {
+      LoggerMessage msg = log_mutex.fatal();
+      msg << "over limit on exit of MutexChecker("
+          << (name ? name : "") << "," << object << ") limit="
+          << limit << " actval=" << actval;
+      if(cs)
+        msg << " on scope(" << (cs->name ? cs->name : "") << "," << cs->object << ")";
+      Backtrace bt;
+      bt.capture_backtrace();
+      bt.lookup_symbols();
+      msg << " at " << bt;
+    }
+    // wait a couple seconds so that threads in the guarded section hopefully
+    //  try to leave and declare who they are too
+    sleep(2);
+    while(abort_count.fetch_add(1) > 0) {
+      // if we're in this loop we'll never actually leave
+      sleep(60);
+    }
+    abort();
+  }
+
 
   ////////////////////////////////////////////////////////////////////////
   //
@@ -148,6 +220,9 @@ namespace Realm {
     , sleep_timeout(DOORBELL_SLEEP_DEFAULT)
     , next_sleep_time(-1)
     , owner_tid(0)
+#ifdef REALM_ENABLE_STARVATION_CHECKS
+    , starvation_count(0)
+#endif
     , next_doorbell(nullptr)
   {
 #ifdef REALM_USE_PTHREADS
@@ -317,6 +392,29 @@ namespace Realm {
     notify_slow();
   }
 
+#ifdef REALM_ENABLE_STARVATION_CHECKS
+  /*static*/ atomic<int> Doorbell::starvation_limit(1000);
+
+  void Doorbell::increase_starvation_count(int to_add, void *db_list)
+  {
+    starvation_count += to_add;
+    int cur_limit = starvation_limit.load();
+    if(starvation_count > cur_limit) {
+      // only print a warning if we can double the limit
+      if(starvation_limit.compare_exchange_relaxed(cur_limit, 2*cur_limit)) {
+        Backtrace bt;
+        bt.capture_backtrace();
+        bt.lookup_symbols();
+        log_mutex.warning() << "doorbell starvation limit reached: list="
+                            << db_list << " db=" << this << " owner="
+                            << std::hex << owner_tid << std::dec
+                            << " count=" << starvation_count
+                            << " at " << bt;
+      }
+    }
+  }
+#endif
+
 
   ////////////////////////////////////////////////////////////////////////
   //
@@ -325,6 +423,9 @@ namespace Realm {
 
   DoorbellList::DoorbellList()
     : head_or_count(0)
+#ifdef DEBUG_REALM
+    , mutex_check("DoorbellList", this)
+#endif
   {}
 
   DoorbellList::~DoorbellList()
@@ -353,6 +454,14 @@ namespace Realm {
         // failure, but we re-read hoc and will try again
       }
     }
+
+#ifdef DEBUG_REALM
+    // would like to guard code above as well, but a successful cmpxchg
+    //  immediately enables another thread to enter that code, and we can't
+    //  disable the mutex checker fast enough, so we wait until here to
+    //  look for illegal concurrence
+    MutexChecker::CheckedScope cs(mutex_check, "extract_newest");
+#endif
 
     // if we get here, we know 'hoc' points at a valid doorbell, and even if
     //  other doorbells get added concurrently, we have exclusive ownership of
@@ -389,6 +498,13 @@ namespace Realm {
       if(spinning) {
         chosen = spinning;
         chosen_prev = spinning_prev;
+#ifdef REALM_ENABLE_STARVATION_CHECKS
+        // if we chose something that wasn't oldest, update the starvation
+        //  count for the oldest
+        if(chosen->next_doorbell)
+          chosen->next_doorbell->increase_starvation_count(1 + chosen->starvation_count,
+                                                           this);
+#endif
       } else {
         chosen = cur;
         chosen_prev = prev;
@@ -441,6 +557,14 @@ namespace Realm {
       }
     }
 
+#ifdef DEBUG_REALM
+    // would like to guard code above as well, but a successful cmpxchg
+    //  immediately enables another thread to enter that code, and we can't
+    //  disable the mutex checker fast enough, so we wait until here to
+    //  look for illegal concurrence
+    MutexChecker::CheckedScope cs(mutex_check, "extract_newest");
+#endif
+
     // if we get here, we know 'hoc' points at a valid doorbell, and even if
     //  other doorbells get added concurrently, we have exclusive ownership of
     //  the "tail" of the list pointed to by 'hoc'
@@ -456,6 +580,10 @@ namespace Realm {
           //  messing with the atomic head pointer
           prev->next_doorbell = cur->next_doorbell;
           cur->next_doorbell = nullptr;
+#ifdef REALM_ENABLE_STARVATION_CHECKS
+          // we passed over the head of the list (and everything older)
+          head->increase_starvation_count(1, this);
+#endif
           return cur;
         }
         prev = cur;
@@ -476,6 +604,11 @@ namespace Realm {
       }
       cur->next_doorbell = head->next_doorbell;
     }
+#ifdef REALM_ENABLE_STARVATION_CHECKS
+    if(head->next_doorbell)
+      head->next_doorbell->increase_starvation_count(1 + head->starvation_count,
+                                                     this);
+#endif
     head->next_doorbell = nullptr;
     return head;
   }
@@ -650,7 +783,9 @@ namespace Realm {
     //  mutex ownership (because it might take them a while to wake up), so
     //  decrement both the waiter count AND the lock held LSB
     if(db && db->is_sleeping()) {
-      uint32_t prev = state.fetch_sub(3);
+      // since we're releasing the lock to an unknown thread, this needs to
+      //  have release semantics
+      uint32_t prev = state.fetch_sub_acqrel(3);
       assert(((prev & 1) != 0) && (prev >= 3));
       (void)prev;
 

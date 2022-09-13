@@ -20,9 +20,6 @@
 #include <hip/hip_runtime.h>
 #ifdef __HIP_PLATFORM_NVCC__
 #define hipDeviceScheduleBlockingSync CU_CTX_SCHED_BLOCKING_SYNC 
-typedef char* hipDeviceCharptr_t;
-#else
-typedef char* hipDeviceCharptr_t;
 #endif
 
 #include "realm/realm_config.h"
@@ -39,24 +36,24 @@ typedef char* hipDeviceCharptr_t;
 #define CHECK_CUDART(cmd) do { \
   hipError_t ret = (cmd); \
   if(ret != hipSuccess) { \
-    fprintf(stderr, "CUDART: %s = %d (%s)\n", #cmd, ret, hipGetErrorString(ret)); \
+    fprintf(stderr, "HIP: %s = %d (%s)\n", #cmd, ret, hipGetErrorString(ret)); \
     assert(0); \
     exit(1); \
   } \
 } while(0)
   
-#define REPORT_CU_ERROR(cmd, ret) \
+#define REPORT_HIP_ERROR(cmd, ret) \
   do { \
     const char *name, *str; \
     name = hipGetErrorName(ret); \
     str = hipGetErrorString(ret); \
-    fprintf(stderr, "CU: %s = %d (%s): %s\n", cmd, ret, name, str); \
+    fprintf(stderr, "HIP: %s = %d (%s): %s\n", cmd, ret, name, str); \
     abort(); \
   } while(0)
 
-#define CHECK_CU(cmd) do {                      \
+#define CHECK_HIP(cmd) do {                      \
   hipError_t ret = (cmd); \
-  if(ret != hipSuccess) REPORT_CU_ERROR(#cmd, ret); \
+  if(ret != hipSuccess) REPORT_HIP_ERROR(#cmd, ret); \
 } while(0)
 
 
@@ -72,8 +69,8 @@ namespace Realm {
       int index;  // index used by HIP runtime
       hipDevice_t device;
 
-#ifdef REALM_USE_HIP_HIJACK
       static const size_t MAX_NAME_LEN = 64;
+#ifndef REALM_USE_HIP_HIJACK
       char name[MAX_NAME_LEN];
 
       int major, minor;
@@ -499,11 +496,12 @@ namespace Realm {
       void register_function(const RegisteredFunction *func);
 
       hipFunction_t lookup_function(const void *func);
-      hipDeviceCharptr_t lookup_variable(const void *var);
+      char* lookup_variable(const void *var);
 #endif
 
       void create_processor(RuntimeImpl *runtime, size_t stack_size);
       void create_fb_memory(RuntimeImpl *runtime, size_t size, size_t ib_size);
+      void create_dynamic_fb_memory(RuntimeImpl *runtime, size_t max_size);
 
       void create_dma_channels(Realm::RuntimeImpl *r);
 
@@ -608,7 +606,7 @@ namespace Realm {
 
       //hipCtx_t context;
       int device_id;
-      hipDeviceCharptr_t fbmem_base, fb_ibmem_base;
+      char *fbmem_base, *fb_ibmem_base;
 
       // which system memories have been registered and can be used for cuMemcpyAsync
       std::set<Memory> pinned_sysmems;
@@ -645,7 +643,7 @@ namespace Realm {
 #ifdef REALM_USE_HIP_HIJACK
       std::map<const FatBin *, hipModule_t> device_modules;
       std::map<const void *, hipFunction_t> device_functions;
-      std::map<const void *, hipDeviceCharptr_t> device_variables;
+      std::map<const void *, char *> device_variables;
 #endif
     };
 
@@ -739,9 +737,23 @@ namespace Realm {
       Realm::CoreReservation *core_rsrv;
     };
 
+    // this can be attached to any MemoryImpl if the underlying memory is
+    //  guaranteed to belong to a given device - this will allow that
+    //  context's processor and dma channels to work with it
+    // the creator is expected to know what device they want but need
+    //  not know which GPU object that corresponds to
+    class HipDeviceMemoryInfo : public ModuleSpecificInfo
+    {
+    public:
+      HipDeviceMemoryInfo(int _device_id);
+
+      int device_id;
+      GPU *gpu;
+    };
+
     class GPUFBMemory : public LocalManagedMemory {
     public:
-      GPUFBMemory(Memory _me, GPU *_gpu, hipDeviceCharptr_t _base, size_t _size);
+      GPUFBMemory(Memory _me, GPU *_gpu, char *_base, size_t _size);
 
       virtual ~GPUFBMemory(void);
 
@@ -751,15 +763,72 @@ namespace Realm {
 
       virtual void *get_direct_ptr(off_t offset, size_t size);
 
+      // GPUFBMemory supports ExternalHipMemoryResource and
+      //  ExternalHipArrayResource (not implemented)
+      virtual bool attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                      size_t& inst_offset);
+      virtual void unregister_external_resource(RegionInstanceImpl *inst);
+
+      // for re-registration purposes, generate an ExternalInstanceResource *
+      //  (if possible) for a given instance, or a subset of one
+      virtual ExternalInstanceResource *generate_resource_info(RegionInstanceImpl *inst,
+                                                               const IndexSpaceGeneric *subspace,
+                                                               span<const FieldID> fields,
+                                                               bool read_only);
+
     public:
       GPU *gpu;
-      hipDeviceCharptr_t base;
+      char *base;
       NetworkSegment local_segment;
+    };
+
+    class GPUDynamicFBMemory : public MemoryImpl {
+    public:
+      GPUDynamicFBMemory(Memory _me, GPU *_gpu, size_t _max_size);
+
+      virtual ~GPUDynamicFBMemory(void);
+
+      // deferred allocation not supported
+      virtual AllocationResult allocate_storage_immediate(RegionInstanceImpl *inst,
+							  bool need_alloc_result,
+							  bool poisoned,
+							  TimeLimit work_until);
+
+      virtual void release_storage_immediate(RegionInstanceImpl *inst,
+					     bool poisoned,
+					     TimeLimit work_until);
+
+      // these work, but they are SLOW
+      virtual void get_bytes(off_t offset, void *dst, size_t size);
+      virtual void put_bytes(off_t offset, const void *src, size_t size);
+
+      virtual void *get_direct_ptr(off_t offset, size_t size);
+
+      // GPUDynamicFBMemory supports ExternalHipMemoryResource and
+      //  ExternalHipArrayResource (not implemented)
+      virtual bool attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                      size_t& inst_offset);
+      virtual void unregister_external_resource(RegionInstanceImpl *inst);
+
+      // for re-registration purposes, generate an ExternalInstanceResource *
+      //  (if possible) for a given instance, or a subset of one
+      virtual ExternalInstanceResource *generate_resource_info(RegionInstanceImpl *inst,
+                                                               const IndexSpaceGeneric *subspace,
+                                                               span<const FieldID> fields,
+                                                               bool read_only);
+
+    public:
+      GPU *gpu;
+      Mutex mutex;
+      size_t cur_size;
+      std::map<RegionInstance, void*> alloc_bases;
     };
 
     class GPUZCMemory : public LocalManagedMemory {
     public:
-      GPUZCMemory(Memory _me, hipDeviceCharptr_t _gpu_base, void *_cpu_base, size_t _size);
+      GPUZCMemory(Memory _me, char *_gpu_base, 
+                  void *_cpu_base, size_t _size,
+                  MemoryKind _kind, Memory::Kind _lowlevel_kind);
 
       virtual ~GPUZCMemory(void);
 
@@ -769,19 +838,31 @@ namespace Realm {
 
       virtual void *get_direct_ptr(off_t offset, size_t size);
 
+      // GPUZCMemory supports ExternalHipPinnedHostResource
+      virtual bool attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                      size_t& inst_offset);
+      virtual void unregister_external_resource(RegionInstanceImpl *inst);
+
+      // for re-registration purposes, generate an ExternalInstanceResource *
+      //  (if possible) for a given instance, or a subset of one
+      virtual ExternalInstanceResource *generate_resource_info(RegionInstanceImpl *inst,
+                                                               const IndexSpaceGeneric *subspace,
+                                                               span<const FieldID> fields,
+                                                               bool read_only);
+
     public:
-      hipDeviceCharptr_t gpu_base;
+      char *gpu_base;
       char *cpu_base;
       NetworkSegment local_segment;
     };
     
     class GPUFBIBMemory : public IBMemory {
     public:
-      GPUFBIBMemory(Memory _me, GPU *_gpu, hipDeviceCharptr_t _base, size_t _size);
+      GPUFBIBMemory(Memory _me, GPU *_gpu, char *_base, size_t _size);
 
     public:
       GPU *gpu;
-      hipDeviceCharptr_t base;
+      char *base;
       NetworkSegment local_segment;
     };
     
@@ -856,7 +937,8 @@ namespace Realm {
       				       const std::vector<XferDesPortInfo>& outputs_info,
       				       int priority,
       				       XferDesRedopInfo redop_info,
-      				       const void *fill_data, size_t fill_size);                        
+      				       const void *fill_data, size_t fill_size,
+                                       size_t fill_total);
 
       long submit(Request** requests, long nr);
 
@@ -874,7 +956,8 @@ namespace Realm {
 		     const std::vector<XferDesPortInfo>& inputs_info,
 		     const std::vector<XferDesPortInfo>& outputs_info,
 		     int _priority,
-		     const void *_fill_data, size_t _fill_size);
+		     const void *_fill_data, size_t _fill_size,
+                     size_t _fill_total);
 
       long get_requests(Request** requests, long nr);
 
@@ -898,7 +981,8 @@ namespace Realm {
 				       const std::vector<XferDesPortInfo>& outputs_info,
 				       int priority,
 				       XferDesRedopInfo redop_info,
-				       const void *fill_data, size_t fill_size);
+				       const void *fill_data, size_t fill_size,
+                                       size_t fill_total);
 
       long submit(Request** requests, long nr);
 
@@ -907,6 +991,113 @@ namespace Realm {
 
       GPU* gpu;
     };
+    
+    class GPUreduceChannel;
+
+    class GPUreduceXferDes : public XferDes {
+    public:
+      GPUreduceXferDes(uintptr_t _dma_op, Channel *_channel,
+                       NodeID _launch_node, XferDesID _guid,
+                       const std::vector<XferDesPortInfo>& inputs_info,
+                       const std::vector<XferDesPortInfo>& outputs_info,
+                       int _priority,
+                       XferDesRedopInfo _redop_info);
+
+      long get_requests(Request** requests, long nr);
+
+      bool progress_xd(GPUreduceChannel *channel, TimeLimit work_until);
+
+    protected:
+      XferDesRedopInfo redop_info;
+      const ReductionOpUntyped *redop;
+#if defined(REALM_USE_HIP_HIJACK)
+      void *kernel;
+#else
+      const void *kernel_host_proxy;
+#endif
+      GPUStream *stream;
+    };
+
+    class GPUreduceChannel : public SingleXDQChannel<GPUreduceChannel, GPUreduceXferDes> {
+    public:
+      GPUreduceChannel(GPU* _gpu, BackgroundWorkManager *bgwork);
+
+      // multiple concurrent cuda reduces ok
+      static const bool is_ordered = false;
+      
+      // helper method here so that GPUreduceRemoteChannel can use it too
+      static bool is_gpu_redop(ReductionOpID redop_id);
+
+      // override this because we have to be picky about which reduction ops
+      //  we support
+      virtual uint64_t supports_path(Memory src_mem, Memory dst_mem,
+                                     CustomSerdezID src_serdez_id,
+                                     CustomSerdezID dst_serdez_id,
+                                     ReductionOpID redop_id,
+                                     size_t total_bytes,
+                                     const std::vector<size_t> *src_frags,
+                                     const std::vector<size_t> *dst_frags,
+                                     XferDesKind *kind_ret = 0,
+                                     unsigned *bw_ret = 0,
+                                     unsigned *lat_ret = 0);
+         
+      virtual RemoteChannelInfo *construct_remote_info() const;
+
+      virtual XferDes *create_xfer_des(uintptr_t dma_op,
+				       NodeID launch_node,
+				       XferDesID guid,
+				       const std::vector<XferDesPortInfo>& inputs_info,
+				       const std::vector<XferDesPortInfo>& outputs_info,
+				       int priority,
+				       XferDesRedopInfo redop_info,
+				       const void *fill_data, size_t fill_size,
+               size_t fill_total);
+
+      long submit(Request** requests, long nr);
+
+    protected:
+      friend class GPUreduceXferDes;
+
+      GPU* gpu;
+    };
+    
+    class GPUreduceRemoteChannelInfo : public SimpleRemoteChannelInfo {
+    public:
+      GPUreduceRemoteChannelInfo(NodeID _owner, XferDesKind _kind,
+                                 uintptr_t _remote_ptr,
+                                 const std::vector<Channel::SupportedPath>& _paths);
+
+      virtual RemoteChannel *create_remote_channel();
+
+      template <typename S>
+      bool serialize(S& serializer) const;
+
+      template <typename S>
+      static RemoteChannelInfo *deserialize_new(S& deserializer);
+
+    protected:
+      static Serialization::PolymorphicSerdezSubclass<RemoteChannelInfo,
+                                                      GPUreduceRemoteChannelInfo> serdez_subclass;
+    };
+
+    class GPUreduceRemoteChannel : public RemoteChannel {
+      friend class GPUreduceRemoteChannelInfo;
+
+      GPUreduceRemoteChannel(uintptr_t _remote_ptr);
+
+      virtual uint64_t supports_path(Memory src_mem, Memory dst_mem,
+                                     CustomSerdezID src_serdez_id,
+                                     CustomSerdezID dst_serdez_id,
+                                     ReductionOpID redop_id,
+                                     size_t total_bytes,
+                                     const std::vector<size_t> *src_frags,
+                                     const std::vector<size_t> *dst_frags,
+                                     XferDesKind *kind_ret = 0,
+                                     unsigned *bw_ret = 0,
+                                     unsigned *lat_ret = 0);
+
+    };
+
 
     // active messages for establishing cuda ipc mappings
 

@@ -111,6 +111,7 @@ extern "C" {
   NEW_OPAQUE_TYPE(legion_mapper_runtime_t);
   NEW_OPAQUE_TYPE(legion_mapper_context_t);
   NEW_OPAQUE_TYPE(legion_field_map_t);
+  NEW_OPAQUE_TYPE(legion_point_transform_functor_t);
 #undef NEW_OPAQUE_TYPE
 
   /**
@@ -1021,7 +1022,7 @@ extern "C" {
   /**
    * @see Legion::Runtime::retrieve_semantic_information()
    */
-  void
+  bool
   legion_index_space_retrieve_semantic_information(
                                            legion_runtime_t runtime,
                                            legion_index_space_t handle,
@@ -1594,7 +1595,7 @@ extern "C" {
   /**
    * @see Legion::Runtime::retrieve_semantic_information()
    */
-  void
+  bool
   legion_index_partition_retrieve_semantic_information(
                                            legion_runtime_t runtime,
                                            legion_index_partition_t handle,
@@ -1712,7 +1713,7 @@ extern "C" {
   /**
    * @see Legion::Runtime::retrieve_semantic_information()
    */
-  void
+  bool
   legion_field_space_retrieve_semantic_information(
                                            legion_runtime_t runtime,
                                            legion_field_space_t handle,
@@ -1721,6 +1722,17 @@ extern "C" {
                                            size_t *size,
                                            bool can_fail /* = false */,
                                            bool wait_until_ready /* = false */);
+
+  /**
+   * @return Caller takes ownership of return value
+   *
+   * @see Legion::Runtime::get_field_space_fields()
+   */
+  legion_field_id_t *
+  legion_field_space_get_fields(legion_runtime_t runtime,
+                                legion_context_t ctx,
+                                legion_field_space_t handle,
+                                size_t *size);
 
   /**
    * @param handle Caller must have ownership of parameter `fields`.
@@ -1749,7 +1761,7 @@ extern "C" {
   /**
    * @see Legion::Runtime::retrieve_semantic_information()
    */
-  void
+  bool
   legion_field_id_retrieve_semantic_information(
                                            legion_runtime_t runtime,
                                            legion_field_space_t handle,
@@ -1897,7 +1909,7 @@ extern "C" {
   /**
    * @see Legion::Runtime::retrieve_semantic_information()
    */
-  void
+  bool
   legion_logical_region_retrieve_semantic_information(
                                            legion_runtime_t runtime,
                                            legion_logical_region_t handle,
@@ -1941,7 +1953,6 @@ extern "C" {
    */
   legion_logical_partition_t
   legion_logical_partition_create(legion_runtime_t runtime,
-                                  legion_context_t ctx,
                                   legion_logical_region_t parent,
                                   legion_index_partition_t handle);
 
@@ -2055,7 +2066,7 @@ extern "C" {
   /**
    * @see Legion::Runtime::retrieve_semantic_information()
    */
-  void
+  bool
   legion_logical_partition_retrieve_semantic_information(
                                            legion_runtime_t runtime,
                                            legion_logical_partition_t handle,
@@ -2280,6 +2291,7 @@ extern "C" {
   legion_output_requirement_create(legion_field_space_t field_space,
                                    legion_field_id_t *fields,
                                    size_t fields_size,
+                                   int dim,
                                    bool global_indexing);
 
   /**
@@ -2776,6 +2788,19 @@ extern "C" {
                                            bool collective,
                                            legion_sharding_id_t sid,
                                            bool implicit_sharding);
+
+  /**
+   * @return Caller takes ownership of return value
+   *
+   * @see Legion::Runtime::transform_future_map
+   */
+  legion_future_map_t
+  legion_future_map_transform(legion_runtime_t runtime,
+                              legion_context_t ctx,
+                              legion_future_map_t fm,
+                              legion_index_space_t new_domain,
+                              legion_point_transform_functor_t functor,
+                              bool take_ownership);
 
   // -----------------------------------------------------------------------
   // Deferred Buffer Operations
@@ -5152,7 +5177,7 @@ extern "C" {
   /**
    * @see Legion::Runtime::retrieve_semantic_information()
    */
-  void
+  bool
   legion_task_id_retrieve_semantic_information(
                                            legion_runtime_t runtime,
                                            legion_task_id_t task_id,
@@ -5635,6 +5660,12 @@ extern "C" {
     legion_runtime_t runtime,
     legion_mapper_t mapper,
     legion_processor_t proc);
+
+  /**
+   * @see Legion::Runtime::generate_static_projection_id()
+   */
+  legion_projection_id_t
+  legion_runtime_generate_static_projection_id();
 
   /**
    * @see Legion::Runtime::generate_library_projection_ids()

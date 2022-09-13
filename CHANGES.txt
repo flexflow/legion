@@ -1,6 +1,72 @@
 This file lists the major changes as they appear in the stable branch.  No
 attempt is made to keep this list accurate for the master branch.
 
+Version 22.09.0 (????? ??, ????)
+  * Python
+     - Support for running packages via `legion_python -m`
+     - Support for Jupyter Notebook on single node execution. 
+
+Version 22.06.0 (June 29, 2022)
+  * Regent
+     - Support for cross-products in index launches, as well as
+        multi-level projection functors.
+     - Support for HIP on AMD GPUs has been added. All tasks marked with
+        `__demand(__cuda)` are automatically eligible. Note that the name of
+        the annotation may change in the future to something more general, but
+        for now no change is being made. Some CUDA flags have migrated to more
+        general names. See below.
+     - The flag `-fcuda 1` is deprecated. Use `-fgpu cuda` instead.
+     - The flag `-fcuda-offline` is deprecated. Use `-fgpu-offline` instead.
+     - The flag `-fcuda-arch` is deprecated. Use `-fgpu-arch` instead.
+     - Enable HIP support with `-fgpu hip` and use the `-fgpu-offline` and
+        `-fgpu-arch` flags as necessary/appropriate.
+     - Support for new flag `-ffast-math 1` which enables fast-math
+        optimizations on CPU and GPU. By default, CPU code has this
+        disabled, and GPU code uses only the `contract` flag in LLVM
+        to generate FMA instructions. For compute-intensive
+        applications, additional performance can sometimes be unlocked
+        by enabling the full suite of optimizations with `-ffast-math 1`,
+        at the cost of numerical accuracy.
+     - Performance improvements for CUDA allow recent LLVM versions
+        (e.g., 13) to match or exceed the performance of LLVM
+        3.8. Previously, performance regressions made LLVM 3.8 the
+        most performant version for use with CUDA. The recommended
+        LLVM version moving forward is 13, and `setup_env.py` has been
+        updated to set this on all platforms.
+     - The versions of GASNet and Terra are now pinned by default in
+        `setup_env.py`. You can choose versions explicitly with
+        `GASNET_VERSION` (as before, though the previous default was
+        unpinned) and `--terra-branch`, respectively.
+  * Realm
+     - Allow use of system OpenMP runtime (instead of Realm-provided one) with
+        `-DLegion_OpenMP_SYSTEM_RUNTIME=ON`.  This allows inter-operation with
+        libraries that have already been linked to the system runtime, but
+        limits each process to a single OMP processor.
+
+Version 22.03.0 (March 27, 2022)
+  * Build
+     - Minimum supported cmake version is now 3.7.  (Some optional features
+        continue to require even newer versions.)
+  * Realm
+     - Numerous bug fixes in the `gasnetex` network layer
+     - CUDA and HIP support allow direct specification of which gpus to
+        use via `-ll:gpu_ids` command-line option
+     - Added support for copy paths using Cuda IPC between gpus on the same
+        physical node
+     - For applications using CUDA without the runtime API hijack AND only
+        submitting work to the default CUDA stream, `-cuda:legacysync 1`
+        improves the overhead of detecting the completion of device-side work
+        launched by a task
+     - Realm reduction copies may now indicate exclusive access to the
+        destination instance, improving performance by allowing simple
+        load/store instead of atomic operations
+     - Custom reduction operations (including Legion's built-in ones) can
+        provide HIP implementations, permitting in-place reductions in
+        HIP device memory
+  * Regent
+     - Support for custom serialization of types in task parameters and results
+     - New experimental timing library under std/timing
+
 Version 21.12.0 (December 31, 2021)
   * Realm
      - Performance improvements for multi-dimensional copies, especially

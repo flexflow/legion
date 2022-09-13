@@ -39,6 +39,7 @@ end
 
 function context:new_stat_scope()
   local cx = {
+    task_is_leaf = self.task_is_leaf,
     local_symbols = self.local_symbols,
     var_flows = self.var_flows,
     var_futures = self.var_futures,
@@ -54,6 +55,7 @@ function context:new_local_scope(cond)
   conds:insertall(self.conds)
   conds:insert(cond)
   local cx = {
+    task_is_leaf = self.task_is_leaf,
     local_symbols = self.local_symbols:copy(),
     var_flows = self.var_flows,
     var_futures = self.var_futures,
@@ -64,12 +66,14 @@ function context:new_local_scope(cond)
   return setmetatable(cx, context)
 end
 
-function context:new_task_scope()
+function context:new_task_scope(task_is_leaf)
+  assert(task_is_leaf ~= nil)
   local cx = {
+    task_is_leaf = task_is_leaf,
     local_symbols = data.newmap(),
-    var_flows = {},
-    var_futures = {},
-    var_symbols = {},
+    var_flows = data.newmap(),
+    var_futures = data.newmap(),
+    var_symbols = data.newmap(),
     conds = terralib.newlist(),
   }
   return setmetatable(cx, context)
@@ -81,8 +85,8 @@ function context.new_global_scope()
 end
 
 function context:get_flow(v)
-  if not rawget(self.var_flows, v) then
-    self.var_flows[v] = {}
+  if not self.var_flows[v] then
+    self.var_flows[v] = data.newmap()
   end
   return self.var_flows[v]
 end
@@ -107,19 +111,23 @@ end
 local analyze_var_flow = {}
 
 function flow_empty()
-  return {}
+  return data.newmap()
 end
 
 function flow_future()
-  return {[true] = true} -- Represents an unconditional future r-value
+  local result = data.newmap()
+  result[true] = true -- Represents an unconditional future r-value
+  return result
 end
 
 function flow_var(v)
-  return {[v] = true} -- Represents a variable
+  local result = data.newmap()
+  result[v] = true -- Represents a variable
+  return result
 end
 
 function flow_future_into(cx, lhs) -- Unconditionally flow future into l-value
-  for v, _ in pairs(lhs) do
+  for _, v in lhs:keys() do
     local var_flow = cx:get_flow(v)
     var_flow[true] = true
   end
@@ -127,24 +135,24 @@ end
 
 function flow_value_into_var(cx, symbol, value) -- Flow r-value into variable
   local var_flow = cx:get_flow(symbol)
-  for v, _ in pairs(value) do
+  for _, v in value:keys() do
     var_flow[v] = true
   end
 end
 
 function flow_value_into(cx, lhs, rhs) -- Flow r-value into l-value
-  for lhv, _ in pairs(lhs) do
+  for _, lhv in lhs:keys() do
     local lhv_flow = cx:get_flow(lhv)
-    for rhv, _ in pairs(rhs) do
+    for _, rhv in rhs:keys() do
       lhv_flow[rhv] = true
       end
   end
 end
 
 function meet_flow(...)
-  local flow = {}
+  local flow = data.newmap()
   for _, a in ipairs({...}) do
-    for v, _ in pairs(a) do
+    for _, v in a:keys() do
       flow[v] = true
     end
   end
@@ -180,7 +188,11 @@ function analyze_var_flow.expr_binary(cx, node)
 end
 
 function analyze_var_flow.expr_raw_future(cx, noe)
-  return flow_future()
+  if cx.task_is_leaf then
+    return flow_empty()
+  else
+    return flow_future()
+  end
 end
 
 function analyze_var_flow.expr(cx, node)
@@ -357,7 +369,7 @@ function analyze_var_flow.stat_assignment(cx, node)
   if not (std.is_list(lhs_type) or std.is_phase_barrier(lhs_type) or std.is_dynamic_collective(lhs_type)) then
     -- Make sure any dominating conditions flow into this assignment.
     local lhs_symbol = node.lhs:is(ast.typed.expr.ID) and node.lhs.value
-    for i, cond in pairs(cx.conds) do
+    for i, cond in ipairs(cx.conds) do
       if not cx.local_symbols[lhs_symbol] or i > cx.local_symbols[lhs_symbol] then
         flow_value_into(cx, lhs, cond)
       end
@@ -376,7 +388,7 @@ function analyze_var_flow.stat_reduce(cx, node)
   if not (std.is_list(lhs_type) or std.is_phase_barrier(lhs_type) or std.is_dynamic_collective(lhs_type)) then
     -- Make sure any dominating conditions flow into this assignment.
     local lhs_symbol = node.lhs:is(ast.typed.expr.ID) and node.lhs.value
-    for i, cond in pairs(cx.conds) do
+    for i, cond in ipairs(cx.conds) do
       if not cx.local_symbols[lhs_symbol] or i > cx.local_symbols[lhs_symbol] then
         flow_value_into(cx, lhs, cond)
       end
@@ -448,11 +460,11 @@ function analyze_var_flow.stat(cx, node)
 end
 
 local function compute_var_futures(cx)
-  local inflow = {}
-  for v1, flow in pairs(cx.var_flows) do
-    for v2, _ in pairs(flow) do
-      if not rawget(inflow, v2) then
-        inflow[v2] = {}
+  local inflow = data.newmap()
+  for v1, flow in cx.var_flows:items() do
+    for _, v2 in flow:keys() do
+      if not inflow[v2] then
+        inflow[v2] = data.newmap()
       end
       inflow[v2][v1] = true
     end
@@ -462,10 +474,10 @@ local function compute_var_futures(cx)
   var_futures[true] = true
   repeat
     local changed = false
-    for v1, _ in pairs(var_futures) do
-      if rawget(inflow, v1) then
-        for v2, _ in pairs(inflow[v1]) do
-          if not rawget(var_futures, v2) then
+    for _, v1 in var_futures:keys() do
+      if inflow[v1] then
+        for _, v2 in inflow[v1]:keys() do
+          if not var_futures[v2] then
             var_futures[v2] = true
             changed = true
           end
@@ -476,7 +488,7 @@ local function compute_var_futures(cx)
 end
 
 local function compute_var_symbols(cx)
-  for v, is_future in pairs(cx.var_futures) do
+  for v, is_future in cx.var_futures:items() do
     if std.is_symbol(v) and is_future then
       assert(terralib.types.istype(v:hastype()) and not std.is_future(v:gettype()))
       cx.var_symbols[v] = std.newsymbol(std.future(v:gettype()), v:hasname())
@@ -739,10 +751,17 @@ end
 
 function optimize_futures.expr_raw_future(cx, node)
   local value = concretize(cx, optimize_futures.expr(cx, node.value))
-  return node {
+  local result = node {
     value = node.value,
     expr_type = std.future(node.expr_type),
   }
+  if cx.task_is_leaf then
+    -- If we're in a leaf task, immediate concretize the result so
+    -- that it doesn't propagate, because escaping future values may
+    -- cause unexpected task launches (e.g., on arithmetic).
+    result = concretize(cx, result)
+  end
+  return result
 end
 
 function optimize_futures.expr_raw_physical(cx, node)
@@ -2026,7 +2045,7 @@ end
 function optimize_futures.top_task(cx, node)
   if not node.body then return node end
 
-  local cx = cx:new_task_scope()
+  local cx = cx:new_task_scope(node.config_options.leaf)
   analyze_var_flow.block(cx, node.body)
   compute_var_futures(cx)
   compute_var_symbols(cx)

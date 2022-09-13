@@ -257,8 +257,8 @@ namespace Realm {
 	if (b->generations.empty())
 	  continue;
 
-	os << "Barrier " << b->me << ": gen=" << b->generation
-	   << " subscr=" << b->gen_subscribed << "\n";
+	os << "Barrier " << b->me << ": gen=" << b->generation.load()
+	   << " subscr=" << b->gen_subscribed.load() << "\n";
 	for (std::map<EventImpl::gen_t, BarrierImpl::Generation*>::const_iterator git = 
 	       b->generations.begin(); git != b->generations.end(); git++) {
 	  const EventWaiter::EventWaiterList &waiters = git->second->local_waiters;
@@ -663,6 +663,7 @@ namespace Realm {
     , pin_util_procs(false)
     , cpu_bgwork_timeslice(0)
     , util_bgwork_timeslice(0)
+    , use_ext_sysmem(true)
   {}
 
   CoreModule::~CoreModule(void)
@@ -1314,6 +1315,9 @@ namespace Realm {
       cp.add_option_int("-ll:ahandlers", active_msg_handler_threads);
       cp.add_option_int("-ll:handler_bgwork", active_msg_handler_bgwork);
 
+      // The default of path_cache_size is 0, when it is set to non-zero, the caching is enabled.
+      cp.add_option_int("-ll:path_cache_size", Config::path_cache_lru_size);
+
       bool cmdline_ok = cp.parse_command_line(cmdline);
 
       if(!cmdline_ok) {
@@ -1882,6 +1886,11 @@ namespace Realm {
 #endif
       }
 
+      if (Config::path_cache_lru_size) {
+        assert(Config::path_cache_lru_size > 0);
+        init_path_cache();
+      }
+
       return true;
     }
 
@@ -2438,6 +2447,10 @@ namespace Realm {
 
       // very last step - unregister our signal handlers
       unregister_error_signal_handler();
+
+      if (Config::path_cache_lru_size) {
+        finalize_path_cache();
+      }
 
       return shutdown_result_code;
     }

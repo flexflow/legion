@@ -191,101 +191,6 @@ namespace Legion {
       public:
         Operation *const op;
       };
-      struct DeferredReadyArgs : public LgTaskArgs<DeferredReadyArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_READY_TRIGGER_ID;
-      public:
-        DeferredReadyArgs(Operation *op)
-          : LgTaskArgs<DeferredReadyArgs>(op->get_unique_op_id()),
-            proxy_this(op) { }
-      public:
-        Operation *const proxy_this;
-      };
-      struct DeferredEnqueueArgs : public LgTaskArgs<DeferredEnqueueArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_ENQUEUE_OP_ID;
-      public:
-        DeferredEnqueueArgs(Operation *op, LgPriority p)
-          : LgTaskArgs<DeferredEnqueueArgs>(op->get_unique_op_id()),
-            proxy_this(op), priority(p) { }
-      public:
-        Operation *const proxy_this;
-        const LgPriority priority;
-      };
-      struct DeferredResolutionArgs :
-        public LgTaskArgs<DeferredResolutionArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_RESOLUTION_TRIGGER_ID;
-      public:
-        DeferredResolutionArgs(Operation *op)
-          : LgTaskArgs<DeferredResolutionArgs>(op->get_unique_op_id()),
-            proxy_this(op) { }
-      public:
-        Operation *const proxy_this;
-      };
-      struct DeferredExecuteArgs : public LgTaskArgs<DeferredExecuteArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_EXECUTION_TRIGGER_ID;
-      public:
-        DeferredExecuteArgs(Operation *op)
-          : LgTaskArgs<DeferredExecuteArgs>(op->get_unique_op_id()),
-            proxy_this(op) { }
-      public:
-        Operation *const proxy_this;
-      };
-      struct DeferredExecArgs : public LgTaskArgs<DeferredExecArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_EXECUTE_ID;
-      public:
-        DeferredExecArgs(Operation *op)
-          : LgTaskArgs<DeferredExecArgs>(op->get_unique_op_id()),
-            proxy_this(op) { }
-      public:
-        Operation *const proxy_this;
-      };
-      struct TriggerCompleteArgs : public LgTaskArgs<TriggerCompleteArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_TRIGGER_COMPLETE_ID;
-      public:
-        TriggerCompleteArgs(Operation *op)
-          : LgTaskArgs<TriggerCompleteArgs>(op->get_unique_op_id()),
-            proxy_this(op) { }
-      public:
-        Operation *const proxy_this;
-      };
-      struct DeferredCompleteArgs : public LgTaskArgs<DeferredCompleteArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_COMPLETE_ID;
-      public:
-        DeferredCompleteArgs(Operation *op)
-          : LgTaskArgs<DeferredCompleteArgs>(op->get_unique_op_id()),
-            proxy_this(op) { }
-      public:
-        Operation *const proxy_this;
-      };
-      struct DeferredCommitTriggerArgs : 
-        public LgTaskArgs<DeferredCommitTriggerArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_COMMIT_TRIGGER_ID; 
-      public:
-        DeferredCommitTriggerArgs(Operation *op)
-          : LgTaskArgs<DeferredCommitTriggerArgs>(op->get_unique_op_id()),
-            proxy_this(op), gen(op->get_generation()) { }
-      public:
-        Operation *const proxy_this;
-        const GenerationID gen;
-      };
-      struct DeferredCommitArgs : public LgTaskArgs<DeferredCommitArgs> {
-      public:
-        static const LgTaskID TASK_ID = LG_DEFERRED_COMMIT_ID;
-      public:
-        DeferredCommitArgs(Operation *op, bool d)
-          : LgTaskArgs<DeferredCommitArgs>(op->get_unique_op_id()),
-            proxy_this(op), deactivate(d) { }
-      public:
-        Operation *proxy_this;
-        bool deactivate;
-      };
       struct DeferReleaseAcquiredArgs : 
         public LgTaskArgs<DeferReleaseAcquiredArgs> {
       public:
@@ -388,7 +293,7 @@ namespace Legion {
       void set_trace(LegionTrace *trace,
                      const std::vector<StaticDependence> *dependences,
                      const LogicalTraceInfo *trace_info = NULL);
-      void set_trace_local_id(unsigned id);
+      void set_trace_local_id(size_t id);
       void set_must_epoch(MustEpochOp *epoch, bool do_registration);
     public:
       // Localize a region requirement to its parent context
@@ -449,6 +354,10 @@ namespace Legion {
       // placed on the ready queue in order for the runtime to
       // perform this mapping
       virtual void trigger_mapping(void);
+      // Helper function for trigger execution 
+      // (only used in a limited set of operations and not
+      // part of the default pipeline)
+      virtual void trigger_execution(void);
       // The function to trigger once speculation is
       // ready to be resolved
       virtual void trigger_resolution(void);
@@ -457,12 +366,6 @@ namespace Legion {
       // The function to call when commit the operation is
       // ready to commit
       virtual void trigger_commit(void);
-      // Helper function for deferring complete operations
-      // (only used in a limited set of operations and not
-      // part of the default pipeline)
-      virtual void deferred_execute(void);
-      // Helper function for deferring commit operations
-      virtual void deferred_commit_trigger(GenerationID commit_gen);
       // A helper method for deciding what to do when we have
       // aliased region requirements for an operation
       virtual void report_interfering_requirements(unsigned idx1,unsigned idx2);
@@ -510,7 +413,8 @@ namespace Legion {
                                 const std::vector<Grant> &grants,
                                 const std::vector<PhaseBarrier> &wait_barriers);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests, 
+                               bool fill, unsigned count = 1);
       // Report a profiling result for this operation
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                         const Realm::ProfilingResponse &result,
@@ -770,12 +674,14 @@ namespace Legion {
       // Track whether we are tracing this operation
       bool tracing;
       // The id local to a trace
-      unsigned trace_local_id;
+      size_t trace_local_id;
       // Our must epoch if we have one
       MustEpochOp *must_epoch;
       // A set list or recorded dependences during logical traversal
       LegionList<LogicalUser,LOGICAL_REC_ALLOC> logical_records;
       // Dependence trackers for detecting when it is safe to map and commit
+      // We allocate and free these every time to ensure that their memory
+      // is always cleaned up after each operation
       MappingDependenceTracker *mapping_tracker;
       CommitDependenceTracker  *commit_tracker;
     };
@@ -976,7 +882,6 @@ namespace Legion {
     class Memoizable {
     public:
       virtual ~Memoizable(void) { }
-      virtual bool is_memoizable_task(void) const = 0;
       virtual bool is_recording(void) const = 0;
       virtual bool is_memoizing(void) const = 0;
       virtual AddressSpaceID get_origin_space(void) const = 0;
@@ -993,51 +898,7 @@ namespace Legion {
     protected:
       virtual const VersionInfo& get_version_info(unsigned idx) const = 0;
     public:
-      virtual void pack_remote_memoizable(Serializer &rez, 
-                                          AddressSpaceID target) const;
-      virtual Memoizable* clone(Operation *op) { return this; }
-    };
-
-    class RemoteMemoizable : public Memoizable {
-    public:
-      RemoteMemoizable(Operation *op, Memoizable *original, 
-                       AddressSpaceID origin, Operation::OpKind kind,
-                       TraceLocalID tid, ApEvent completion_event,
-                       bool is_memoizable_task, bool is_memoizing);
-      virtual ~RemoteMemoizable(void);
-    public:
-      virtual bool is_memoizable_task(void) const;
-      virtual bool is_recording(void) const;
-      virtual bool is_memoizing(void) const;
-      virtual AddressSpaceID get_origin_space(void) const;
-      virtual PhysicalTemplate* get_template(void) const;
-      virtual ApEvent get_memo_completion(void) const;
-      virtual void replay_mapping_output(void);
-      virtual Operation* get_operation(void) const;
-      virtual Operation::OpKind get_memoizable_kind(void) const;
-      // Return a trace local unique ID for this operation
-      typedef std::pair<unsigned, DomainPoint> TraceLocalID;
-      virtual TraceLocalID get_trace_local_id(void) const;
-      virtual ApEvent compute_sync_precondition(const TraceInfo *info) const;
-      virtual void set_effects_postcondition(ApEvent postcondition);
-      virtual void complete_replay(ApEvent complete_event);
-    protected:
-      virtual const VersionInfo& get_version_info(unsigned idx) const;
-    public:
-      virtual void pack_remote_memoizable(Serializer &rez, 
-                                          AddressSpaceID target) const;
-      virtual Memoizable* clone(Operation *op);
-      static Memoizable* unpack_remote_memoizable(Deserializer &derez,
-                                      Operation *op, Runtime *runtime);
-    public:
-      Operation *const op;
-      Memoizable *const original; // not a valid pointer on remote nodes
-      const AddressSpaceID origin;
-      const Operation::OpKind kind;
-      const TraceLocalID trace_local_id;
-      const ApEvent completion_event;
-      const bool is_mem_task;
-      const bool is_memo;
+      //virtual Memoizable* clone(Operation *op) { return this; }
     };
 
     /**
@@ -1090,7 +951,6 @@ namespace Legion {
       virtual bool is_memoizing(void) const { return memo_state != NO_MEMO; }
       virtual bool is_recording(void) const { return memo_state == MEMO_RECORD;}
       inline bool is_replaying(void) const { return memo_state == MEMO_REPLAY; }
-      virtual bool is_memoizable_task(void) const { return false; }
       virtual AddressSpaceID get_origin_space(void) const 
         { return this->runtime->address_space; }
       inline MemoizableState get_memoizable_state(void) const 
@@ -1188,7 +1048,8 @@ namespace Legion {
       bool invoke_mapper(InstanceSet &mapped_instances,
                          std::vector<PhysicalManager*> &source_instances);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                       const Realm::ProfilingResponse &response,
                                       const void *orig, size_t orig_length);
@@ -1219,8 +1080,8 @@ namespace Legion {
       std::vector<MapProfilingInfo>                     profiling_info;
       RtUserEvent                                   profiling_reported;
       int                                           profiling_priority;
-      int                               outstanding_profiling_requests;
-      int                               outstanding_profiling_reported;
+      std::atomic<int>                  outstanding_profiling_requests;
+      std::atomic<int>                  outstanding_profiling_reported;
     };
 
     /**
@@ -1263,15 +1124,20 @@ namespace Legion {
         static const LgTaskID TASK_ID = LG_DEFERRED_COPY_ACROSS_TASK_ID;
       public:
         DeferredCopyAcross(CopyOp *op, const PhysicalTraceInfo &info,
-                           unsigned idx, ApEvent pre, ApUserEvent d,
-                           PredEvent g, RtUserEvent a, 
+                           unsigned idx, ApEvent init, ApUserEvent local_pre,
+                           ApUserEvent local_post, ApEvent collective_pre, 
+                           ApEvent collective_post, PredEvent g, RtUserEvent a,
                            InstanceSet *src, InstanceSet *dst,
-                           InstanceSet *gather, InstanceSet *scatter)
+                           InstanceSet *gather, InstanceSet *scatter,
+                           const bool preimages)
           : LgTaskArgs<DeferredCopyAcross>(op->get_unique_op_id()), 
-            PhysicalTraceInfo(info), copy(op),
-            index(idx), precondition(pre), done(d), guard(g), applied(a),
+            PhysicalTraceInfo(info), copy(op), index(idx),
+            init_precondition(init), local_precondition(local_pre),
+            local_postcondition(local_post), 
+            collective_precondition(collective_pre), 
+            collective_postcondition(collective_post), guard(g), applied(a),
             src_targets(src), dst_targets(dst), gather_targets(gather),
-            scatter_targets(scatter) 
+            scatter_targets(scatter), compute_preimages(preimages)
           // This is kind of scary, Realm is about to make a copy of this
           // without our knowledge, but we need to preserve the correctness
           // of reference counting on PhysicalTraceRecorders, so just add
@@ -1283,14 +1149,18 @@ namespace Legion {
       public:
         CopyOp *const copy;
         const unsigned index;
-        const ApEvent precondition;
-        const ApUserEvent done;
+        const ApEvent init_precondition;
+        const ApUserEvent local_precondition;
+        const ApUserEvent local_postcondition;
+        const ApEvent collective_precondition;
+        const ApEvent collective_postcondition;
         const PredEvent guard;
         const RtUserEvent applied;
         InstanceSet *const src_targets;
         InstanceSet *const dst_targets;
         InstanceSet *const gather_targets;
         InstanceSet *const scatter_targets;
+        const bool compute_preimages;
       };
     public:
       CopyOp(Runtime *rt);
@@ -1321,12 +1191,13 @@ namespace Legion {
       virtual void trigger_mapping(void);
       virtual void trigger_commit(void);
       virtual void report_interfering_requirements(unsigned idx1,unsigned idx2);
-      virtual std::pair<ApEvent,ApEvent> exchange_indirect_records(
+      virtual RtEvent exchange_indirect_records(
           const unsigned index, const ApEvent local_pre, 
-          const ApEvent local_done, const PhysicalTraceInfo &trace_info,
-          const InstanceSet &instances, const IndexSpace space, 
+          const ApEvent local_post, ApEvent &collective_pre,
+          ApEvent &collective_post, const TraceInfo &trace_info,
+          const InstanceSet &instances, const RegionRequirement &req,
           const DomainPoint &key,
-          LegionVector<IndirectRecord> &records, const bool sources);
+          std::vector<IndirectRecord> &records, const bool sources);
     public:
       virtual bool query_speculate(bool &value, bool &mapping_only);
       virtual void resolve_true(bool speculated, bool launched);
@@ -1349,21 +1220,25 @@ namespace Legion {
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
     protected:
-      void check_copy_privileges(const bool permit_projection);
+      void check_copy_privileges(const bool permit_projection) const;
       void check_copy_privilege(const RegionRequirement &req, unsigned idx,
-                                const bool permit_projection);
-      void check_compatibility_properties(void) const;
+                                const bool permit_projection) const;
+      void perform_type_checking(void) const;
       void compute_parent_indexes(void);
       void perform_copy_across(const unsigned index, 
-                               const ApEvent local_init_precondition,
-                               const ApUserEvent local_completion,
+                               const ApEvent init_precondition,
+                               const ApUserEvent local_precondition,
+                               const ApUserEvent local_postcondition,
+                               const ApEvent collective_precondition,
+                               const ApEvent collective_postcondition,
                                const PredEvent predication_guard,
                                const InstanceSet &src_targets,
                                const InstanceSet &dst_targets,
                                const InstanceSet *gather_targets,
                                const InstanceSet *scatter_targets,
                                const PhysicalTraceInfo &trace_info,
-                               std::set<RtEvent> &applied_conditions);
+                               std::set<RtEvent> &applied_conditions,
+                               const bool compute_preimages);
       void finalize_copy_profiling(void);
     public:
       static void handle_deferred_across(const void *args);
@@ -1384,7 +1259,8 @@ namespace Legion {
                              std::vector<MappingInstance> &output,
                              InstanceSet &targets, bool is_reduce = false);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                       const Realm::ProfilingResponse &response,
                                       const void *orig, size_t orig_length);
@@ -1400,6 +1276,7 @@ namespace Legion {
       std::vector<unsigned>                 dst_parent_indexes;
       LegionVector<VersionInfo>             src_versions;
       LegionVector<VersionInfo>             dst_versions;
+      std::vector<IndexSpaceExpression*>    copy_expressions;
     public: // These are only used for indirect copies
       std::vector<RegionTreePath>           gather_privilege_paths;
       std::vector<RegionTreePath>           scatter_privilege_paths;
@@ -1409,6 +1286,8 @@ namespace Legion {
       std::vector<bool>                     scatter_is_range;
       LegionVector<VersionInfo>             gather_versions;
       LegionVector<VersionInfo>             scatter_versions;
+      std::vector<std::vector<IndirectRecord> > src_indirect_records;
+      std::vector<std::vector<IndirectRecord> > dst_indirect_records;
     protected: // for support with mapping
       MapperManager*              mapper;
     protected:
@@ -1428,8 +1307,8 @@ namespace Legion {
       std::vector<CopyProfilingInfo>                  profiling_info;
       RtUserEvent                                 profiling_reported;
       int                                         profiling_priority;
-      int                             outstanding_profiling_requests;
-      int                             outstanding_profiling_reported;
+      std::atomic<int>                outstanding_profiling_requests;
+      std::atomic<int>                outstanding_profiling_reported;
     public:
       bool                            possible_src_indirect_out_of_range;
       bool                            possible_dst_indirect_out_of_range;
@@ -1466,12 +1345,19 @@ namespace Legion {
       virtual void trigger_mapping(void);
       virtual void trigger_commit(void);
       virtual void report_interfering_requirements(unsigned idx1,unsigned idx2);
-      virtual std::pair<ApEvent,ApEvent> exchange_indirect_records(
+      virtual RtEvent exchange_indirect_records(
           const unsigned index, const ApEvent local_pre,
-          const ApEvent local_done, const PhysicalTraceInfo &trace_info,
-          const InstanceSet &instances, const IndexSpace space,
+          const ApEvent local_post, ApEvent &collective_pre,
+          ApEvent &collective_post, const TraceInfo &trace_info,
+          const InstanceSet &instances, const RegionRequirement &req,
           const DomainPoint &key,
-          LegionVector<IndirectRecord> &records, const bool sources); 
+          std::vector<IndirectRecord> &records, const bool sources); 
+      virtual RtEvent finalize_exchange(const unsigned index,const bool source);
+    public:
+      virtual RtEvent find_intra_space_dependence(const DomainPoint &point);
+      virtual void record_intra_space_dependence(const DomainPoint &point,
+                                                 const DomainPoint &next,
+                                                 RtEvent point_mapped);
     public:
       // From MemoizableOp
       virtual void trigger_replay(void);
@@ -1489,16 +1375,17 @@ namespace Legion {
       IndexSpaceNode*                                    launch_space;
     protected:
       std::vector<PointCopyOp*>                          points;
-      std::vector<LegionVector<IndirectRecord> >         src_records;
-      std::vector<LegionVector<IndirectRecord> >         dst_records;
-      std::vector<std::vector<ApEvent> >                 exchange_pre_events;
-      std::vector<std::vector<ApEvent> >                 exchange_post_events;
-      std::vector<ApUserEvent>                           pre_merged;
-      std::vector<ApUserEvent>                           post_merged;
-      std::vector<size_t>                                src_exchanges;
-      std::vector<size_t>                                dst_exchanges;
-      std::vector<RtUserEvent>                           src_exchanged;
-      std::vector<RtUserEvent>                           dst_exchanged;
+      struct IndirectionExchange {
+        std::set<ApEvent> local_preconditions;
+        std::set<ApEvent> local_postconditions;
+        std::vector<std::vector<IndirectRecord>*> src_records;
+        std::vector<std::vector<IndirectRecord>*> dst_records;
+        ApUserEvent collective_pre;
+        ApUserEvent collective_post;
+        RtUserEvent src_ready;
+        RtUserEvent dst_ready;
+      };
+      std::vector<IndirectionExchange>                   collective_exchanges;
       unsigned                                           points_committed;
       bool                                       collective_src_indirect_points;
       bool                                       collective_dst_indirect_points;
@@ -1507,6 +1394,8 @@ namespace Legion {
     protected:
       // For checking aliasing of points in debug mode only
       std::set<std::pair<unsigned,unsigned> > interfering_requirements; 
+      std::map<DomainPoint,RtEvent> intra_space_dependences;
+      std::map<DomainPoint,RtUserEvent> pending_intra_space_dependences;
     };
 
     /**
@@ -1534,12 +1423,13 @@ namespace Legion {
       virtual void trigger_ready(void);
       // trigger_mapping same as base class
       virtual void trigger_commit(void);
-      virtual std::pair<ApEvent,ApEvent> exchange_indirect_records(
+      virtual RtEvent exchange_indirect_records(
           const unsigned index, const ApEvent local_pre,
-          const ApEvent local_done, const PhysicalTraceInfo &trace_info,
-          const InstanceSet &instances, const IndexSpace space,
+          const ApEvent local_post, ApEvent &collective_pre,
+          ApEvent &collective_post, const TraceInfo &trace_info,
+          const InstanceSet &instances, const RegionRequirement &req,
           const DomainPoint &key,
-          LegionVector<IndirectRecord> &records, const bool sources);
+          std::vector<IndirectRecord> &records, const bool sources);
     public:
       // For collective instances
       virtual CollectiveManager* find_or_create_collective_instance(
@@ -1557,12 +1447,16 @@ namespace Legion {
     public:
       // From ProjectionPoint
       virtual const DomainPoint& get_domain_point(void) const;
-      virtual void set_projection_result(unsigned idx,LogicalRegion result);
+      virtual void set_projection_result(unsigned idx, LogicalRegion result);
+      virtual void record_intra_space_dependences(unsigned idx,
+                               const std::vector<DomainPoint> &region_deps);
+      virtual const Mappable* as_mappable(void) const { return this; }
     public:
       // From Memoizable
       virtual TraceLocalID get_trace_local_id(void) const;
     protected:
-      IndexCopyOp*              owner;
+      IndexCopyOp*                          owner;
+      std::set<RtEvent>                     intra_space_mapping_dependences;
     };
 
     /**
@@ -1684,7 +1578,7 @@ namespace Legion {
       void initialize_fence(InnerContext *ctx, RtEvent precondition);
       void initialize_index_space(InnerContext *ctx, IndexSpaceNode *node, 
                             const Future &future, bool owner = true,
-                            ShardMapping *shard_mapping = NULL);
+                            const CollectiveMapping *mapping = NULL);
       void initialize_field(InnerContext *ctx, FieldSpaceNode *node,
                             FieldID fid, const Future &field_size,
                             RtEvent precondition, bool owner = true);
@@ -1702,6 +1596,7 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_mapping(void);
+      virtual void trigger_execution(void);
       virtual void trigger_complete(void);
     protected:
       CreationKind kind; 
@@ -1710,7 +1605,7 @@ namespace Legion {
       std::vector<Future> futures;
       std::vector<FieldID> fields;
       RtEvent mapping_precondition;
-      ShardMapping *shard_mapping;
+      const CollectiveMapping *mapping;
       bool owner;
     };
 
@@ -1994,7 +1889,8 @@ namespace Legion {
       virtual void record_reference_mutation_effect(RtEvent event);
     protected:
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                       const Realm::ProfilingResponse &response,
                                       const void *orig, size_t orig_length);
@@ -2018,8 +1914,8 @@ namespace Legion {
       std::vector<CloseProfilingInfo>                  profiling_info;
       RtUserEvent                                  profiling_reported;
       int                                          profiling_priority;
-      int                              outstanding_profiling_requests;
-      int                              outstanding_profiling_reported;
+      std::atomic<int>                 outstanding_profiling_requests;
+      std::atomic<int>                 outstanding_profiling_reported;
     };
 
     /**
@@ -2254,7 +2150,8 @@ namespace Legion {
       void invoke_mapper(void);
       void log_acquire_requirement(void);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                       const Realm::ProfilingResponse &response,
                                       const void *orig, size_t orig_length);
@@ -2281,8 +2178,8 @@ namespace Legion {
       std::vector<AcquireProfilingInfo>                  profiling_info;
       RtUserEvent                                    profiling_reported;
       int                                            profiling_priority;
-      int                                outstanding_profiling_requests;
-      int                                outstanding_profiling_reported;
+      std::atomic<int>                   outstanding_profiling_requests;
+      std::atomic<int>                   outstanding_profiling_reported;
     };
 
     /**
@@ -2368,7 +2265,8 @@ namespace Legion {
       void invoke_mapper(std::vector<PhysicalManager*> &source_instances);
       void log_release_requirement(void);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                       const Realm::ProfilingResponse &response,
                                       const void *orig, size_t orig_length);
@@ -2396,8 +2294,8 @@ namespace Legion {
       std::vector<ReleaseProfilingInfo>                  profiling_info;
       RtUserEvent                                    profiling_reported;
       int                                            profiling_priority;
-      int                                outstanding_profiling_requests;
-      int                                outstanding_profiling_reported;
+      std::atomic<int>                   outstanding_profiling_requests;
+      std::atomic<int>                   outstanding_profiling_reported;
     };
 
     /**
@@ -2435,7 +2333,7 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_mapping(void);
-      virtual void deferred_execute(void);
+      virtual void trigger_execution(void);
       virtual void trigger_complete(void);
     protected:
       Future future;
@@ -2466,7 +2364,7 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_mapping(void);
-      virtual void deferred_execute(void);
+      virtual void trigger_execution(void);
     protected:
       Future future;
     };
@@ -2725,7 +2623,7 @@ namespace Legion {
       // Methods for keeping track of when we can complete and commit
       void register_subop(Operation *op);
       void notify_subop_complete(Operation *op, RtEvent precondition);
-      void notify_subop_commit(Operation *op);
+      void notify_subop_commit(Operation *op, RtEvent precondition);
     public:
       RtUserEvent find_slice_versioning_event(UniqueID slice_id, bool &first);
     protected:
@@ -2797,7 +2695,8 @@ namespace Legion {
     protected:
       std::map<UniqueID,RtUserEvent> slice_version_events;
     protected:
-      std::set<RtEvent> completion_preconditions;
+      std::set<RtEvent> completion_preconditions, commit_preconditions;
+      std::set<ApEvent> completion_effects;
     };
 
     /**
@@ -2835,6 +2734,7 @@ namespace Legion {
                                       RegionTreeForest *forest,
                                       ShardID shard, size_t total_shards) = 0;
         virtual void perform_logging(PendingPartitionOp* op) = 0;
+        virtual bool need_all_futures(void) const { return false; }
       };
       class EqualPartitionThunk : public PendingPartitionThunk {
       public:
@@ -2871,6 +2771,7 @@ namespace Legion {
         { return forest->create_partition_by_weights(op, pid, weights,
                                       granularity, shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp *op);
+        virtual bool need_all_futures(void) const { return true; }
       protected:
         IndexPartition pid;
         FutureMap weights;
@@ -3140,6 +3041,7 @@ namespace Legion {
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
       virtual void trigger_mapping(void);
+      virtual void trigger_execution(void);
       virtual void trigger_complete(void);
       virtual bool is_partition_op(void) const { return true; } 
     public:
@@ -3148,11 +3050,13 @@ namespace Legion {
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
     protected:
-      virtual void request_future_buffers(std::set<RtEvent> &mapped_events,
-                                          std::set<RtEvent> &ready_events);
+      virtual void populate_sources(const FutureMap &fm);
+      void request_future_buffers(std::set<RtEvent> &mapped_events,
+                                  std::set<RtEvent> &ready_events);
     protected:
       PendingPartitionThunk *thunk;
       FutureMap future_map;
+      std::map<DomainPoint,Future> sources;
     };
 
     /**
@@ -3293,15 +3197,16 @@ namespace Legion {
     public:
       void initialize_by_field(InnerContext *ctx, IndexPartition pid,
                                LogicalRegion handle, LogicalRegion parent,
-                               FieldID fid, MapperID id, MappingTagID tag,
+                               IndexSpace color_space, FieldID fid, 
+                               MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg); 
       void initialize_by_image(InnerContext *ctx, IndexPartition pid,
-                               LogicalPartition projection,
+                               IndexSpace handle, LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg);
       void initialize_by_image_range(InnerContext *ctx, IndexPartition pid,
-                               LogicalPartition projection,
+                               IndexSpace handle, LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg);
@@ -3322,6 +3227,21 @@ namespace Legion {
       void perform_logging(void) const;
       void log_requirement(void) const;
       const RegionRequirement& get_requirement(void) const;
+    protected:
+      void check_by_field(IndexPartition pid, IndexSpace color_space,
+          LogicalRegion handle, LogicalRegion parent, FieldID fid) const;
+      void check_by_image(IndexPartition pid, IndexSpace pid_parent,
+          LogicalPartition projection, LogicalRegion parent, FieldID fid) const;
+      void check_by_image_range(IndexPartition pid, IndexSpace pid_parent,
+          LogicalPartition projection, LogicalRegion parent, FieldID fid) const;
+      void check_by_preimage(IndexPartition pid, IndexPartition proj,
+                             LogicalRegion handle, LogicalRegion parent,
+                             FieldID fid) const;
+      void check_by_preimage_range(IndexPartition pid, IndexPartition proj,
+                             LogicalRegion handle, LogicalRegion parent,
+                             FieldID fid) const;
+      void check_by_association(LogicalRegion domain,
+          LogicalRegion domain_parent, FieldID fid, IndexSpace range) const;
     public:
       virtual bool has_prepipeline_stage(void) const { return true; }
       virtual void trigger_prepipeline_stage(void);
@@ -3364,7 +3284,8 @@ namespace Legion {
                    get_acquired_instances_ref(void);
       virtual void record_reference_mutation_effect(RtEvent event);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       // Report a profiling result for this operation
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
                                         const Realm::ProfilingResponse &result,
@@ -3434,8 +3355,8 @@ namespace Legion {
       std::vector<PartitionProfilingInfo>                  profiling_info;
       RtUserEvent                                      profiling_reported;
       int                                              profiling_priority;
-      int                                  outstanding_profiling_requests;
-      int                                  outstanding_profiling_reported;
+      std::atomic<int>                     outstanding_profiling_requests;
+      std::atomic<int>                     outstanding_profiling_reported;
     };
 
     /**
@@ -3483,6 +3404,9 @@ namespace Legion {
       // From ProjectionPoint
       virtual const DomainPoint& get_domain_point(void) const;
       virtual void set_projection_result(unsigned idx, LogicalRegion result);
+      virtual void record_intra_space_dependences(unsigned idx,
+                               const std::vector<DomainPoint> &region_deps);
+      virtual const Mappable* as_mappable(void) const { return this; }
     public:
       DependentPartitionOp *owner;
     };
@@ -3538,7 +3462,8 @@ namespace Legion {
       virtual std::map<PhysicalManager*,unsigned>*
                                        get_acquired_instances_ref(void);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
     public:
       virtual bool has_prepipeline_stage(void) const
         { return need_prepipeline_stage; }
@@ -3546,7 +3471,7 @@ namespace Legion {
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
       virtual void trigger_mapping(void);
-      virtual void deferred_execute(void);
+      virtual void trigger_execution(void);
     public:
       virtual bool query_speculate(bool &value, bool &mapping_only);
       virtual void resolve_true(bool speculated, bool launched);
@@ -3676,7 +3601,10 @@ namespace Legion {
     public:
       // From ProjectionPoint
       virtual const DomainPoint& get_domain_point(void) const;
-      virtual void set_projection_result(unsigned idx,LogicalRegion result);
+      virtual void set_projection_result(unsigned idx, LogicalRegion result);
+      virtual void record_intra_space_dependences(unsigned idx,
+                               const std::vector<DomainPoint> &region_deps);
+      virtual const Mappable* as_mappable(void) const { return this; }
     public:
       // From Memoizable
       virtual TraceLocalID get_trace_local_id(void) const;
@@ -3883,7 +3811,8 @@ namespace Legion {
                                   const InstanceSet &sources,
                                   std::vector<unsigned> &ranking);
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       virtual void pack_remote_operation(Serializer &rez, AddressSpaceID target,
                                          std::set<RtEvent> &applied) const;
     protected:
@@ -4013,7 +3942,7 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_mapping(void);
-      virtual void deferred_execute(void);
+      virtual void trigger_execution(void);
     protected:
       TimingMeasurement measurement;
       std::set<Future> preconditions;
@@ -4045,7 +3974,7 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_mapping(void);
-      virtual void deferred_execute(void);
+      virtual void trigger_execution(void);
       // virtual method for control replication
       virtual void process_result(MapperManager *mapper,
                                   void *buffer, size_t size) const { }
@@ -4092,10 +4021,12 @@ namespace Legion {
       void activate_all_reduce(void);
       void deactivate_all_reduce(void);
       void invoke_mapper(std::vector<Memory> &targets);
+      ApEvent finalize_serdez_targets(RtEvent &protect);
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
       virtual void trigger_mapping(void);
+      virtual void trigger_execution(void);
       virtual void trigger_complete(void);
     protected:
       // These are virtual methods to override for control replication
@@ -4113,6 +4044,7 @@ namespace Legion {
       std::vector<FutureInstance*> targets;
       size_t future_result_size;
       void *serdez_redop_buffer;
+      size_t serdez_upper_bound;
       MapperID mapper_id;
       MappingTagID tag;
       bool deterministic;
@@ -4159,7 +4091,8 @@ namespace Legion {
                                   const InstanceSet &sources,
                                   std::vector<unsigned> &ranking) = 0;
       virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
-                               Realm::ProfilingRequestSet &requests, bool fill);
+                               Realm::ProfilingRequestSet &requests,
+                               bool fill, unsigned count = 1);
       virtual void report_uninitialized_usage(const unsigned index,
                                               LogicalRegion handle,
                                               const RegionUsage usage,
@@ -4193,7 +4126,7 @@ namespace Legion {
       int                                 profiling_priority;
       Processor                           profiling_target;
       RtUserEvent                         profiling_response;
-      int                                 profiling_reports;
+      std::atomic<int>                    profiling_reports;
     };
 
     /**

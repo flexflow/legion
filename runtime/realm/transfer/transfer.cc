@@ -33,6 +33,12 @@ namespace Realm {
   extern Logger log_ib_alloc;
   Logger log_xplan("xplan");
   Logger log_xpath("xpath");
+  Logger log_xpath_cache("xpath_cache");
+
+  namespace Config {
+    // the size of the cache
+    size_t path_cache_lru_size = 0;
+  };
 
   ////////////////////////////////////////////////////////////////////////
   //
@@ -82,7 +88,8 @@ namespace Realm {
     virtual void confirm_step(void);
     virtual void cancel_step(void);
 
-    virtual bool get_addresses(AddressList &addrlist);
+    virtual bool get_addresses(AddressList &addrlist,
+                               const InstanceLayoutPieceBase *&nonaffine);
 
   protected:
     virtual bool get_next_rect(Rect<N,T>& r, FieldID& fid,
@@ -449,8 +456,9 @@ namespace Realm {
     }
 
     // offer the rectangle - it can be reduced by pruning dimensions
-    int ndims = info.set_rect(inst_impl, layout_piece, N,
-                              target_lo, target_hi, dim_order);
+    int ndims = info.set_rect(inst_impl, layout_piece,
+                              cur_field_size, cur_field_offset,
+                              N, target_lo, target_hi, dim_order);
 
     // if pruning did occur, update target_subrect and cur_bytes to match
     if(ndims < N) {
@@ -512,11 +520,14 @@ namespace Realm {
   }
 
   template <int N, typename T>
-  bool TransferIteratorBase<N,T>::get_addresses(AddressList &addrlist)
+  bool TransferIteratorBase<N,T>::get_addresses(AddressList &addrlist,
+                                                const InstanceLayoutPieceBase *&nonaffine)
   {
 #ifdef DEBUG_REALM
     assert(!tentative_valid);
 #endif
+
+    nonaffine = 0;
 
     while(!done()) {
       if(!have_rect)
@@ -540,6 +551,12 @@ namespace Realm {
         if(REALM_UNLIKELY(layout_piece == 0)) {
           log_dma.fatal() << "no piece found for " << cur_point << " in instance " << inst_impl->me << " (list: " << piece_list << ")";
           abort();
+        }
+        if(layout_piece->layout_type != PieceLayoutTypes::AffineLayoutType) {
+          // can't handle this piece here - let the caller know what the
+          //  non-affine piece is and maybe it can handle it
+          nonaffine = layout_piece;
+          return true;
         }
 	field_rel_offset = it->second.rel_offset + cur_field_offset;
       }
@@ -601,6 +618,7 @@ namespace Realm {
       assert(layout_piece->bounds.contains(target_subrect));
 #endif
 
+      // TODO: remove now-redundant condition here
       if(layout_piece->layout_type == PieceLayoutTypes::AffineLayoutType) {
 	const AffineLayoutPiece<N,T> *affine = static_cast<const AffineLayoutPiece<N,T> *>(layout_piece);
 
@@ -1049,6 +1067,10 @@ namespace Realm {
 	  if(iip.peer_guid != XferDes::XFERDES_NO_GUID) {
 	    addr_max_bytes = iip.seq_remote.span_exists(iip.local_bytes_total,
 							addr_max_bytes);
+            // round down to multiple of sizeof(Point<N,T>)
+            size_t rem = addr_max_bytes % sizeof(Point<N,T>);
+            if(rem > 0)
+              addr_max_bytes -= rem;
 	    if(addr_max_bytes == 0) {
 	      // end of data?
 	      if(iip.remote_bytes_total.load() == iip.local_bytes_total)
@@ -1057,18 +1079,33 @@ namespace Realm {
 	    }
 	  }
 	}
+
 	size_t amt = addrs_in->step(addr_max_bytes, a_info, 0,
 				    false /*!tentative*/);
 	if(amt == 0)
 	  return nonempty;
-	point_pos = 0;
-	num_points = amt / sizeof(Point<N,T>);
-	assert(amt == (num_points * sizeof(Point<N,T>)));
-
 	memcpy(points,
 	       reinterpret_cast<const void *>(addrs_mem_base +
 					      a_info.base_offset),
 	       amt);
+        // handle reads of partial points
+        while((amt % sizeof(Point<N,T>)) != 0) {
+          // get some more - should never be empty
+          size_t todo = addrs_in->step(addr_max_bytes - amt, a_info, 0,
+                                       false /*!tentative*/);
+          assert(todo > 0);
+
+          memcpy(reinterpret_cast<char *>(points) + amt,
+                 reinterpret_cast<const void *>(addrs_mem_base +
+                                                a_info.base_offset),
+                 todo);
+          amt += todo;
+        }
+
+	point_pos = 0;
+	num_points = amt / sizeof(Point<N,T>);
+	assert(amt == (num_points * sizeof(Point<N,T>)));
+
 	//log_dma.print() << "got points: " << points[0] << "(+" << (num_points - 1) << ")";
 	if(indirect_xd != 0) {
 	  XferDes::XferPort& iip = indirect_xd->input_ports[indirect_port_idx];
@@ -1311,6 +1348,10 @@ namespace Realm {
 	  if(iip.peer_guid != XferDes::XFERDES_NO_GUID) {
 	    addr_max_bytes = iip.seq_remote.span_exists(iip.local_bytes_total,
 							addr_max_bytes);
+            // round down to multiple of sizeof(Rect<N,T>)
+            size_t rem = addr_max_bytes % sizeof(Rect<N,T>);
+            if(rem > 0)
+              addr_max_bytes -= rem;
 	    if(addr_max_bytes == 0) {
 	      // end of data?
 	      if(iip.remote_bytes_total.load() == iip.local_bytes_total)
@@ -1323,14 +1364,28 @@ namespace Realm {
 				    false /*!tentative*/);
 	if(amt == 0)
 	  return nonempty;
-	rect_pos = 0;
-	num_rects = amt / sizeof(Rect<N,T>);
-	assert(amt == (num_rects * sizeof(Rect<N,T>)));
-
 	memcpy(rects,
 	       reinterpret_cast<const void *>(addrs_mem_base +
 					      a_info.base_offset),
 	       amt);
+        // handle reads of partial rects
+        while((amt % sizeof(Rect<N,T>)) != 0) {
+          // get some more - should never be empty
+          size_t todo = addrs_in->step(addr_max_bytes - amt, a_info, 0,
+                                       false /*!tentative*/);
+          assert(todo > 0);
+
+          memcpy(reinterpret_cast<char *>(rects) + amt,
+                 reinterpret_cast<const void *>(addrs_mem_base +
+                                                a_info.base_offset),
+                 todo);
+          amt += todo;
+        }
+
+	rect_pos = 0;
+	num_rects = amt / sizeof(Rect<N,T>);
+	assert(amt == (num_rects * sizeof(Rect<N,T>)));
+
 	//log_dma.print() << "got rects: " << rects[0] << "(+" << (num_rects - 1) << ")";
 	if(indirect_xd != 0) {
 	  XferDes::XferPort& iip = indirect_xd->input_ports[indirect_port_idx];
@@ -1997,7 +2052,8 @@ namespace Realm {
 				 const std::vector<XferDesPortInfo>& outputs_info,
 				 int priority,
 				 XferDesRedopInfo redop_info,
-				 const void *fill_data, size_t fill_size);
+				 const void *fill_data, size_t fill_size,
+                                 size_t fill_total);
 
     static ActiveMessageHandlerReg<AddressSplitXferDesCreateMessage<N,T> > areg;
 
@@ -2069,7 +2125,9 @@ namespace Realm {
 							const std::vector<XferDesPortInfo>& outputs_info,
 							int priority,
 							XferDesRedopInfo redop_info,
-							const void *fill_data, size_t fill_size)
+							const void *fill_data,
+                                                        size_t fill_size,
+                                                        size_t fill_total)
   {
     assert(redop_info.id == 0);
     assert(fill_size == 0);
@@ -2235,6 +2293,10 @@ namespace Realm {
 	  size_t max_bytes = MAX_POINTS * sizeof(Point<N,T>);
 	  if(input_ports[0].peer_guid != XFERDES_NO_GUID) {
 	    max_bytes = input_ports[0].seq_remote.span_exists(input_ports[0].local_bytes_total, max_bytes);
+            // round down to multiple of sizeof(Point<N,T>)
+            size_t rem = max_bytes % sizeof(Point<N,T>);
+            if(rem > 0)
+              max_bytes -= rem;
 	    if(max_bytes < sizeof(Point<N,T>)) {
               // check to see if this is the end of the input
               if(input_ports[0].local_bytes_total ==
@@ -2246,12 +2308,25 @@ namespace Realm {
 	  size_t bytes = input_ports[0].iter->step(max_bytes, p_info,
 						   0, false /*!tentative*/);
 	  if(bytes == 0) break;
-	  point_count = bytes / sizeof(Point<N,T>);
-	  assert(bytes == (point_count * sizeof(Point<N,T>)));
 	  const void *srcptr = input_ports[0].mem->get_direct_ptr(p_info.base_offset,
 								  bytes);
 	  assert(srcptr != 0);
 	  memcpy(points, srcptr, bytes);
+          // handle reads of partial points
+          while((bytes % sizeof(Point<N,T>)) != 0) {
+            // get some more - should never be empty
+            size_t todo = input_ports[0].iter->step(max_bytes - bytes, p_info,
+                                                    0, false /*!tentative*/);
+            assert(todo > 0);
+            const void *srcptr = input_ports[0].mem->get_direct_ptr(p_info.base_offset,
+                                                                    todo);
+            assert(srcptr != 0);
+            memcpy(reinterpret_cast<char *>(points) + bytes, srcptr, todo);
+            bytes += todo;
+          }
+
+	  point_count = bytes / sizeof(Point<N,T>);
+	  assert(bytes == (point_count * sizeof(Point<N,T>)));
 	  point_index = 0;
 	  rseqcache.add_span(0, input_ports[0].local_bytes_total, bytes);
 	  input_ports[0].local_bytes_total += bytes;
@@ -2278,14 +2353,18 @@ namespace Realm {
 				       sizeof(Point<N,T>)) < sizeof(Point<N,T>))
 	    break;
 	  TransferIterator::AddressInfo o_info;
-	  size_t bytes = op.iter->step(sizeof(Point<N,T>), o_info,
-				       0, false /*!tentative*/);
-	  assert(bytes == sizeof(Point<N,T>));
-	  void *dstptr = op.mem->get_direct_ptr(o_info.base_offset,
-						sizeof(Point<N,T>));
-	  assert(dstptr != 0);
-	  memcpy(dstptr, &points[point_index], sizeof(Point<N,T>));
-	  output_bytes += sizeof(Point<N,T>);
+          size_t partial = 0;
+          while(partial < sizeof(Point<N,T>)) {
+            size_t bytes = op.iter->step(sizeof(Point<N,T>) - partial, o_info,
+                                         0, false /*!tentative*/);
+            void *dstptr = op.mem->get_direct_ptr(o_info.base_offset, bytes);
+            assert(dstptr != 0);
+            memcpy(dstptr,
+                   reinterpret_cast<const char *>(&points[point_index])+partial,
+                   bytes);
+            partial += bytes;
+          }
+          output_bytes += sizeof(Point<N,T>);
 	}
 	output_count++;
 	point_index++;
@@ -2298,6 +2377,7 @@ namespace Realm {
 			   output_ports[output_space_id].local_bytes_total,
 			   output_bytes);
 	output_ports[output_space_id].local_bytes_total += output_bytes;
+	output_ports[output_space_id].local_bytes_cons.fetch_add(output_bytes);
 	did_work = true;
       }
 
@@ -2329,10 +2409,12 @@ namespace Realm {
           memcpy(dstptr, &cword, sizeof(unsigned));
 
           cp.local_bytes_total += sizeof(unsigned);
+          cp.local_bytes_cons.fetch_add(sizeof(unsigned));
         } while(!ctrl_sent);
 
 	if(input_done && ctrl_sent) {
-	  iteration_completed.store_release(true);
+          begin_completion();
+
 	  // mark all address streams as done (dummy write update)
 	  for(size_t i = 0; i < spaces.size(); i++)
 	    wseqcache.add_span(i, output_ports[i].local_bytes_total, 0);
@@ -2431,6 +2513,184 @@ namespace Realm {
     return (best_cost != 0);
   }
 
+// #define PATH_CACHE_EARLY_INIT
+
+  // a map to cache the path from src memory to dst memory. 
+  //  the key is the pair of src and dst memory id. 
+  //  the value is a LRU. 
+  //  The LRU is indexed by LRUKey, the value is MemPathInfo
+  static std::map<std::pair<realm_id_t, realm_id_t>, PathLRU *> path_cache;
+
+  // a RWLock to control the access to the path_cache
+  static RWLock path_cache_rwlock;
+  static bool path_cache_inited = false;
+
+  // counters for calculating cache misses and hits
+  atomic<unsigned int> nb_cache_miss(0);
+  atomic<unsigned int> nb_cache_hit(0);
+
+  // The path cache initialization function, which is called by 
+  //   RuntimeImpl::configure_from_command_line
+  void init_path_cache(void)
+  {
+    assert(path_cache_inited == false);
+#ifdef PATH_CACHE_EARLY_INIT
+    std::vector<Memory> memories;
+    Machine machine = Machine::get_machine();
+    for(Machine::MemoryQuery::iterator it = Machine::MemoryQuery(machine).begin(); it; ++it) {
+      Memory m = *it;
+      memories.push_back(m);
+    }
+    for(std::vector<Memory>::const_iterator src_it = memories.begin(); src_it != memories.end(); ++src_it) {
+      for(std::vector<Memory>::const_iterator dst_it = memories.begin(); dst_it != memories.end(); ++dst_it) {
+        std::pair<realm_id_t, realm_id_t> key((*src_it).id, (*dst_it).id);
+        if (path_cache.find(key) != path_cache.end()) {
+          assert(0);
+        }
+        PathLRU *lru = new PathLRU(Config::path_cache_lru_size);
+        path_cache[key] = lru;
+      }
+    }
+#endif
+    path_cache_inited = true;
+    nb_cache_miss.store_release(0);
+    nb_cache_hit.store_release(0);
+  }
+
+  // The path cache finalize function, which is called by
+  //   RuntimeImpl::wait_for_shutdown
+  void finalize_path_cache(void)
+  {
+    assert(path_cache_inited == true);
+    log_xpath_cache.info() << "Cache Miss: " << nb_cache_miss.load_fenced() << " Cache Hit: " << nb_cache_hit.load_fenced();
+    std::map<std::pair<realm_id_t, realm_id_t>, PathLRU *>::iterator it;
+    for (it = path_cache.begin(); it != path_cache.end(); it++) {
+      delete it->second;
+    }
+    path_cache.clear();
+    path_cache_inited = false;
+  }
+
+  ////////////////////////////////////////////////////////////////////////
+  //
+  // class PathLRU::LRUKey
+
+  PathLRU::LRUKey::LRUKey(const CustomSerdezID serdez_id, const ReductionOpID redop_id, 
+                          const size_t total_bytes, 
+                          const std::vector<size_t> src_frags, 
+                          const std::vector<size_t> dst_frags)
+  : timestamp(0), serdez_id(serdez_id), redop_id(redop_id), total_bytes(total_bytes), 
+    src_frags(src_frags), dst_frags(dst_frags)
+  {
+  }
+
+  bool PathLRU::LRUKey::operator==(const LRUKey &rhs) const 
+  {
+    if ( (serdez_id == rhs.serdez_id) && (redop_id == rhs.redop_id) && 
+         (total_bytes == rhs.total_bytes) && 
+         (src_frags == rhs.src_frags) && (dst_frags == rhs.dst_frags)) {
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  std::ostream& operator<<(std::ostream& out, const PathLRU::LRUKey& lru_key)
+  {
+    out << "LRUKey:{";
+    out << " serdez_id: " << lru_key.serdez_id;
+    out << " redop_id: " << lru_key.redop_id;
+    out << " size: " << lru_key.total_bytes;
+    out << " src_frags:(";
+    for (size_t i = 0; i < lru_key.src_frags.size(); i++) {
+      out << lru_key.src_frags[i] << ",";
+    }
+    out << ")";
+    out << " dst_frags:(";
+    for (size_t i = 0; i < lru_key.dst_frags.size(); i++) {
+      out << lru_key.dst_frags[i] << ",";
+    }
+    out << ") }";
+    return out;
+  }
+
+  std::ostream& operator<<(std::ostream& out, const MemPathInfo& info)
+  {
+    out << "MemPathInfo:{ ";
+    for (size_t i = 0; i < info.path.size(); i++) {
+      out << "Mem:" << info.path[i] << " kind:" << info.path[i].kind() << " ";
+    }
+    for (size_t i = 0; i < info.xd_channels.size(); i++) {
+      out << "Channel:" << info.xd_channels[i]->kind << " ";
+    }
+    out << "}";
+    return out;
+  }
+
+  ////////////////////////////////////////////////////////////////////////
+  //
+  // class PathLRU
+
+  PathLRU::PathLRU(size_t size)
+  : max_size(size), timestamp(0)
+  {
+  }
+
+  void PathLRU::miss(LRUKey &key, const MemPathInfo &path)
+  {
+    unsigned long current_timestamp = timestamp.fetch_add_acqrel(1);
+    assert(current_timestamp <= ULONG_MAX);
+    // get the current timestamp and assign it to the lru key
+    key.timestamp.store_release(current_timestamp);
+    std::pair<LRUKey,MemPathInfo> item = std::make_pair(key, path);
+    if (item_list.size() < max_size) {
+      // if the LRU not full, we just insert the item
+      item_list.push_back(item);
+    } else {
+      // if the LRU is full, we need to iterate the LRU to find 
+      //   the item that has the earliest timestamp, and replace 
+      //   it with the new item
+      assert(item_list.size() == max_size);
+      size_t earliest_idx = 0;
+      unsigned long earliest_timestamp = item_list[earliest_idx].first.timestamp.load(); 
+      for (size_t i = 0; i < item_list.size(); i++) {
+        unsigned long t = item_list[i].first.timestamp.load();
+        if (t < earliest_timestamp) {
+        earliest_timestamp = t;
+        earliest_idx = i;
+        }
+      }
+      // log_xpath_cache.debug() << "Cache full, remove LRUKey: " << item_list[earliest_idx].first;
+      item_list[earliest_idx] = item;
+    }
+  }
+
+  void PathLRU::hit(PathLRU::PathLRUIterator it)
+  {
+    unsigned long current_timestamp = timestamp.fetch_add_acqrel(1);
+    assert(current_timestamp <= ULONG_MAX);
+    // update the timestamp of the lru key with the newest one.   
+    //   When 2 threads calls the hit, even though we can not guarantee that
+    //   it->first.timestamp gets the latest timestamp, but it is fine
+    //   because it->first.timestamp > timestamps of other items in the LRU,
+    //   which guarantees the correctness of LRU.
+    it->first.timestamp.store_release(current_timestamp);
+  }
+
+  PathLRU::PathLRUIterator PathLRU::find(const PathLRU::LRUKey &key)
+  {
+    PathLRUIterator it;
+    for (it = item_list.begin(); it != item_list.end(); it++) {
+      if (it->first == key) break;
+    }
+    return it;
+  }
+
+  PathLRU::PathLRUIterator PathLRU::end(void)
+  {
+    return item_list.end();
+  }
+
   static bool find_fastest_path(Memory src_mem, Memory dst_mem,
                                 CustomSerdezID serdez_id,
                                 ReductionOpID redop_id,
@@ -2447,6 +2707,48 @@ namespace Realm {
                      << " bytes=" << total_bytes
                      << " frags=" << PrettyVector<size_t>(*(src_frags ? src_frags : &empty_vec))
                      << "/" << PrettyVector<size_t>(*(dst_frags ? dst_frags : &empty_vec));
+
+    if (path_cache_inited) {
+      std::pair<realm_id_t, realm_id_t> key(src_mem.id, dst_mem.id);
+      PathLRU *lru = nullptr;
+#ifdef PATH_CACHE_EARLY_INIT
+      std::map<std::pair<realm_id_t, realm_id_t>, PathLRU *>::iterator path_cache_it;
+      path_cache_it = path_cache.find(key);
+      assert(path_cache_it != path_cache.end());
+      lru = path_cache_it->second;
+#else
+      {
+        // first check if the key is existed, if not create a PathLRU for the given key
+        RWLock::AutoReaderLock arl(path_cache_rwlock);
+        if (path_cache.find(key) == path_cache.end()) {
+          // drop reader lock and take writer lock
+          arl.release();
+          RWLock::AutoWriterLock awl(path_cache_rwlock);
+          // double check if the key is existed because it could be created by 
+          //   another thread before we get the wrlock. 
+          if (path_cache.find(key) == path_cache.end()) {
+            path_cache[key] = new PathLRU(Config::path_cache_lru_size);
+          }
+        }
+        lru = path_cache.find(key)->second;
+      }
+#endif
+      assert(lru != nullptr);
+      // check if we can find the LRU key inside the LRU. If yes, we call the hit
+      {
+        PathLRU::LRUKey lru_key(serdez_id, redop_id, total_bytes, *src_frags, *dst_frags);
+        RWLock::AutoReaderLock arl(lru->rwlock);
+        PathLRU::PathLRUIterator lru_it = lru->find(lru_key);
+        if (lru_it != lru->end()) {
+          info = lru_it->second;
+          lru->hit(lru_it);
+          nb_cache_hit.fetch_add(1);
+          log_xpath_cache.debug() << "src:" << src_mem << ", dst:" << dst_mem << ", " << info << ", " << lru_key << ", Hit";
+          arl.release();
+          return true;
+        }
+      }
+    }
 
     // baseline - is a direct path possible?
     uint64_t best_cost = 0;
@@ -2587,6 +2889,26 @@ namespace Realm {
             info.xd_channels.push_back(channel);
           }
         }
+      }
+    }
+
+    if (path_cache_inited) {
+      std::pair<realm_id_t, realm_id_t> key(src_mem.id, dst_mem.id);
+      PathLRU *lru = path_cache.find(key)->second;
+      PathLRU::LRUKey lru_key(serdez_id, redop_id, total_bytes, *src_frags, *dst_frags);
+      // the LRU key is not in the LRU, now we cache it
+      {
+        RWLock::AutoWriterLock awl(lru->rwlock);
+        // double check if lru key is already put in the LRU by another thread
+        PathLRU::PathLRUIterator lru_it = lru->find(lru_key);
+        if (lru_it != lru->end()) {
+          lru->hit(lru_it);
+          log_xpath_cache.debug() << "src:" << src_mem << ", dst:" << dst_mem << ", " << info << ", " << lru_key << ", Miss-Hit";
+        } else {
+          lru->miss(lru_key, info);
+          log_xpath_cache.debug() << "src:" << src_mem << ", dst:" << dst_mem << ", " << info << ", " << lru_key << ", Miss";
+        }
+        nb_cache_miss.fetch_add(1);
       }
     }
 
@@ -3491,6 +3813,8 @@ namespace Realm {
   template <int N2, typename T2>
   IndirectionInfo *CopyIndirection<N,T>::Unstructured<N2,T2>::create_info(const IndexSpace<N,T>& is) const
   {
+    // The next indirection is not allowed to be specified yet.
+    assert(next_indirection == nullptr);
     return new IndirectionInfoTyped<N,T,N2,T2>(is, *this);
   }
 
@@ -3689,7 +4013,14 @@ namespace Realm {
     // TODO: look at layouts and decide if fields should be grouped into
     //  a smaller number of copies
     assert(srcs.size() == dsts.size());
+    std::vector<bool> field_done(srcs.size(), false);
+    // fields will get reordered to be contiguous per xd subgraph
+    size_t fld_start = 0;
     for(size_t i = 0; i < srcs.size(); i++) {
+      // did this field already get grouped into a previous path?
+      if(field_done[i])
+        continue;
+
       assert(srcs[i].redop_id == 0);
       if(dsts[i].redop_id == 0) {
         // sizes of fills or copies should match
@@ -3717,8 +4048,12 @@ namespace Realm {
         assert((srcs[i].serdez_id == 0) &&
                (dsts[i].serdez_id == 0) && "help: serdez reduce!");
 
-	src_fields[i] = FieldInfo { srcs[i].field_id, srcs[i].subfield_offset, srcs[i].size, srcs[i].serdez_id };
-	dst_fields[i] = FieldInfo { dsts[i].field_id, dsts[i].subfield_offset, dsts[i].size, dsts[i].serdez_id };
+	src_fields[fld_start] = FieldInfo { srcs[i].field_id,
+                                            srcs[i].subfield_offset,
+                                            srcs[i].size, srcs[i].serdez_id };
+	dst_fields[fld_start] = FieldInfo { dsts[i].field_id,
+                                            dsts[i].subfield_offset,
+                                            dsts[i].size, dsts[i].serdez_id };
 
         Memory src_mem = srcs[i].inst.get_location();
         Memory dst_mem = dsts[i].inst.get_location();
@@ -3765,17 +4100,18 @@ namespace Realm {
           if(j == (pathlen - 1))
             xdn.redop = XferDesRedopInfo(dsts[i].redop_id,
                                          dsts[i].red_fold,
-                                         true /*in_place*/);
+                                         true /*in_place*/,
+                                         dsts[i].red_exclusive);
           xdn.inputs.resize(1);
           xdn.inputs[0] = ((j == 0) ?
                              TransferGraph::XDTemplate::mk_inst(srcs[i].inst,
-                                                                i, 1) :
+                                                                fld_start, 1) :
                              TransferGraph::XDTemplate::mk_edge(ib_idx - 1));
           //xdn.inputs[0].indirect_inst = RegionInstance::NO_INST;
           xdn.outputs.resize(1);
           xdn.outputs[0] = ((j == (pathlen - 1)) ?
                               TransferGraph::XDTemplate::mk_inst(dsts[i].inst,
-                                                                 i, 1) :
+                                                                 fld_start, 1) :
                               TransferGraph::XDTemplate::mk_edge(ib_idx));
           //xdn.outputs[0].indirect_inst = RegionInstance::NO_INST;
           if(j < (pathlen - 1)) {
@@ -3794,13 +4130,17 @@ namespace Realm {
           1 /*num_fields*/,
           ProfilingMeasurements::OperationCopyInfo::REDUCE,
           unsigned(pathlen) });
+        fld_start += 1;
       }
       else if(srcs[i].field_id == FieldID(-1)) {
 	// fill
 	assert((dsts[i].indirect_index == -1) && "help: scatter fill!");
 
-	src_fields[i] = FieldInfo { FieldID(-1), 0, 0, 0 };
-	dst_fields[i] = FieldInfo { dsts[i].field_id, dsts[i].subfield_offset, dsts[i].size, dsts[i].serdez_id };
+	src_fields[fld_start] = FieldInfo { FieldID(-1), 0, 0, 0 };
+	dst_fields[fld_start] = FieldInfo { dsts[i].field_id,
+                                            dsts[i].subfield_offset,
+                                            dsts[i].size,
+                                            dsts[i].serdez_id };
 
 	Memory dst_mem = dsts[i].inst.get_location();
 	MemPathInfo path_info;
@@ -3814,25 +4154,29 @@ namespace Realm {
 
 	size_t pathlen = path_info.xd_channels.size();
 	size_t xd_idx = graph.xd_nodes.size();
-	//size_t ib_idx = graph.ib_edges.size();
-
-	graph.xd_nodes.resize(xd_idx + pathlen);
-	if(pathlen > 1) {
-	  log_new_dma.fatal() << "FATAL: multi-hop fill path found for " << dst_mem << " (serdez=" << serdez_id << ")";
-	  assert(0);
-	}
-	// just one node for now
-	{
+        size_t ib_idx = graph.ib_edges.size();
+        size_t ib_alloc_size = 0;
+        graph.xd_nodes.resize(xd_idx + pathlen);
+        if(pathlen > 1) {
+          graph.ib_edges.resize(ib_idx + pathlen - 1);
+          ib_alloc_size = compute_ib_size(combined_field_size,
+                                          domain_size,
+                                          serdez_id);
+        }
+        for(size_t j = 0; j < pathlen; j++) {
 	  TransferGraph::XDTemplate& xdn = graph.xd_nodes[xd_idx++];
 	      
 	  //xdn.kind = path_info.xd_kinds[j];
-	  xdn.factory = path_info.xd_channels[0]->get_factory();
+	  xdn.factory = path_info.xd_channels[j]->get_factory();
 	  xdn.gather_control_input = -1;
 	  xdn.scatter_control_input = -1;
-	  xdn.target_node = path_info.xd_channels[0]->node;
+	  xdn.target_node = path_info.xd_channels[j]->node;
 	  xdn.inputs.resize(1);
-	  xdn.inputs[0] = TransferGraph::XDTemplate::mk_fill(fill_ofs,
-							     combined_field_size);
+          xdn.inputs[0] = ((j == 0) ?
+                             TransferGraph::XDTemplate::mk_fill(fill_ofs,
+                                                                combined_field_size,
+                                                                domain_size * combined_field_size) :
+                             TransferGraph::XDTemplate::mk_edge(ib_idx - 1));
 	  // FIXME: handle multiple fields
 	  memcpy(static_cast<char *>(fill_data)+fill_ofs,
 		 ((srcs[i].size <= CopySrcDstField::MAX_DIRECT_SIZE) ?
@@ -3842,8 +4186,15 @@ namespace Realm {
 	  fill_ofs += srcs[i].size;
 
 	  xdn.outputs.resize(1);
-	  xdn.outputs[0] = TransferGraph::XDTemplate::mk_inst(dsts[i].inst,
-							      i, 1);
+          xdn.outputs[0] = ((j == (pathlen - 1)) ?
+                              TransferGraph::XDTemplate::mk_inst(dsts[i].inst,
+                                                                 fld_start, 1) :
+                              TransferGraph::XDTemplate::mk_edge(ib_idx));
+          if(j < (pathlen - 1)) {
+            TransferGraph::IBInfo& ibe = graph.ib_edges[ib_idx++];
+            ibe.memory = path_info.path[j + 1];
+            ibe.size = ib_alloc_size;
+          }
 	}
 
         prof_usage.source = Memory::NO_MEMORY;
@@ -3855,9 +4206,16 @@ namespace Realm {
               1 /*num_fields*/,
               ProfilingMeasurements::OperationCopyInfo::FILL,
               unsigned(pathlen) });
+        fld_start += 1;
       } else {
-	src_fields[i] = FieldInfo { srcs[i].field_id, srcs[i].subfield_offset, srcs[i].size, srcs[i].serdez_id };
-	dst_fields[i] = FieldInfo { dsts[i].field_id, dsts[i].subfield_offset, dsts[i].size, dsts[i].serdez_id };
+	src_fields[fld_start] = FieldInfo { srcs[i].field_id,
+                                            srcs[i].subfield_offset,
+                                            srcs[i].size,
+                                            srcs[i].serdez_id };
+	dst_fields[fld_start] = FieldInfo { dsts[i].field_id,
+                                            dsts[i].subfield_offset,
+                                            dsts[i].size,
+                                            dsts[i].serdez_id };
 	
 	if(srcs[i].indirect_index == -1) {
 	  Memory src_mem = srcs[i].inst.get_location();
@@ -3865,14 +4223,50 @@ namespace Realm {
 	  if(dsts[i].indirect_index == -1) {
 	    Memory dst_mem = dsts[i].inst.get_location();
 
+            unsigned num_fields = 1;
+            std::vector<FieldID> src_field_ids(1, srcs[i].field_id);
+            std::vector<size_t> src_field_sizes(1, srcs[i].size);
+            std::vector<FieldID> dst_field_ids(1, dsts[i].field_id);
+            std::vector<size_t> dst_field_sizes(1, dsts[i].size);
+
+            // group any other fields that have the same insts/size/redop/serdez
+            for(size_t j = i + 1; j < srcs.size(); j++) {
+              if(field_done[j]) continue;
+              if(srcs[j].inst != srcs[i].inst) continue;
+              if(srcs[j].size != srcs[i].size) continue;
+              if(srcs[j].redop_id != srcs[i].redop_id) continue;
+              if(srcs[j].serdez_id != srcs[i].serdez_id) continue;
+              if(dsts[j].inst != dsts[i].inst) continue;
+              if(dsts[j].size != dsts[i].size) continue;
+              if(dsts[j].redop_id != dsts[i].redop_id) continue;
+              if(dsts[j].serdez_id != dsts[i].serdez_id) continue;
+
+              src_field_ids.push_back(srcs[j].field_id);
+              src_field_sizes.push_back(srcs[j].size);
+              dst_field_ids.push_back(dsts[j].field_id);
+              dst_field_sizes.push_back(dsts[j].size);
+
+              src_fields[fld_start + num_fields] = FieldInfo {
+                                                       srcs[j].field_id,
+                                                       srcs[j].subfield_offset,
+                                                       srcs[j].size,
+                                                       srcs[j].serdez_id };
+              dst_fields[fld_start + num_fields] = FieldInfo {
+                                                       dsts[j].field_id,
+                                                       dsts[j].subfield_offset,
+                                                       dsts[j].size,
+                                                       dsts[j].serdez_id };
+              num_fields += 1;
+              combined_field_size += srcs[j].size;
+              field_done[j] = true;
+            }
+
             std::vector<size_t> src_frags, dst_frags;
             domain->count_fragments(srcs[i].inst, dim_order,
-                                    std::vector<FieldID>(1, srcs[i].field_id),
-                                    std::vector<size_t>(1, srcs[i].size),
+                                    src_field_ids, src_field_sizes,
                                     src_frags);
             domain->count_fragments(dsts[i].inst, dim_order,
-                                    std::vector<FieldID>(1, dsts[i].field_id),
-                                    std::vector<size_t>(1, dsts[i].size),
+                                    dst_field_ids, dst_field_sizes,
                                     dst_frags);
             //log_new_dma.print() << "fragments: domain=" << *domain
             //                    << " src_inst=" << srcs[i].inst << " frags=" << PrettyVector<size_t>(src_frags)
@@ -3910,13 +4304,15 @@ namespace Realm {
 	      xdn.inputs.resize(1);
 	      xdn.inputs[0] = ((j == 0) ?
 			         TransferGraph::XDTemplate::mk_inst(srcs[i].inst,
-								    i, 1) :
+								    fld_start,
+                                                                    num_fields) :
 			         TransferGraph::XDTemplate::mk_edge(ib_idx - 1));
 	      //xdn.inputs[0].indirect_inst = RegionInstance::NO_INST;
 	      xdn.outputs.resize(1);
 	      xdn.outputs[0] = ((j == (pathlen - 1)) ?
 				  TransferGraph::XDTemplate::mk_inst(dsts[i].inst,
-								     i, 1) :
+								     fld_start,
+                                                                     num_fields) :
 				  TransferGraph::XDTemplate::mk_edge(ib_idx));
 	      //xdn.outputs[0].indirect_inst = RegionInstance::NO_INST;
 	      if(j < (pathlen - 1)) {
@@ -3932,9 +4328,10 @@ namespace Realm {
             prof_cpinfo.inst_info.push_back(ProfilingMeasurements::OperationCopyInfo::InstInfo {
                  srcs[i].inst,
                  dsts[i].inst,
-                 1 /*num_fields*/,
+                 num_fields,
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(pathlen) });
+            fld_start += num_fields;
 	  } else {
 	    // scatter
 	    IndirectionInfo *scatter_info = indirects[dsts[i].indirect_index];
@@ -3943,9 +4340,9 @@ namespace Realm {
 						    1);
             size_t prev_nodes = graph.xd_nodes.size();
 	    scatter_info->generate_scatter_paths(src_mem,
-						 TransferGraph::XDTemplate::mk_inst(srcs[i].inst, i, 1),
+						 TransferGraph::XDTemplate::mk_inst(srcs[i].inst, fld_start, 1),
 						 dsts[i].indirect_index,
-						 i, 1,
+						 fld_start, 1,
 						 addrsplit_bytes_per_element,
 						 serdez_id,
 						 graph.xd_nodes,
@@ -3961,6 +4358,7 @@ namespace Realm {
                  1 /*num_fields*/,
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(graph.xd_nodes.size() - prev_nodes) });
+            fld_start += 1;
 	  }
 	} else {
 	  size_t addrsplit_bytes_per_element = ((serdez_id == 0) ?
@@ -3971,9 +4369,9 @@ namespace Realm {
 	    IndirectionInfo *gather_info = indirects[srcs[i].indirect_index];
             size_t prev_nodes = graph.xd_nodes.size();
 	    gather_info->generate_gather_paths(dst_mem,
-					       TransferGraph::XDTemplate::mk_inst(dsts[i].inst, i, 1),
+					       TransferGraph::XDTemplate::mk_inst(dsts[i].inst, fld_start, 1),
 					       srcs[i].indirect_index,
-					       i, 1,
+					       fld_start, 1,
 					       addrsplit_bytes_per_element,
 					       serdez_id,
 					       graph.xd_nodes,
@@ -3989,6 +4387,7 @@ namespace Realm {
                  1 /*num_fields*/,
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(graph.xd_nodes.size() - prev_nodes) });
+            fld_start += 1;
 	  } else {
 	    // scatter+gather
 	    // TODO: optimize case of single source and single dest
@@ -4010,7 +4409,7 @@ namespace Realm {
 	    gather_info->generate_gather_paths(ib_mem,
 					       TransferGraph::XDTemplate::mk_edge(ib_idx),
 					       srcs[i].indirect_index,
-					       i, 1,
+					       fld_start, 1,
 					       addrsplit_bytes_per_element,
 					       serdez_id,
 					       graph.xd_nodes,
@@ -4021,7 +4420,7 @@ namespace Realm {
 	    scatter_info->generate_scatter_paths(ib_mem,
 						 TransferGraph::XDTemplate::mk_edge(ib_idx),
 						 dsts[i].indirect_index,
-						 i, 1,
+						 fld_start, 1,
 						 addrsplit_bytes_per_element,
 						 serdez_id,
 						 graph.xd_nodes,
@@ -4037,10 +4436,13 @@ namespace Realm {
                  1 /*num_fields*/,
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(graph.xd_nodes.size() - prev_nodes) });
+            fld_start += 1;
 	  }
 	}
       }
     }
+    // make sure the reordered field list includes them all
+    assert(fld_start == srcs.size());
 
     // once we've enumerated all the ibs we'll need, we need to pick an order in
     //  which to allocate them that will avoid deadlock when multiple transfer
@@ -4439,6 +4841,7 @@ namespace Realm {
 
       const void *fill_data = 0;
       size_t fill_size = 0;
+      size_t fill_total = 0;
 
       std::vector<XferDesPortInfo> inputs_info(xdn.inputs.size());
       for(size_t j = 0; j < xdn.inputs.size(); j++) {
@@ -4524,6 +4927,7 @@ namespace Realm {
 	    inputs_info.clear();
 	    fill_data = static_cast<const char *>(desc.fill_data) + xdn.inputs[j].fill.fill_start;
 	    fill_size = xdn.inputs[j].fill.fill_size;
+            fill_total = xdn.inputs[j].fill.fill_total;
 	    break;
 	  }
 	default:
@@ -4703,7 +5107,7 @@ namespace Realm {
 				  outputs_info,
 				  priority,
                                   xdn.redop,
-				  fill_data, fill_size);
+				  fill_data, fill_size, fill_total);
       xd_factory->release();
     }
 

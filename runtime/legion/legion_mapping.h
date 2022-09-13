@@ -375,33 +375,14 @@ namespace Legion {
 
       /**
        * ----------------------------------------------------------------------
-       *  Premap Task 
+       *  Premap Task (should really be called map_index_task) 
        * ----------------------------------------------------------------------
        * This mapper call is only invoked for index space task launches. It
        * will invoked if at least one of the following two conditions occur:
        * 1. The task is performing a reduction of its point task futures down
        *    to a single future value as an output, in which case the mapper
        *    needs to select one or more locations for the futures to go.
-       * 2. The task a region requirement that needs to be mapped once and
-       *    have the same mapping be used by all the point tasks, such as
-       *    with a READ-WRITE SIMULTANEOUS on a single region.
-       * In the case of (2), the mapper is told the indicies of which 
-       * region requirements need to be premapped in the 'must_premap' set.
-       * All other regions can be optionally mapped. The mapper is given
-       * a vector containing sets of valid PhysicalInstances (if any) for
-       * each region requirement.
-       *
-       * The mapper performs the premapping by filling in premapping at
-       * least all the required premapped regions and indicates all premapped
-       * region indicies in 'premapped_region'. For each region requirement
-       * the mapper can specify a ranking of PhysicalInstances to re-use
-       * in 'chosen_ranking'. This can optionally be left empty. The mapper
-       * can also specify constraints on the creation of a physical instance
-       * in 'layout_constraints'. Finally, the mapper can force the creation
-       * of a new instance if an write-after-read dependences are detected
-       * on existing physical instances by enabling the WAR optimization.
-       * All vector data structures are size appropriately for the number of
-       * region requirements in the task.
+       * 2. (No longer applies) 
        *
        * In the case of (1), the mapper can optionally choose to fill in 
        * the 'reduction_futures' vector with one or more memories in which 
@@ -413,15 +394,24 @@ namespace Legion {
        * local system memory.
        */
       struct PremapTaskInput {
+        LEGION_DEPRECATED("Premapping regions is no longer supported")
         std::map<unsigned,std::vector<PhysicalInstance> >  valid_instances;
+        PremapTaskInput(void);
+        ~PremapTaskInput(void);
       };
       struct PremapTaskOutput {
         Processor                                          new_target_proc;
-        std::map<unsigned,std::vector<PhysicalInstance> >  premapped_instances;
-        std::map<unsigned,std::vector<PhysicalInstance> >  premapped_sources;
-        ProfilingRequest                                   copy_prof_requests;
-        TaskPriority                                       profiling_priority;
         std::vector<Memory>                                reduction_futures;
+        LEGION_DEPRECATED("Premapping regions is no longer supported")
+        std::map<unsigned,std::vector<PhysicalInstance> >  premapped_instances;
+        LEGION_DEPRECATED("Premapping regions is no longer supported")
+        std::map<unsigned,std::vector<PhysicalInstance> >  premapped_sources;
+        LEGION_DEPRECATED("Premapping regions is no longer supported")
+        ProfilingRequest                                   copy_prof_requests;
+        LEGION_DEPRECATED("Premapping regions is no longer supported")
+        TaskPriority                                       profiling_priority;
+        PremapTaskOutput(void);
+        ~PremapTaskOutput(void);
       };
       //------------------------------------------------------------------------
       virtual void premap_task(const MapperContext      ctx,
@@ -580,7 +570,6 @@ namespace Legion {
                                   MapTaskOutput&     output) = 0;
       //------------------------------------------------------------------------
 
-
       /**
        * ----------------------------------------------------------------------
        *  Map Replicate Task 
@@ -601,10 +590,22 @@ namespace Legion {
        * logical version of the task rather than having them all execute
        * independently. The vector should be exactly the same size as the 
        * vector of task_mappings if it is not empty
+       *
+       * The mapper can optionally give names to the shards by filling in the
+       * 'shard_points' vector with a set of unique points, all which must be
+       * of the same dimension. The 'shard_points' vector must either be empty
+       * or be of the same size as the 'task_mappings'. The mapper can also 
+       * provide an optional 'shard_domain' value to describe the set of points.
+       * If this is provided the runtime does not introspect it other than to
+       * check that its dimensionality matches that of the points. This value
+       * is then passed as the 'shard_domain' argument to all invocation of a 
+       * sharding functor for operations launched by these shards.
        */
       struct MapReplicateTaskOutput {
         std::vector<MapTaskOutput>                      task_mappings;
         std::vector<Processor>                          control_replication_map;
+        std::vector<DomainPoint>                        shard_points;
+        Domain                                          shard_domain;
       };
       //------------------------------------------------------------------------
       virtual void map_replicate_task(const MapperContext      ctx,
@@ -776,13 +777,16 @@ namespace Legion {
        * functor to determine which shard will own the point(s) of the
        * task. The mapper must return the same sharding functor for all
        * copies of the task. The runtime will verify this in debug mode
-       * but not in release mode.
+       * but not in release mode. In the case of sharding index space
+       * tasks, the mapper can also specify whether the resulting slice
+       * should be recursively sliced or not using 'slice_recurse'.
        */
       struct SelectShardingFunctorInput {
         std::vector<Processor>                  shard_mapping;
       };
       struct SelectShardingFunctorOutput {
         ShardingID                              chosen_functor;
+        bool                                    slice_recurse;
       };
       //------------------------------------------------------------------------
       virtual void select_sharding_functor(
@@ -924,6 +928,13 @@ namespace Legion {
        * structure with the kind of measurements desired. The priority
        * with which this information is sent back to the mapper can be 
        * set with 'profiling_priority'.
+       *
+       * The mapper can say whether or not the runtime should compute preimages
+       * for any indirection fields in the copy operation. This will incur an
+       * additional latency in the copy operation, but can reduce the number
+       * of instances that must be investigated for performing the indirect
+       * copies which can improve overall performance and scalability. The
+       * default is not to compute the preimages.
        */
       struct MapCopyInput {
         std::vector<std::vector<PhysicalInstance> >   src_instances;
@@ -946,6 +957,7 @@ namespace Legion {
         std::set<unsigned>                            untracked_valid_ind_dsts;
         ProfilingRequest                              profiling_requests;
         TaskPriority                                  profiling_priority;
+        bool                                          compute_preimages;
       };
       //------------------------------------------------------------------------
       virtual void map_copy(const MapperContext      ctx,
@@ -1556,6 +1568,12 @@ namespace Legion {
        * virtual function because we allow the output to be empty for
        * backwards compatibility. If the destination memories are empty
        * then the runtime will map one copy in the local system memory.
+       *
+       * In the case that the all-reduce is being performed using a reduction
+       * operator with serdez functions, then the mapper can also specify an
+       * upper bound on the amount of memory required for the findl output 
+       * instance of the fully reduced future which will improve performance.
+       * Not specifying an upper bound will not impact correctness.
        * ----------------------------------------------------------------------
        */
       struct FutureMapReductionInput {
@@ -1563,6 +1581,7 @@ namespace Legion {
       };
       struct FutureMapReductionOutput {
         std::vector<Memory>                     destination_memories;
+        size_t                                  serdez_upper_bound; // =SIZE_MAX
       };
       //------------------------------------------------------------------------
       virtual void map_future_map_reduction(const MapperContext      ctx,

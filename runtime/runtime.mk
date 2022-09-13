@@ -22,10 +22,9 @@ FC_FLAGS ?=
 LD_FLAGS ?=
 SO_FLAGS ?=
 INC_FLAGS ?=
+NVCC_FLAGS ?=
 HIPCC_FLAGS ?=
-# Make sure that NVCC_FLAGS are simple expanded since later we use shell to append to it (performance).
-CUDAHOSTCXX ?= $(CXX)
-NVCC_FLAGS := $(NVCC_FLAGS) -ccbin $(CUDAHOSTCXX)
+
 # These flags are NOT passed on the command line, but are used to
 # generate the public-facing legion/realm_defines.h files.
 # (Additional flags will be picked up from environment variables of
@@ -68,12 +67,22 @@ LEGION_CC_FLAGS += -DLEGION_VERSION='"${REALM_VERSION}"'
 
 USE_OPENMP ?= 0
 ifeq ($(shell uname -s),Darwin)
-DARWIN = 1
-CC_FLAGS += -DDARWIN
-FC_FLAGS += -DDARWIN
-ifeq ($(strip $(USE_OPENMP)),1)
-$(warning "Some versions of Clang on Mac OSX do not support OpenMP")
-endif
+  DARWIN = 1
+  CC_FLAGS += -DDARWIN
+  FC_FLAGS += -DDARWIN
+  # Detect if we're using Apple Clang or Normal Clang
+  ifeq ($(findstring Apple,$(shell $(CXX) --version)),Apple)
+    APPLECLANG = 1
+    REALM_LIMIT_SYMBOL_VISIBILITY=0
+    $(warning "Apple Clang is a weird compiler and untested by Legion CI. Tread lightly...")
+  else
+    APPLECLANG = 0
+  endif
+  ifeq ($(strip $(USE_OPENMP)),1)
+    $(warning "Some versions of Clang on Mac OSX do not support OpenMP")
+  endif
+else
+  APPLECLANG = 0
 endif
 
 ifndef LG_RT_DIR
@@ -93,6 +102,7 @@ else
 CC_FLAGS	+= -fPIC
 FC_FLAGS	+= -fPIC
 NVCC_FLAGS	+= -Xcompiler -fPIC
+HIPCC_FLAGS     += -fPIC
 ifeq ($(shell uname -s),Darwin)
 SLIB_LEGION     := liblegion.dylib
 SLIB_REALM      := librealm.dylib
@@ -232,14 +242,21 @@ ifneq (${MARCH},)
     else
       $(error PGI compilers do not currently support the PowerPC architecture)
     endif
-  else
-    ifeq ($(strip $(USE_PGI)),0)
+  else ifeq ($(strip $(USE_PGI)),1)
+    CC_FLAGS += -tp=${MARCH}
+    FC_FLAGS += -tp=${MARCH}
+  else ifeq ($(strip $(APPLECLANG)),1)
+    # For reasons passing understanding different versions of Apple clang support different arch flags
+    ifeq ($(shell $(CXX) -x c++ -Werror -march=${MARCH} -c /dev/null -o /dev/null 2> /dev/null; echo $$?),0)
       CC_FLAGS += -march=${MARCH}
       FC_FLAGS += -march=${MARCH}
     else
-      CC_FLAGS += -tp=${MARCH}
-      FC_FLAGS += -tp=${MARCH}
+      CC_FLAGS += -mcpu=${MARCH}
+      FC_FLAGS += -mcpu=${MARCH}
     endif
+  else
+    CC_FLAGS += -march=${MARCH}
+    FC_FLAGS += -march=${MARCH}
   endif
 endif
 
@@ -432,7 +449,6 @@ endif
 # Flags for Realm
 
 # General HIP variables
-MK_HIP_TARGET = 
 ifeq ($(strip $(USE_HIP)),1)
   HIP_TARGET ?= ROCM
   USE_GPU_REDUCTIONS ?= 1
@@ -441,16 +457,23 @@ ifeq ($(strip $(USE_HIP)),1)
   endif
   ifeq ($(strip $(HIP_TARGET)),ROCM)
     #HIP on AMD
+    ifeq ($(strip $(USE_COMPLEX)),1)
+      ifndef THRUST_PATH
+        $(error THRUST_PATH variable is not defined, aborting build)
+      endif
+      # Please download the thrust from https://github.com/ROCmSoftwarePlatform/Thrust
+      # We need to put thrust inc ahead of HIP_PATH because the thrust comes with hip is broken
+      INC_FLAGS += -I$(THRUST_PATH)
+    endif
     HIPCC	        ?= $(HIP_PATH)/bin/hipcc
     # Latter is preferred, former is for backwards compatability
-    REALM_CC_FLAGS	+= -DREALM_USE_HIP
-    LEGION_CC_FLAGS	+= -DLEGION_USE_HIP
-    CC_FLAGS        	+= -D__HIP_PLATFORM_HCC__
-    HIPCC_FLAGS      	+= -fno-strict-aliasing
-    INC_FLAGS		+= -I$(HIP_PATH)/include -I$(HIP_PATH)/../include
+    REALM_CC_FLAGS  += -DREALM_USE_HIP
+    LEGION_CC_FLAGS += -DLEGION_USE_HIP
+    CC_FLAGS        += -D__HIP_PLATFORM_AMD__
+    HIPCC_FLAGS     += -fno-strict-aliasing
+    INC_FLAGS       += -I$(HIP_PATH)/include -I$(HIP_PATH)/../include
     ifeq ($(strip $(DEBUG)),1)
       HIPCC_FLAGS	+= -g
-      #NVCC_FLAGS	+= -G
     else
       HIPCC_FLAGS	+= -O2
     endif
@@ -458,7 +481,6 @@ ifeq ($(strip $(USE_HIP)),1)
       HIPCC_FLAGS	+= --amdgpu-target=$(HIP_ARCH)
     endif
     LEGION_LD_FLAGS	+= -lm -L$(HIP_PATH)/lib -lamdhip64
-    MK_HIP_TARGET = ROCM
   else ifeq ($(strip $(HIP_TARGET)),CUDA)
     # HIP on CUDA
     ifndef CUDA_PATH
@@ -466,19 +488,17 @@ ifeq ($(strip $(USE_HIP)),1)
     endif
     HIPCC ?= $(CUDA_PATH)/bin/nvcc
     # Latter is preferred, former is for backwards compatability
-    REALM_CC_FLAGS	+= -DREALM_USE_HIP
-    LEGION_CC_FLAGS	+= -DLEGION_USE_HIP
-    CC_FLAGS        	+= -D__HIP_PLATFORM_NVCC__
-    HIPCC_FLAGS      	+= -D__HIP_PLATFORM_NVCC__
-    INC_FLAGS		+= -I$(HIP_PATH)/include  -I$(HIP_PATH)/../include -I$(CUDA_PATH)/include  
+    REALM_CC_FLAGS  += -DREALM_USE_HIP
+    LEGION_CC_FLAGS += -DLEGION_USE_HIP
+    CC_FLAGS        += -D__HIP_PLATFORM_NVIDIA__
+    HIPCC_FLAGS     += -D__HIP_PLATFORM_NVIDIA__
+    INC_FLAGS       += -I$(CUDA_PATH)/include -I$(HIP_PATH)/include  -I$(HIP_PATH)/../include
     ifeq ($(strip $(DEBUG)),1)
       HIPCC_FLAGS	+= -g -O0
-      #NVCC_FLAGS	+= -G
     else
       HIPCC_FLAGS	+= -O2
     endif
     LEGION_LD_FLAGS	+= -L$(CUDA_PATH)/lib64/stubs -lcuda -L$(CUDA_PATH)/lib64 -lcudart
-    MK_HIP_TARGET = CUDA
   endif
 
   USE_HIP_HIJACK ?= 1
@@ -506,12 +526,21 @@ endif
 # General CUDA variables
 ifeq ($(strip $(USE_CUDA)),1)
 NVCC	        ?= $(CUDA)/bin/nvcc
+# If CUDA compiler is nvcc then set the host compiler
+ifeq ($(findstring nvcc,$(NVCC)),nvcc)
+CUDAHOSTCXX	?= $(CXX)
+NVCC_FLAGS	+= -ccbin $(CUDAHOSTCXX)
+endif
 REALM_CC_FLAGS        += -DREALM_USE_CUDA
 LEGION_CC_FLAGS       += -DLEGION_USE_CUDA
 # provide this for backward-compatibility in applications
 CC_FLAGS              += -DUSE_CUDA
 FC_FLAGS	      += -DUSE_CUDA
 REALM_USE_CUDART_HIJACK ?= 1
+# We don't support the hijack for nvc++
+ifeq ($(findstring nvc++,$(shell $(NVCC) --version)),nvc++)
+REALM_USE_CUDART_HIJACK := 1
+endif
 # Have this for backwards compatibility
 ifdef USE_CUDART_HIJACK
 REALM_USE_CUDART_HIJACK = $(USE_CUDART_HIJACK)
@@ -613,15 +642,14 @@ endif
 
 # finally, convert space-or-comma separated list of architectures (e.g. 35,50)
 #  into nvcc -gencode arguments
+ifeq ($(findstring nvc++,$(shell $(NVCC) --version)),nvc++)
+NVCC_FLAGS += $(foreach X,$(subst $(COMMA), ,$(GPU_ARCH)),-gpu=cc$(X))
+else
 COMMA=,
 NVCC_FLAGS += $(foreach X,$(subst $(COMMA), ,$(GPU_ARCH)),-gencode arch=compute_$(X)$(COMMA)code=sm_$(X))
-
-NVCC_FLAGS += -Xcudafe --diag_suppress=boolean_controlling_expr_is_constant
 endif
 
-# Add support for Legion GPU reduction tasks if requested
-ifeq ($(strip $(USE_GPU_REDUCTIONS)),1)
-LEGION_CC_FLAGS	+= -DLEGION_GPU_REDUCTIONS
+NVCC_FLAGS += -Xcudafe --diag_suppress=boolean_controlling_expr_is_constant
 endif
 
 # Realm uses GASNet if requested (detect both gasnet1 and gasnetex here)
@@ -699,11 +727,9 @@ ifeq ($(strip $(USE_HDF)), 1)
   endif
 endif
 
-SKIP_MACHINES= titan% daint% excalibur% cori%
-# use mpi{cc,cxx,f90} compiler wrappers if USE_MPI=1
+# use mpi{cc,cxx,f90} compiler wrappers if USE_MPI=1 and we're not on a Cray system
 ifeq ($(strip $(USE_MPI)),1)
-  # Skip any machines on this list list
-  ifeq ($(filter-out $(SKIP_MACHINES),$(shell uname -n)),$(shell uname -n))
+  ifeq (${CRAYPE_VERSION},)
     # OpenMPI check
     ifneq ($(strip $(shell __INTEL_POST_CFLAGS+=' -we10006' $(CC) -showme:compile 2>&1 > /dev/null; echo $$?)),0)
       # MPICH check
@@ -822,6 +848,21 @@ CC_FLAGS        += -Werror
 FC_FLAGS	+= -Werror
 endif
 
+# Check for a minimum C++ version and if none is specified then set it to c++11
+ifneq ($(findstring -std=c++,$(CC_FLAGS)),-std=c++)
+ifeq ($(shell $(CXX) -x c++ -std=c++11 -c /dev/null -o /dev/null 2> /dev/null; echo $$?),0)
+CC_FLAGS += -std=c++11
+else ifeq ($(findstring nvc++,$(CXX)),nvc++)
+# nvc++ is dumb and will give you an error if you try to overwrite the input
+# file with the output file and so errors at our test above, we'll just assume
+# that all versions of nvc++ will support c++11 for now
+CC_FLAGS += -std=c++11
+else
+$(error Legion requires a C++ compiler that supports at least C++11)
+endif
+endif
+
+
 # if requested, add --defcheck flags to the compile line so that the
 #  cxx_defcheck wrapper can verify that source files include the configuration
 #  headers properly
@@ -842,13 +883,11 @@ HIP_SRC         ?=
 # Backwards compatibility for older makefiles
 GEN_GPU_SRC	?= 
 CUDA_SRC	+= $(GEN_GPU_SRC)
-GEN_HIP_SRC     ?=
-HIP_SRC         += $(GEN_HIP_SRC)
+HIP_SRC         += $(GEN_GPU_SRC)
 REALM_SRC	?=
 LEGION_SRC	?=
 LEGION_CUDA_SRC	?=
 LEGION_HIP_SRC  ?=
-LEGION_HIP_GENERATED_SRC  ?=
 MAPPER_SRC	?=
 
 # Set the source files
@@ -916,6 +955,7 @@ REALM_SRC 	+= $(LG_RT_DIR)/realm/python/python_module.cc \
 endif
 ifeq ($(strip $(USE_CUDA)),1)
 REALM_SRC 	+= $(LG_RT_DIR)/realm/cuda/cuda_module.cc \
+                   $(LG_RT_DIR)/realm/cuda/cuda_access.cc \
                    $(LG_RT_DIR)/realm/cuda/cuda_internal.cc
 ifeq ($(strip $(REALM_USE_CUDART_HIJACK)),1)
 REALM_SRC       += $(LG_RT_DIR)/realm/cuda/cudart_hijack.cc
@@ -923,7 +963,8 @@ endif
 endif
 ifeq ($(strip $(USE_HIP)),1)
 REALM_SRC 	+= $(LG_RT_DIR)/realm/hip/hip_module.cc \
-               $(LG_RT_DIR)/realm/hip/hip_internal.cc
+                   $(LG_RT_DIR)/realm/hip/hip_access.cc \
+                   $(LG_RT_DIR)/realm/hip/hip_internal.cc
 ifeq ($(strip $(USE_HIP_HIJACK)),1)
 REALM_SRC       += $(LG_RT_DIR)/realm/hip/hip_hijack.cc
 endif
@@ -980,14 +1021,7 @@ LEGION_SRC 	+= $(LG_RT_DIR)/legion/legion.cc \
 		    $(LG_RT_DIR)/legion/garbage_collection.cc \
 		    $(LG_RT_DIR)/legion/mapper_manager.cc
 LEGION_CUDA_SRC  += $(LG_RT_DIR)/legion/legion_redop.cu
-ifeq ($(strip $(USE_GPU_REDUCTIONS)),1)
-  ifeq ($(strip $(MK_HIP_TARGET)),ROCM)
-    LEGION_HIP_SRC  += $(LG_RT_DIR)/legion/legion_redop.cpp
-    LEGION_HIP_GENERATED_SRC  += $(LG_RT_DIR)/legion/legion_redop.cpp
-  else ifeq ($(strip $(MK_HIP_TARGET)),CUDA)
-    LEGION_HIP_SRC  += $(LG_RT_DIR)/legion/legion_redop.cu
-  endif
-endif
+LEGION_HIP_SRC   += $(LG_RT_DIR)/legion/legion_redop.cu
 # LEGION_INST_SRC will be compiled {MAX_DIM}^2 times in parallel
 LEGION_INST_SRC  += $(LG_RT_DIR)/legion/region_tree_tmpl.cc
 
@@ -1078,7 +1112,12 @@ INSTALL_HEADERS += legion.h \
 		   realm/utils.inl
 
 ifeq ($(strip $(USE_CUDA)),1)
-INSTALL_HEADERS += realm/cuda/cuda_redop.h
+INSTALL_HEADERS += realm/cuda/cuda_redop.h \
+                   realm/cuda/cuda_access.h
+endif
+ifeq ($(strip $(USE_HIP)),1)
+INSTALL_HEADERS += hip_cuda_compat/hip_cuda.h \
+                   realm/hip/hip_redop.h
 endif
 ifeq ($(strip $(USE_HALF)),1)
 INSTALL_HEADERS += mathtypes/half.h
@@ -1142,11 +1181,7 @@ LEGION_OBJS 	+= $(LEGION_CUDA_SRC:.cu=.cu.o)
 endif
 
 # Only compile the hip objects if we need to 
-ifeq ($(strip $(MK_HIP_TARGET)),ROCM)
-APP_OBJS	+= $(HIP_SRC:.cpp=.cpp.o)
-LEGION_OBJS     += $(LEGION_HIP_SRC:.cpp=.cpp.o)
-endif
-ifeq ($(strip $(MK_HIP_TARGET)),CUDA)
+ifeq ($(strip $(USE_HIP)),1)
 APP_OBJS	+= $(HIP_SRC:.cu=.cu.o)
 LEGION_OBJS     += $(LEGION_HIP_SRC:.cu=.cu.o)
 endif
@@ -1177,7 +1212,7 @@ ifndef NO_BUILD_ALL
 all: $(OUTFILE)
 endif
 # Provide support for installing legion with the make build system
-.PHONY: install
+.PHONY: install COPY_FILES_AFTER_BUILD
 ifdef PREFIX
 INSTALL_BIN_FILES += $(OUTFILE)
 INSTALL_INC_FILES += legion_defines.h realm_defines.h
@@ -1186,17 +1221,19 @@ TARGET_HEADERS := $(addprefix $(strip $(PREFIX))/include/,$(INSTALL_HEADERS))
 TARGET_BIN_FILES := $(addprefix $(strip $(PREFIX))/bin/,$(INSTALL_BIN_FILES))
 TARGET_INC_FILES := $(addprefix $(strip $(PREFIX))/include/,$(INSTALL_INC_FILES))
 TARGET_LIB_FILES := $(addprefix $(strip $(PREFIX))/lib/,$(INSTALL_LIB_FILES))
-install: $(TARGET_HEADERS) $(TARGET_BIN_FILES) $(TARGET_INC_FILES) $(TARGET_LIB_FILES)
-$(TARGET_HEADERS) : $(strip $(PREFIX))/include/% : $(LG_RT_DIR)/% $(OUTFILE)
+install: $(OUTFILE)
+	$(MAKE) COPY_FILES_AFTER_BUILD
+COPY_FILES_AFTER_BUILD: $(TARGET_HEADERS) $(TARGET_BIN_FILES) $(TARGET_INC_FILES) $(TARGET_LIB_FILES)
+$(TARGET_HEADERS) : $(strip $(PREFIX))/include/% : $(LG_RT_DIR)/%
 	mkdir -p $(dir $@)
 	cp $< $@
-$(TARGET_BIN_FILES) : $(strip $(PREFIX))/bin/% : % $(OUTFILE)
+$(TARGET_BIN_FILES) : $(strip $(PREFIX))/bin/% : %
 	mkdir -p $(dir $@)
 	cp $< $@
-$(TARGET_INC_FILES) : $(strip $(PREFIX))/include/% : % $(OUTFILE)
+$(TARGET_INC_FILES) : $(strip $(PREFIX))/include/% : %
 	mkdir -p $(dir $@)
 	cp $< $@
-$(TARGET_LIB_FILES) : $(strip $(PREFIX))/lib/% : % $(OUTFILE)
+$(TARGET_LIB_FILES) : $(strip $(PREFIX))/lib/% : %
 	mkdir -p $(dir $@)
 	cp $< $@
 else
@@ -1228,11 +1265,11 @@ $(SLIB_REALM) : $(REALM_OBJS) $(REALM_INST_OBJS)
 else
 $(SLIB_LEGION) : $(LEGION_OBJS) $(LEGION_INST_OBJS) $(MAPPER_OBJS) $(SLIB_REALM)
 	rm -f $@
-	$(CXX) $(SO_FLAGS) -o $@ $(LEGION_OBJS) $(LEGION_INST_OBJS) $(MAPPER_OBJS) $(SLIB_LEGION_DEPS)
+	$(CXX) $(SO_FLAGS) -o $@ $(LEGION_OBJS) $(LEGION_INST_OBJS) $(MAPPER_OBJS) $(LD_FLAGS) $(SLIB_LEGION_DEPS)
 
 $(SLIB_REALM) : $(REALM_OBJS) $(REALM_INST_OBJS)
 	rm -f $@
-	$(CXX) $(SO_FLAGS) -o $@ $^ $(SLIB_REALM_DEPS)
+	$(CXX) $(SO_FLAGS) -o $@ $^ $(LD_FLAGS) $(SLIB_REALM_DEPS)
 endif
 
 $(filter %.c.o,$(APP_OBJS)) : %.c.o : %.c $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
@@ -1310,13 +1347,7 @@ $(MAPPER_OBJS) : %.cc.o : %.cc $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
 # GPU compilation rules; We can't use -MMD for dependency generation because
 # it's not supported by old versions of nvcc.
 
-ifeq ($(strip $(MK_HIP_TARGET)),ROCM)
-$(filter %.cpp.o,$(APP_OBJS)) : %.cpp.o : %.cpp $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
-	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
-endif
-
-ifeq ($(strip $(MK_HIP_TARGET)),CUDA)
+ifeq ($(strip $(USE_HIP)),1)
 $(filter %.cu.o,$(APP_OBJS)) : %.cu.o : %.cu $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
 	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
 	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
@@ -1328,15 +1359,7 @@ $(filter %.cu.o,$(APP_OBJS)) : %.cu.o : %.cu $(LEGION_DEFINES_HEADER) $(REALM_DE
 	$(NVCC) -o $@ -c $< $(NVCC_FLAGS) $(INC_FLAGS)
 endif
 
-ifeq ($(strip $(MK_HIP_TARGET)),ROCM)
-$(filter %.cpp,$(LEGION_HIP_SRC)): %.cpp : %.cu
-	hipify-perl $< > $@
-$(filter %.cpp.o,$(LEGION_OBJS)): %.cpp.o : %.cpp $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
-	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
-endif
-
-ifeq ($(strip $(MK_HIP_TARGET)),CUDA)
+ifeq ($(strip $(USE_HIP)),1)
 $(filter %.cu.o,$(LEGION_OBJS)): %.cu.o : %.cu $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
 	$(HIPCC) -o $<.d -M -MT $@ $< $(HIPCC_FLAGS) $(INC_FLAGS)
 	$(HIPCC) -o $@ -c $< $(HIPCC_FLAGS) $(INC_FLAGS)
@@ -1367,7 +1390,7 @@ endif
 % : %.o
 
 clean::
-	$(RM) -f $(OUTFILE) $(SLIB_LEGION) $(SLIB_REALM) $(APP_OBJS) $(REALM_OBJS) $(REALM_INST_OBJS) $(LEGION_OBJS) $(LEGION_INST_OBJS) $(MAPPER_OBJS) $(LG_RT_DIR)/*mod *.mod $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER) $(LEGION_HIP_GENERATED_SRC) $(DEP_FILES)
+	$(RM) -f $(OUTFILE) $(SLIB_LEGION) $(SLIB_REALM) $(APP_OBJS) $(REALM_OBJS) $(REALM_INST_OBJS) $(LEGION_OBJS) $(LEGION_INST_OBJS) $(MAPPER_OBJS) $(LG_RT_DIR)/*mod *.mod $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER) $(DEP_FILES)
 
 ifeq ($(strip $(USE_LLVM)),1)
 llvmjit_internal.cc.o : CC_FLAGS += $(LLVM_CXXFLAGS)

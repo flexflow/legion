@@ -76,6 +76,10 @@ template<unsigned int MAX> class AVXTLBitMask;
 template<unsigned int MAX> class PPCBitMask;
 template<unsigned int MAX> class PPCTLBitMask;
 #endif
+#ifdef __ARM_NEON
+template<unsigned int MAX> class NeonBitMask;
+template<unsigned int MAX> class NeonTLBitMask;
+#endif
 template<typename DT, unsigned BLOAT, bool BIDIR> class CompoundBitMask;
 
 namespace BindingLib { class Utility; } // BindingLib namespace
@@ -171,6 +175,7 @@ namespace Legion {
   class IndexIterator;
   template<typename T> struct ColoredPoints; 
   struct InputArgs;
+  struct RegistrationCallbackArgs;
   class ProjectionFunctor;
   class ShardingFunctor;
   class Task;
@@ -182,6 +187,7 @@ namespace Legion {
   class Fill;
   class Partition;
   class MustEpoch;
+  class PointTransformFunctor;
   class Runtime;
   class LegionHandshake;
   class MPILegionHandshake;
@@ -306,21 +312,20 @@ namespace Legion {
     enum LgTaskID {
       LG_SCHEDULER_ID,
       LG_POST_END_ID,
-      LG_DEFERRED_READY_TRIGGER_ID,
-      LG_DEFERRED_EXECUTION_TRIGGER_ID,
-      LG_DEFERRED_RESOLUTION_TRIGGER_ID,
-      LG_DEFERRED_COMMIT_TRIGGER_ID,
-      LG_DEFERRED_EXECUTE_ID,
-      LG_DEFERRED_COMPLETE_ID,
+      LG_TRIGGER_READY_ID,
+      LG_TRIGGER_EXECUTION_ID,
+      LG_TRIGGER_RESOLUTION_ID,
+      LG_TRIGGER_COMMIT_ID,
+      LG_DEFERRED_EXECUTION_ID,
+      LG_DEFERRED_COMPLETION_ID,
       LG_DEFERRED_COMMIT_ID,
       LG_DEFERRED_COLLECT_ID,
       LG_PRE_PIPELINE_ID,
       LG_TRIGGER_DEPENDENCE_ID,
-      LG_TRIGGER_COMPLETE_ID,
+      LG_TRIGGER_COMPLETION_ID,
       LG_TRIGGER_OP_ID,
       LG_TRIGGER_TASK_ID,
       LG_DEFER_MAPPER_SCHEDULER_TASK_ID,
-      LG_DEFERRED_RECYCLE_ID,
       LG_MUST_INDIV_ID,
       LG_MUST_INDEX_ID,
       LG_MUST_MAP_ID,
@@ -329,6 +334,7 @@ namespace Legion {
       LG_CONTRIBUTE_COLLECTIVE_ID,
       LG_FUTURE_CALLBACK_TASK_ID,
       LG_CALLBACK_RELEASE_TASK_ID,
+      LG_FUTURE_BROADCAST_TASK_ID,
       LG_DEFERRED_DELETE_FUTURE_INST_TASK_ID,
       LG_TOP_FINISH_TASK_ID,
       LG_MAPPER_TASK_ID,
@@ -336,7 +342,6 @@ namespace Legion {
       LG_DEFER_PHYSICAL_REGISTRATION_TASK_ID,
       LG_PART_INDEPENDENCE_TASK_ID,
       LG_SPACE_INDEPENDENCE_TASK_ID,
-      LG_POST_DECREMENT_TASK_ID,
       LG_ISSUE_FRAME_TASK_ID,
       LG_MAPPER_CONTINUATION_TASK_ID,
       LG_TASK_IMPL_SEMANTIC_INFO_REQ_TASK_ID,
@@ -350,16 +355,14 @@ namespace Legion {
       LG_PARTITION_SEMANTIC_INFO_REQ_TASK_ID,
       LG_INDEX_SPACE_DEFER_CHILD_TASK_ID,
       LG_INDEX_PART_DEFER_CHILD_TASK_ID,
-      LG_DEFERRED_ENQUEUE_OP_ID,
       LG_DEFERRED_ENQUEUE_TASK_ID,
       LG_DEFER_MAPPER_MESSAGE_TASK_ID,
       LG_REMOTE_VIEW_CREATION_TASK_ID,
-      LG_DEFER_DISTRIBUTE_TASK_ID,
+      LG_DEFERRED_DISTRIBUTE_TASK_ID,
       LG_DEFER_PERFORM_MAPPING_TASK_ID,
-      LG_DEFER_LAUNCH_TASK_ID,
+      LG_DEFERRED_LAUNCH_TASK_ID,
       LG_MISSPECULATE_TASK_ID,
       LG_DEFER_TRIGGER_TASK_COMPLETE_TASK_ID,
-      LG_DEFER_FIND_COPY_PRE_TASK_ID,
       LG_DEFER_MATERIALIZED_VIEW_TASK_ID,
       LG_DEFER_REDUCTION_VIEW_TASK_ID,
       LG_DEFER_PHI_VIEW_REF_TASK_ID,
@@ -403,6 +406,7 @@ namespace Legion {
       LG_DEFER_VERIFY_PARTITION_TASK_ID,
       LG_DEFER_REMOVE_REMOTE_REFS_TASK_ID,
       LG_DEFER_RELEASE_ACQUIRED_TASK_ID,
+      LG_DEFER_COPY_ACROSS_TASK_ID,
       LG_DEFER_DISJOINT_COMPLETE_TASK_ID,
       LG_DEFER_FINALIZE_PENDING_SET_TASK_ID,
       LG_FREE_EAGER_INSTANCE_TASK_ID,
@@ -432,21 +436,20 @@ namespace Legion {
       const char *name[LG_LAST_TASK_ID] = {                      \
         "Scheduler",                                              \
         "Post-Task Execution",                                    \
-        "Deferred Ready Trigger",                                 \
-        "Deferred Execution Trigger",                             \
-        "Deferred Resolution Trigger",                            \
-        "Deferred Commit Trigger",                                \
-        "Deferred Execute",                                       \
-        "Deferred Complete",                                      \
+        "Trigger Ready",                                          \
+        "Trigger Execution",                                      \
+        "Trigger Resolution",                                     \
+        "Trigger Commit",                                         \
+        "Deferred Execution",                                     \
+        "Deferred Completion",                                    \
         "Deferred Commit",                                        \
         "Garbage Collection",                                     \
         "Prepipeline Stage",                                      \
         "Logical Dependence Analysis",                            \
-        "Trigger Complete",                                       \
-        "Operation Physical Dependence Analysis",                 \
-        "Task Physical Dependence Analysis",                      \
+        "Trigger Completion",                                     \
+        "Trigger Operation Mapping",                              \
+        "Trigger Task Mapping",                                   \
         "Defer Mapper Scheduler",                                 \
-        "Deferred Recycle",                                       \
         "Must Individual Task Dependence Analysis",               \
         "Must Index Task Dependence Analysis",                    \
         "Must Task Physical Dependence Analysis",                 \
@@ -455,6 +458,7 @@ namespace Legion {
         "Contribute Collective",                                  \
         "Future Callback",                                        \
         "Future Callback Release",                                \
+        "Future Broadcast",                                       \
         "Defer Delete Future Instance",                           \
         "Top Finish",                                             \
         "Mapper Task",                                            \
@@ -462,7 +466,6 @@ namespace Legion {
         "Defer Physical Registration",                            \
         "Partition Independence Test",                            \
         "Index Space Independence Test",                          \
-        "Post Decrement Task",                                    \
         "Issue Frame",                                            \
         "Mapper Continuation",                                    \
         "Task Impl Semantic Request",                             \
@@ -476,16 +479,14 @@ namespace Legion {
         "Partition Semantic Request",                             \
         "Defer Index Space Child Request",                        \
         "Defer Index Partition Child Request",                    \
-        "Deferred Enqueue Op",                                    \
         "Deferred Enqueue Task",                                  \
         "Deferred Mapper Message",                                \
         "Remote View Creation",                                   \
-        "Defer Task Distribution",                                \
+        "Deferred Distribute Task",                               \
         "Defer Task Perform Mapping",                             \
-        "Defer Task Launch",                                      \
+        "Deferred Task Launch",                                   \
         "Handle Mapping Misspeculation",                          \
         "Defer Trigger Task Complete",                            \
-        "Defer Find Copy Preconditions",                          \
         "Defer Materialized View Registration",                   \
         "Defer Reduction View Registration",                      \
         "Defer Phi View Reference",                               \
@@ -529,6 +530,7 @@ namespace Legion {
         "Defer Verify Partition",                                 \
         "Defer Remove Remote Region Tree Flow Back References",   \
         "Defer Release Acquired Instances",                       \
+        "Defer Copy-Across Execution for Preimages",              \
         "Defer Disjoint Complete Response",                       \
         "Defer Finalize Pending Equivalence Set",                 \
         "Free Eager Instance",                                    \
@@ -712,7 +714,7 @@ namespace Legion {
       REFERENCE_VIRTUAL_CHANNEL = 6,
       UPDATE_VIRTUAL_CHANNEL = 7, // deferred-priority
       SUBSET_VIRTUAL_CHANNEL = 8,
-      CONTEXT_VIRTUAL_CHANNEL = 9,
+      //CONTEXT_VIRTUAL_CHANNEL = 9,
       LAYOUT_CONSTRAINT_VIRTUAL_CHANNEL = 10,
       EXPRESSION_VIRTUAL_CHANNEL = 11,
       MIGRATION_VIRTUAL_CHANNEL = 12,
@@ -788,6 +790,7 @@ namespace Legion {
       DISTRIBUTED_REMOTE_REGISTRATION,
       DISTRIBUTED_VALID_UPDATE,
       DISTRIBUTED_GC_UPDATE,
+      DISTRIBUTED_RESOURCE_UPDATE,
       DISTRIBUTED_CREATE_ADD,
       DISTRIBUTED_CREATE_REMOVE,
       DISTRIBUTED_UNREGISTER,
@@ -803,15 +806,14 @@ namespace Legion {
       SEND_MANAGER_UPDATE,
       SEND_COLLECTIVE_MANAGER,
       SEND_COLLECTIVE_MESSAGE,
-      SEND_CREATE_SHADOW_REQUEST,
-      SEND_CREATE_SHADOW_RESPONSE,
       SEND_CREATE_TOP_VIEW_REQUEST,
       SEND_CREATE_TOP_VIEW_RESPONSE,
       SEND_VIEW_REQUEST,
       SEND_VIEW_REGISTER_USER,
       SEND_VIEW_FIND_COPY_PRE_REQUEST,
-      SEND_VIEW_FIND_COPY_PRE_RESPONSE,
       SEND_VIEW_ADD_COPY_USER,
+      SEND_VIEW_FIND_LAST_USERS_REQUEST,
+      SEND_VIEW_FIND_LAST_USERS_RESPONSE,
       SEND_VIEW_REPLICATION_REQUEST,
       SEND_VIEW_REPLICATION_RESPONSE,
       SEND_VIEW_REPLICATION_REMOVAL,
@@ -827,14 +829,14 @@ namespace Legion {
       SEND_FUTURE_MAP_RESPONSE,
       SEND_REPL_FUTURE_MAP_REQUEST,
       SEND_REPL_FUTURE_MAP_RESPONSE,
-      SEND_REPL_TOP_VIEW_REQUEST,
-      SEND_REPL_TOP_VIEW_RESPONSE,
       SEND_REPL_DISJOINT_COMPLETE_REQUEST,
       SEND_REPL_DISJOINT_COMPLETE_RESPONSE,
       SEND_REPL_INTRA_SPACE_DEP,
       SEND_REPL_BROADCAST_UPDATE,
       SEND_REPL_TRACE_EVENT_REQUEST,
       SEND_REPL_TRACE_EVENT_RESPONSE,
+      SEND_REPL_TRACE_FRONTIER_REQUEST,
+      SEND_REPL_TRACE_FRONTIER_RESPONSE,
       SEND_REPL_TRACE_UPDATE,
       SEND_REPL_IMPLICIT_REQUEST,
       SEND_REPL_IMPLICIT_RESPONSE,
@@ -861,9 +863,10 @@ namespace Legion {
       SEND_REMOTE_CONTEXT_PHYSICAL_RESPONSE,
       SEND_COMPUTE_EQUIVALENCE_SETS_REQUEST,
       SEND_COMPUTE_EQUIVALENCE_SETS_RESPONSE,
+      SEND_CANCEL_EQUIVALENCE_SETS_SUBSCRIPTION,
+      SEND_FINISH_EQUIVALENCE_SETS_SUBSCRIPTION,
       SEND_EQUIVALENCE_SET_REQUEST,
       SEND_EQUIVALENCE_SET_RESPONSE,
-      SEND_EQUIVALENCE_SET_INVALIDATE_TRACKERS,
       SEND_EQUIVALENCE_SET_REPLICATION_REQUEST,
       SEND_EQUIVALENCE_SET_REPLICATION_RESPONSE,
       SEND_EQUIVALENCE_SET_REPLICATION_UPDATE,
@@ -892,7 +895,12 @@ namespace Legion {
       SEND_EXTERNAL_ATTACH,
       SEND_EXTERNAL_DETACH,
       SEND_GC_PRIORITY_UPDATE,
-      SEND_NEVER_GC_RESPONSE,
+      SEND_GC_REQUEST,
+      SEND_GC_RESPONSE,
+      SEND_GC_ACQUIRE,
+      SEND_GC_ACQUIRED,
+      SEND_GC_DEBUG_REQUEST,
+      SEND_GC_DEBUG_RESPONSE,
       SEND_ACQUIRE_REQUEST,
       SEND_ACQUIRE_RESPONSE,
       SEND_VARIANT_BROADCAST,
@@ -1005,6 +1013,7 @@ namespace Legion {
         "Distributed Remote Registration",                            \
         "Distributed Valid Update",                                   \
         "Distributed GC Update",                                      \
+        "Distributed Resource Update",                                \
         "Distributed Create Add",                                     \
         "Distributed Create Remove",                                  \
         "Distributed Unregister",                                     \
@@ -1020,15 +1029,14 @@ namespace Legion {
         "Send Manager Update",                                        \
         "Send Collective Instance Manager",                           \
         "Send Collective Instance Message",                           \
-        "Send Create Shadow Reduction Instance Request",              \
-        "Send Create Shadow Reduction Instance Response",             \
         "Send Create Top View Request",                               \
         "Send Create Top View Response",                              \
         "Send View Request",                                          \
         "Send View Register User",                                    \
         "Send View Find Copy Preconditions Request",                  \
-        "Send View Find Copy Preconditions Response",                 \
         "Send View Add Copy User",                                    \
+        "Send View Find Last Users Request",                          \
+        "Send View Find Last Users Response",                         \
         "Send View Replication Request",                              \
         "Send View Replication Response",                             \
         "Send View Replication Removal",                              \
@@ -1044,14 +1052,14 @@ namespace Legion {
         "Send Future Map Future Response",                            \
         "Send Replicate Future Map Request",                          \
         "Send Replicate Future Map Response",                         \
-        "Send Replicate Top View Request",                            \
-        "Send Replicate Top View Response",                           \
         "Send Replicate Disjoint Complete Request",                   \
         "Send Replicate Disjoint Complete Response",                  \
         "Send Replicate Intra Space Dependence",                      \
         "Send Replicate Broadcast Update",                            \
         "Send Replicate Trace Event Request",                         \
         "Send Replicate Trace Event Response",                        \
+        "Send Replicate Trace Frontier Request",                      \
+        "Send Replicate Trace Frontier Response",                     \
         "Send Replicate Trace Update",                                \
         "Send Replicate Implicit Request",                            \
         "Send Replicate Implicit Response",                           \
@@ -1078,9 +1086,10 @@ namespace Legion {
         "Send Remote Context Physical Response",                      \
         "Send Compute Equivalence Sets Request",                      \
         "Send Compute Equivalence Sets Response",                     \
+        "Send Cancel Equivalence Sets Subscription",                  \
+        "Send Finish Equivalence Sets Subscription",                  \
         "Send Equivalence Set Request",                               \
         "Send Equivalence Set Response",                              \
-        "Send Equivalence Set Invalidate Trackers",                   \
         "Send Equivalence Set Replication Request",                   \
         "Send Equivalence Set Replication Response",                  \
         "Send Equivalence Set Replication Update",                    \
@@ -1109,7 +1118,12 @@ namespace Legion {
         "Send External Attach",                                       \
         "Send External Detach",                                       \
         "Send GC Priority Update",                                    \
-        "Send Never GC Response",                                     \
+        "Send GC Request",                                            \
+        "Send GC Response",                                           \
+        "Send GC Acquire Request",                                    \
+        "Send GC Acquire Response",                                   \
+        "Send GC Debug Request",                                      \
+        "Send GC Debug Response",                                     \
         "Send Acquire Request",                                       \
         "Send Acquire Response",                                      \
         "Send Task Variant Broadcast",                                \
@@ -1178,7 +1192,6 @@ namespace Legion {
       TASK_PRIVILEGE_CHECK_CALL,
       CLONE_TASK_CALL,
       COMPUTE_POINT_REQUIREMENTS_CALL,
-      EARLY_MAP_REGIONS_CALL,
       INTRA_TASK_ALIASING_CALL,
       ACTIVATE_SINGLE_CALL,
       DEACTIVATE_SINGLE_CALL,
@@ -1234,7 +1247,7 @@ namespace Legion {
       INDEX_ACTIVATE_CALL,
       INDEX_DEACTIVATE_CALL,
       INDEX_COMPUTE_FAT_PATH_CALL,
-      INDEX_EARLY_MAP_TASK_CALL,
+      INDEX_PREMAP_TASK_CALL,
       INDEX_DISTRIBUTE_CALL,
       INDEX_PERFORM_MAPPING_CALL,
       INDEX_COMPLETE_CALL,
@@ -1327,7 +1340,6 @@ namespace Legion {
       "Task Privilege Check",                                         \
       "Clone Base Task",                                              \
       "Compute Point Requirements",                                   \
-      "Early Map Regions",                                            \
       "Intra-Task Aliasing",                                          \
       "Activate Single",                                              \
       "Deactivate Single",                                            \
@@ -1383,7 +1395,7 @@ namespace Legion {
       "Index Activate",                                               \
       "Index Deactivate",                                             \
       "Index Compute Fat Path",                                       \
-      "Index Early Map Task",                                         \
+      "Index PreMap Task",                                            \
       "Index Distribute",                                             \
       "Index Perform Mapping",                                        \
       "Index Complete",                                               \
@@ -1576,7 +1588,7 @@ namespace Legion {
       COLLECTIVE_LOC_90 = 90,
       COLLECTIVE_LOC_91 = 91,
       COLLECTIVE_LOC_92 = 92,
-      COLLECTIVE_LOC_93 = 93,
+      //COLLECTIVE_LOC_93 = 93,
       COLLECTIVE_LOC_94 = 94,
       COLLECTIVE_LOC_95 = 95,
       COLLECTIVE_LOC_96 = 96,
@@ -1747,7 +1759,7 @@ namespace Legion {
     class AssignFenceCompletion;
     class IssueCopy;
     class IssueFill;
-    class IssueIndirect;
+    class IssueAcross;
     class GetOpTermEvent;
     class SetOpSyncEvent;
     class SetEffects;
@@ -1756,13 +1768,11 @@ namespace Legion {
     class ReleaseReplay;
     class BarrierArrival;
     class BarrierAdvance;
-#ifdef LEGION_GPU_REDUCTIONS
-    class GPUReduction;
-#endif
 
     // region_tree.h
     class RegionTreeForest;
-    class CopyIndirection;
+    class CopyAcrossExecutor;
+    class CopyAcrossUnstructured;
     class IndexSpaceExpression;
     class IndexSpaceExprRef;
     class IndexSpaceOperation;
@@ -1793,6 +1803,7 @@ namespace Legion {
     class LogicalState;
     class EquivalenceSet;
     class PendingEquivalenceSet;
+    class EqSetTracker;
     class VersionManager;
     class VersionInfo;
     class RayTracer;
@@ -2156,6 +2167,8 @@ namespace Legion {
   typedef ::legion_internal_color_t LegionColor;
   typedef void (*RegistrationCallbackFnptr)(Machine machine, 
                 Runtime *rt, const std::set<Processor> &local_procs);
+  typedef void (*RegistrationWithArgsCallbackFnptr)(
+                const RegistrationCallbackArgs &args);
   typedef LogicalRegion (*RegionProjectionFnptr)(LogicalRegion parent, 
       const DomainPoint&, Runtime *rt);
   typedef LogicalRegion (*PartitionProjectionFnptr)(LogicalPartition parent, 
@@ -2164,9 +2177,6 @@ namespace Legion {
       const std::vector<Future> futures);
   typedef void (*RealmFnptr)(const void*,size_t,
                              const void*,size_t,Processor);
-#ifdef LEGION_GPU_REDUCTIONS
-  typedef std::map<ReductionOpID,TaskID> GPUReductionTable;
-#endif
   // Magical typedefs 
   // (don't forget to update ones in old HighLevel namespace in legion.inl)
   typedef Internal::TaskContext* Context;
@@ -2174,6 +2184,12 @@ namespace Legion {
   namespace Mapping {
     typedef Internal::MappingCallInfo* MapperContext;
     typedef Internal::InstanceManager* PhysicalInstanceImpl;
+    // These type imports are experimental to facilitate coordination and
+    // synchronization between different mappers and may be revoked later
+    // as we develop new abstractions for mappers to interact
+    typedef Internal::AutoLock AutoLock;
+    typedef Internal::AutoTryLock AutoTryLock;
+    typedef Internal::LocalLock LocalLock;
   };
 
   namespace Internal { 
@@ -2183,8 +2199,9 @@ namespace Legion {
     typedef Realm::RegionInstance PhysicalInstance;
     typedef unsigned long long CollectiveID;
     typedef unsigned long long IndexSpaceExprID;
-    typedef std::pair<unsigned, DomainPoint> TraceLocalID;
-    typedef std::vector<std::pair<size_t,DomainPoint> > TaskTreeCoordinates;
+    struct ContextCoordinate;
+    typedef ContextCoordinate TraceLocalID;
+    typedef std::vector<ContextCoordinate> TaskTreeCoordinates;
     // Helper for encoding templates
     struct NT_TemplateHelper : 
       public Realm::DynamicTemplates::ListProduct2<Realm::DIMCOUNTS, 
@@ -2268,6 +2285,16 @@ namespace Legion {
                     LEGION_FIELD_MASK_FIELD_SHIFT,
                     LEGION_FIELD_MASK_FIELD_MASK> FieldMask;
 #endif
+#elif defined(__ARM_NEON)
+#if (LEGION_MAX_FIELDS > 128)
+    typedef NeonTLBitMask<LEGION_MAX_FIELDS> FieldMask;
+#elif (LEGION_MAX_FIELDS > 64)
+    typedef NeonBitMask<LEGION_MAX_FIELDS> FieldMask;
+#else
+    typedef BitMask<LEGION_FIELD_MASK_FIELD_TYPE,LEGION_MAX_FIELDS,
+                    LEGION_FIELD_MASK_FIELD_SHIFT,
+                    LEGION_FIELD_MASK_FIELD_MASK> FieldMask;
+#endif
 #else
 #if (LEGION_MAX_FIELDS > 64)
     typedef TLBitMask<LEGION_FIELD_MASK_FIELD_TYPE,LEGION_MAX_FIELDS,
@@ -2320,6 +2347,16 @@ namespace Legion {
     typedef PPCTLBitMask<LEGION_MAX_NUM_NODES> NodeMask;
 #elif (LEGION_MAX_NUM_NODES > 64)
     typedef PPCBitMask<LEGION_MAX_NUM_NODES> NodeMask;
+#else
+    typedef BitMask<LEGION_NODE_MASK_NODE_TYPE,LEGION_MAX_NUM_NODES,
+                    LEGION_NODE_MASK_NODE_SHIFT,
+                    LEGION_NODE_MASK_NODE_MASK> NodeMask;
+#endif
+#elif defined(__ARM_NEON)
+#if (LEGION_MAX_NUM_NODES > 128)
+    typedef NeonTLBitMask<LEGION_MAX_NUM_NODES> NodeMask;
+#elif (LEGION_MAX_NUM_NODES > 64)
+    typedef NeonBitMask<LEGION_MAX_NUM_NODES> NodeMask;
 #else
     typedef BitMask<LEGION_NODE_MASK_NODE_TYPE,LEGION_MAX_NUM_NODES,
                     LEGION_NODE_MASK_NODE_SHIFT,
@@ -2380,6 +2417,16 @@ namespace Legion {
                     LEGION_PROC_MASK_PROC_SHIFT,
                     LEGION_PROC_MASK_PROC_MASK> ProcessorMask;
 #endif
+#elif defined(__ARM_NEON)
+#if (LEGION_MAX_NUM_PROCS > 128)
+    typedef NeonTLBitMask<LEGION_MAX_NUM_PROCS> ProcessorMask;
+#elif (LEGION_MAX_NUM_PROCS > 64)
+    typedef NeonBitMask<LEGION_MAX_NUM_PROCS> ProcessorMask;
+#else
+    typedef BitMask<LEGION_PROC_MASK_PROC_TYPE,LEGION_MAX_NUM_PROCS,
+                    LEGION_PROC_MASK_PROC_SHIFT,
+                    LEGION_PROC_MASK_PROC_MASK> ProcessorMask;
+#endif
 #else
 #if (LEGION_MAX_NUM_PROCS > 64)
     typedef TLBitMask<LEGION_PROC_MASK_PROC_TYPE,LEGION_MAX_NUM_PROCS,
@@ -2400,7 +2447,7 @@ namespace Legion {
     public:
       static const LgEvent NO_LG_EVENT;
     public:
-      LgEvent(void) { id = 0; }
+      LgEvent(void) noexcept { id = 0; }
       LgEvent(const LgEvent &rhs) = default;
       explicit LgEvent(const Realm::Event e) { id = e.id; }
     public:
@@ -2415,7 +2462,7 @@ namespace Legion {
     public:
       static const PredEvent NO_PRED_EVENT;
     public:
-      PredEvent(void) : LgEvent() { } 
+      PredEvent(void) noexcept : LgEvent() { } 
       PredEvent(const PredEvent &rhs) = default;
       explicit PredEvent(const Realm::UserEvent &e) : LgEvent(e) { }
     public:
@@ -2428,7 +2475,7 @@ namespace Legion {
     public:
       static const ApEvent NO_AP_EVENT;
     public:
-      ApEvent(void) : LgEvent() { }
+      ApEvent(void) noexcept : LgEvent() { }
       ApEvent(const ApEvent &rhs) = default;
       explicit ApEvent(const Realm::Event &e) : LgEvent(e) { }
       explicit ApEvent(const PredEvent &e) { id = e.id; }
@@ -2453,7 +2500,7 @@ namespace Legion {
     public:
       static const ApUserEvent NO_AP_USER_EVENT;
     public:
-      ApUserEvent(void) : ApEvent() { }
+      ApUserEvent(void) noexcept : ApEvent() { }
       ApUserEvent(const ApUserEvent &rhs) = default;
       explicit ApUserEvent(const Realm::UserEvent &e) : ApEvent(e) { }
     public:
@@ -2466,7 +2513,7 @@ namespace Legion {
     public:
       static const ApBarrier NO_AP_BARRIER;
     public:
-      ApBarrier(void) : ApEvent(), timestamp(0) { }
+      ApBarrier(void) noexcept : ApEvent(), timestamp(0) { }
       ApBarrier(const ApBarrier &rhs) = default; 
       explicit ApBarrier(const Realm::Barrier &b) 
         : ApEvent(b), timestamp(b.timestamp) { }
@@ -2490,7 +2537,7 @@ namespace Legion {
     public:
       static const RtEvent NO_RT_EVENT;
     public:
-      RtEvent(void) : LgEvent() { }
+      RtEvent(void) noexcept : LgEvent() { }
       RtEvent(const RtEvent &rhs) = default;
       explicit RtEvent(const Realm::Event &e) : LgEvent(e) { }
       explicit RtEvent(const PredEvent &e) { id = e.id; }
@@ -2502,7 +2549,7 @@ namespace Legion {
     public:
       static const RtUserEvent NO_RT_USER_EVENT;
     public:
-      RtUserEvent(void) : RtEvent() { }
+      RtUserEvent(void) noexcept : RtEvent() { }
       RtUserEvent(const RtUserEvent &rhs) = default;
       explicit RtUserEvent(const Realm::UserEvent &e) : RtEvent(e) { }
     public:
@@ -2515,7 +2562,7 @@ namespace Legion {
     public:
       static const RtBarrier NO_RT_BARRIER;
     public:
-      RtBarrier(void) : RtEvent(), timestamp(0) { }
+      RtBarrier(void) noexcept : RtEvent(), timestamp(0) { }
       RtBarrier(const RtBarrier &rhs) = default;
       explicit RtBarrier(const Realm::Barrier &b)
         : RtEvent(b), timestamp(b.timestamp) { }
@@ -2621,31 +2668,24 @@ namespace Legion {
         if (previous != NULL)
           previous->check_for_reentrant_locks(&local_lock);
 #endif
-        Internal::local_lock_list = this;
       }
     public:
-      inline AutoLock(const AutoLock &rhs)
-        : local_lock(rhs.local_lock), previous(NULL), exclusive(false)
-      {
-        // should never be called
-        assert(false);
-      }
+      AutoLock(const AutoLock &rhs) = delete;
       inline ~AutoLock(void)
       {
-#ifdef DEBUG_LEGION
-        assert(Internal::local_lock_list == this);
-#endif
         if (held)
+        {
+#ifdef DEBUG_LEGION
+          assert(Internal::local_lock_list == this);
+#endif
           local_lock.unlock();
-        Internal::local_lock_list = previous;
+          Internal::local_lock_list = previous;
+        }
+        else
+          assert(Internal::local_lock_list == previous);
       }
     public:
-      inline AutoLock& operator=(const AutoLock &rhs)
-      {
-        // should never be called
-        assert(false);
-        return *this;
-      }
+      AutoLock& operator=(const AutoLock &rhs) = delete;
     public:
       inline void release(void) 
       { 
@@ -2729,7 +2769,12 @@ namespace Legion {
         else
           ready = local_lock.rdlock();
         held = !ready.exists();
+        if (held)
+          Internal::local_lock_list = this;
       }
+      AutoTryLock(const AutoTryLock &rhs) = delete;
+    public:
+      AutoTryLock& operator=(const AutoTryLock &rhs) = delete;
     public:
       // Allow an easy test for whether we got the lock or not
       inline bool has_lock(void) const { return held; }
@@ -2781,9 +2826,6 @@ namespace Legion {
         // Trigger the user-event
         done.trigger();
         // Restore our local lock list
-#ifdef DEBUG_LEGION
-        assert(Internal::local_lock_list == NULL); 
-#endif
         Internal::local_lock_list = local_lock_list_copy; 
       }
       else // Just do the normal wait
@@ -2857,9 +2899,6 @@ namespace Legion {
         // Trigger the user-event
         done.trigger();
         // Restore our local lock list
-#ifdef DEBUG_LEGION
-        assert(Internal::local_lock_list == NULL); 
-#endif
         Internal::local_lock_list = local_lock_list_copy; 
       }
       else // Just do the normal wait

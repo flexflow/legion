@@ -365,20 +365,25 @@ impl fmt::Display for MemKindShort {
             MemKind::L3Cache => write!(f, "l3"),
             MemKind::L2Cache => write!(f, "l2"),
             MemKind::L1Cache => write!(f, "l1"),
+            MemKind::GPUManaged => write!(f, "uvm"),
+            MemKind::GPUDynamic => write!(f, "gpu-dyn"),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct MemShort<'a>(pub &'a Mem, pub &'a MemProcAffinity, pub &'a State);
+pub struct MemShort<'a>(
+    pub MemKind,
+    pub Option<&'a Mem>,
+    pub Option<&'a MemProcAffinity>,
+    pub &'a State,
+);
 
 impl fmt::Display for MemShort<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (mem, affinity, state) = (self.0, self.1, self.2);
+        let (mem_kind, mem, affinity, state) = (self.0, self.1, self.2, self.3);
 
-        let proc = state.procs.get(&affinity.proc_ids[0]).unwrap();
-
-        match mem.kind {
+        match mem_kind {
             MemKind::NoMemKind | MemKind::Global => write!(f, "[all n]"),
             MemKind::System
             | MemKind::Registered
@@ -387,28 +392,38 @@ impl fmt::Display for MemShort<'_> {
             | MemKind::Disk
             | MemKind::HDF5
             | MemKind::File
-            | MemKind::L3Cache => {
+            | MemKind::L3Cache
+            | MemKind::GPUManaged => {
+                let mem = mem.unwrap();
                 write!(
                     f,
                     "[n{}] {}",
                     mem.mem_id.node_id().0,
-                    MemKindShort(mem.kind)
+                    MemKindShort(mem_kind)
                 )
             }
-            MemKind::Framebuffer => write!(
-                f,
-                "[n{}][gpu{}] {}",
-                proc.proc_id.node_id().0,
-                proc.proc_id.proc_in_node(),
-                MemKindShort(mem.kind)
-            ),
-            MemKind::L2Cache | MemKind::L1Cache => write!(
-                f,
-                "[n{}][cpu{}] {}",
-                proc.proc_id.node_id().0,
-                proc.proc_id.proc_in_node(),
-                MemKindShort(mem.kind)
-            ),
+            MemKind::Framebuffer | MemKind::GPUDynamic => {
+                let affinity = affinity.unwrap();
+                let proc = state.procs.get(&affinity.best_aff_proc).unwrap();
+                write!(
+                    f,
+                    "[n{}][gpu{}] {}",
+                    proc.proc_id.node_id().0,
+                    proc.proc_id.proc_in_node(),
+                    MemKindShort(mem_kind)
+                )
+            }
+            MemKind::L2Cache | MemKind::L1Cache => {
+                let affinity = affinity.unwrap();
+                let proc = state.procs.get(&affinity.best_aff_proc).unwrap();
+                write!(
+                    f,
+                    "[n{}][cpu{}] {}",
+                    proc.proc_id.node_id().0,
+                    proc.proc_id.proc_in_node(),
+                    MemKindShort(mem_kind)
+                )
+            }
         }
     }
 }
@@ -475,7 +490,12 @@ impl Chan {
     }
 
     fn emit_tsv<P: AsRef<Path>>(&self, path: P, state: &State) -> io::Result<ProcessorRecord> {
-        let mem_kind = |mem_id: MemID| state.mems.get(&mem_id).unwrap().kind;
+        let mem_kind = |mem_id: MemID| {
+            state
+                .mems
+                .get(&mem_id)
+                .map_or(MemKind::NoMemKind, |mem| mem.kind)
+        };
         let slug = match (self.chan_id.src, self.chan_id.dst) {
             (Some(src), Some(dst)) => format!(
                 "({}_Memory_0x{:x},_{}_Memory_0x{:x})",
@@ -506,21 +526,24 @@ impl Chan {
             (Some(src), Some(dst)) => format!(
                 "{} to {}",
                 MemShort(
-                    state.mems.get(&src).unwrap(),
-                    state.mem_proc_affinity.get(&src).unwrap(),
+                    mem_kind(src),
+                    state.mems.get(&src),
+                    state.mem_proc_affinity.get(&src),
                     state
                 ),
                 MemShort(
-                    state.mems.get(&dst).unwrap(),
-                    state.mem_proc_affinity.get(&dst).unwrap(),
+                    mem_kind(dst),
+                    state.mems.get(&dst),
+                    state.mem_proc_affinity.get(&dst),
                     state
                 )
             ),
             (None, Some(dst)) => format!(
                 "{}",
                 MemShort(
-                    state.mems.get(&dst).unwrap(),
-                    state.mem_proc_affinity.get(&dst).unwrap(),
+                    mem_kind(dst),
+                    state.mems.get(&dst),
+                    state.mem_proc_affinity.get(&dst),
                     state
                 )
             ),
@@ -823,8 +846,9 @@ impl Mem {
         let short_name = format!(
             "{}",
             MemShort(
-                self,
-                state.mem_proc_affinity.get(&self.mem_id).unwrap(),
+                self.kind,
+                Some(self),
+                state.mem_proc_affinity.get(&self.mem_id),
                 state
             )
         );
@@ -944,12 +968,15 @@ impl State {
         for (chan_id, chan) in &self.chans {
             if !chan.time_points.is_empty() {
                 if chan_id.node_id().is_some() {
-                    let mut nodes = vec![
-                        None,
-                        chan_id.src.map(|src| src.node_id()),
-                        chan_id.dst.map(|dst| dst.node_id()),
-                    ];
-                    &nodes.dedup();
+                    // gathers/scatters
+                    let mut nodes = vec![None];
+                    if chan_id.dst.is_some() && chan_id.dst.unwrap() != MemID(0) {
+                        nodes.push(chan_id.dst.map(|dst| dst.node_id()));
+                    }
+                    if chan_id.src.is_some() && chan_id.src.unwrap() != MemID(0) {
+                        nodes.push(chan_id.src.map(|src| src.node_id()));
+                    }
+                    nodes.dedup();
                     for node in nodes {
                         result
                             .entry(node)
@@ -1488,26 +1515,59 @@ pub fn emit_interactive_visualization<P: AsRef<Path>>(
         let mut file = csv::WriterBuilder::new()
             .delimiter(b'\t')
             .from_path(filename)?;
-        // FIXME: Generate other op types
-        for (proc_id, proc_record) in &proc_records {
-            let proc = state.procs.get(&proc_id).unwrap();
-            for task in proc.tasks.values() {
+        for (op_id, op) in &state.operations {
+            if let Some(proc_id) = state.tasks.get(&op_id) {
+                let proc = state.procs.get(&proc_id).unwrap();
+                let proc_record = proc_records.get(&proc_id).unwrap();
+                let task = proc.tasks.get(&op_id).unwrap();
                 let task_name = &state.task_kinds.get(&task.task_id).unwrap().name;
                 let variant_name = &state
                     .variants
                     .get(&(task.task_id, task.variant_id))
                     .unwrap()
                     .name;
-                let name = match task_name {
-                    Some(task_name) => format!("{} [{}]", task_name, variant_name),
-                    None => variant_name.clone(),
+                let desc = match task_name {
+                    Some(task_name) => {
+                        if task_name == variant_name {
+                            format!("{} <{}>", task_name, op_id.0)
+                        } else {
+                            format!("{} [{}] <{}>", task_name, variant_name, op_id.0)
+                        }
+                    }
+                    None => format!("{} <{}>", variant_name, op_id.0),
                 };
 
                 file.serialize(OpRecord {
-                    op_id: task.op_id.0,
-                    desc: &format!("{} <{}>", name, task.op_id.0),
+                    op_id: op_id.0,
+                    desc: &desc,
                     proc: Some(&proc_record.full_text),
                     level: task.base.level.map(|x| x + 1),
+                })?;
+            } else if let Some(task) = state.multi_tasks.get(&op_id) {
+                let task_name = state
+                    .task_kinds
+                    .get(&task.task_id)
+                    .unwrap()
+                    .name
+                    .as_ref()
+                    .unwrap();
+
+                file.serialize(OpRecord {
+                    op_id: op_id.0,
+                    desc: &format!("{} <{}>", task_name, op_id.0),
+                    proc: None,
+                    level: None,
+                })?;
+            } else {
+                let desc = op.kind.and_then(|k| state.op_kinds.get(&k)).map_or_else(
+                    || format!("Operation <{}>", op_id.0),
+                    |k| format!("{} Operation <{}>", k.name, op_id.0),
+                );
+                file.serialize(OpRecord {
+                    op_id: op_id.0,
+                    desc: &desc,
+                    proc: None,
+                    level: None,
                 })?;
             }
         }

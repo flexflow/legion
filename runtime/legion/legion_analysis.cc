@@ -281,33 +281,63 @@ namespace Legion {
     }
 
     /////////////////////////////////////////////////////////////
+    // Unique Instance
+    /////////////////////////////////////////////////////////////
+
+    //--------------------------------------------------------------------------
+    UniqueInst::UniqueInst(InstanceView *view, DomainPoint point)
+      : view_did(view->did), collective_point(point)
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    void UniqueInst::serialize(Serializer &rez) const
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(view_did != 0);
+#endif
+      rez.serialize(view_did);
+      rez.serialize(collective_point);
+    }
+
+    //--------------------------------------------------------------------------
+    void UniqueInst::deserialize(Deserializer &derez)
+    //--------------------------------------------------------------------------
+    {
+      derez.deserialize(view_did);
+      derez.deserialize(collective_point);
+    }
+
+    //--------------------------------------------------------------------------
+    AddressSpaceID UniqueInst::get_analysis_space(Runtime *runtime) const
+    //--------------------------------------------------------------------------
+    {
+      RtEvent ready;
+      InstanceView *view = static_cast<InstanceView*>(
+          runtime->find_or_request_logical_view(view_did, ready));
+      if (ready.exists() && !ready.has_triggered())
+        ready.wait();
+      return view->get_analysis_space(collective_point);
+    }
+
+    /////////////////////////////////////////////////////////////
     // Remote Trace Recorder
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
     RemoteTraceRecorder::RemoteTraceRecorder(Runtime *rt, AddressSpaceID origin,
-                                    AddressSpaceID local, Memoizable *memo, 
-                                    PhysicalTemplate *tpl, RtUserEvent applied,
-                                    RtEvent collect)
-      : runtime(rt), origin_space(origin), local_space(local), memoizable(memo),
+                                 AddressSpaceID local, const TraceLocalID &tlid,
+                                 PhysicalTemplate *tpl, RtUserEvent applied,
+                                 RtEvent collect)
+      : runtime(rt), origin_space(origin), local_space(local),
         remote_tpl(tpl), applied_event(applied), collect_event(collect)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(remote_tpl != NULL);
 #endif
-    }
-
-    //--------------------------------------------------------------------------
-    RemoteTraceRecorder::RemoteTraceRecorder(const RemoteTraceRecorder &rhs)
-      : runtime(rhs.runtime), origin_space(rhs.origin_space), 
-        local_space(rhs.local_space), memoizable(rhs.memoizable), 
-        remote_tpl(rhs.remote_tpl), applied_event(rhs.applied_event),
-        collect_event(rhs.collect_event)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
     }
 
     //--------------------------------------------------------------------------
@@ -319,20 +349,6 @@ namespace Legion {
             Runtime::merge_events(applied_events));
       else
         Runtime::trigger_event(applied_event);
-      // Clean up our memoizable object if necessary
-      if ((memoizable != NULL) && 
-          (memoizable->get_origin_space() != local_space))
-        delete memoizable;
-    }
-
-    //--------------------------------------------------------------------------
-    RemoteTraceRecorder& RemoteTraceRecorder::operator=(
-                                                 const RemoteTraceRecorder &rhs)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
-      return *this;
     }
 
     //--------------------------------------------------------------------------
@@ -351,11 +367,10 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::pack_recorder(Serializer &rez,
-               std::set<RtEvent> &external_applied, const AddressSpaceID target)
+                                            std::set<RtEvent> &external_applied)
     //--------------------------------------------------------------------------
     {
       rez.serialize(origin_space);
-      rez.serialize(target);
       rez.serialize(remote_tpl);
       RtUserEvent remote_applied = Runtime::create_rt_user_event();
       rez.serialize(remote_applied);
@@ -368,12 +383,10 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_get_term_event(Memoizable *memo)
+    void RemoteTraceRecorder::record_get_term_event(ApEvent lhs,
+                                     unsigned op_kind, const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent applied = Runtime::create_rt_user_event(); 
@@ -383,14 +396,16 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_RECORD_GET_TERM);
           rez.serialize(applied);
-          memo->pack_remote_memoizable(rez, origin_space);
+          rez.serialize(lhs);
+          rez.serialize(op_kind);
+          tlid.serialize(rez);
         }
         runtime->send_remote_trace_update(origin_space, rez);
         AutoLock a_lock(applied_lock);
         applied_events.insert(applied);
       }
       else
-        remote_tpl->record_get_term_event(memo);
+        remote_tpl->record_get_term_event(lhs, op_kind, tlid);
     }
 
     //--------------------------------------------------------------------------
@@ -421,40 +436,35 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_create_ap_user_event(
-                                              ApUserEvent lhs, Memoizable *memo)
+                                     ApUserEvent &lhs, const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
-        RtUserEvent applied = Runtime::create_rt_user_event(); 
+        RtUserEvent done = Runtime::create_rt_user_event(); 
         Serializer rez;
         {
           RezCheck z(rez);
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_CREATE_USER_EVENT);
-          rez.serialize(applied);
-          rez.serialize(lhs);
-          memo->pack_remote_memoizable(rez, origin_space);
+          rez.serialize(done);
+          rez.serialize(&lhs);
+          tlid.serialize(rez);
         }
         runtime->send_remote_trace_update(origin_space, rez);
-        AutoLock a_lock(applied_lock);
-        applied_events.insert(applied);
+        // Need this to be done before returning because we need to ensure
+        // that this event is recorded before anyone tries to trigger it
+        done.wait();
       }
       else
-        remote_tpl->record_create_ap_user_event(lhs, memo);
+        remote_tpl->record_create_ap_user_event(lhs, tlid);
     }
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_trigger_event(ApUserEvent lhs, ApEvent rhs,
-                                                   Memoizable *memo)
+                                                   const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent applied = Runtime::create_rt_user_event(); 
@@ -466,83 +476,71 @@ namespace Legion {
           rez.serialize(applied);
           rez.serialize(lhs);
           rez.serialize(rhs);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
         }
         runtime->send_remote_trace_update(origin_space, rez);
         AutoLock a_lock(applied_lock);
         applied_events.insert(applied);
       }
       else
-        remote_tpl->record_trigger_event(lhs, rhs, memo);
+        remote_tpl->record_trigger_event(lhs, rhs, tlid);
     }
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_merge_events(ApEvent &lhs, ApEvent rhs,
-                                                  Memoizable *memo)
+                                                  const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         std::set<ApEvent> rhs_events;
         rhs_events.insert(rhs);
-        record_merge_events(lhs, rhs_events, memo);
+        record_merge_events(lhs, rhs_events, tlid);
       }
       else
-        remote_tpl->record_merge_events(lhs, rhs, memo);
+        remote_tpl->record_merge_events(lhs, rhs, tlid);
     }
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_merge_events(ApEvent &lhs, ApEvent e1,
-                                                  ApEvent e2, Memoizable *memo)
+                                           ApEvent e2, const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         std::set<ApEvent> rhs_events;
         rhs_events.insert(e1);
         rhs_events.insert(e2);
-        record_merge_events(lhs, rhs_events, memo);
+        record_merge_events(lhs, rhs_events, tlid);
       }
       else
-        remote_tpl->record_merge_events(lhs, e1, e2, memo);
+        remote_tpl->record_merge_events(lhs, e1, e2, tlid);
     }
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_merge_events(ApEvent &lhs, ApEvent e1,
                                                   ApEvent e2, ApEvent e3,
-                                                  Memoizable *memo)
+                                                  const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         std::set<ApEvent> rhs_events;
         rhs_events.insert(e1);
         rhs_events.insert(e2);
         rhs_events.insert(e3);
-        record_merge_events(lhs, rhs_events, memo);
+        record_merge_events(lhs, rhs_events, tlid);
       }
       else
-        remote_tpl->record_merge_events(lhs, e1, e2, e3, memo);
+        remote_tpl->record_merge_events(lhs, e1, e2, e3, tlid);
     }
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_merge_events(ApEvent &lhs,
                                                   const std::set<ApEvent>& rhs,
-                                                  Memoizable *memo)
+                                                  const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent done = Runtime::create_rt_user_event(); 
@@ -554,7 +552,7 @@ namespace Legion {
           rez.serialize(done);
           rez.serialize(&lhs);
           rez.serialize(lhs);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize<size_t>(rhs.size());
           for (std::set<ApEvent>::const_iterator it = 
                 rhs.begin(); it != rhs.end(); it++)
@@ -565,18 +563,15 @@ namespace Legion {
         done.wait();
       }
       else
-        remote_tpl->record_merge_events(lhs, rhs, memo);
+        remote_tpl->record_merge_events(lhs, rhs, tlid);
     }
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_merge_events(ApEvent &lhs,
                                                 const std::vector<ApEvent>& rhs,
-                                                Memoizable *memo)
+                                                const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent done = Runtime::create_rt_user_event(); 
@@ -588,7 +583,7 @@ namespace Legion {
           rez.serialize(done);
           rez.serialize(&lhs);
           rez.serialize(lhs);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize<size_t>(rhs.size());
           for (std::vector<ApEvent>::const_iterator it = 
                 rhs.begin(); it != rhs.end(); it++)
@@ -599,7 +594,7 @@ namespace Legion {
         done.wait();
       }
       else
-        remote_tpl->record_merge_events(lhs, rhs, memo);
+        remote_tpl->record_merge_events(lhs, rhs, tlid);
     }
 
     //--------------------------------------------------------------------------
@@ -612,23 +607,19 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_issue_copy(Memoizable *memo, ApEvent &lhs,
-                                             IndexSpaceExpression *expr,
+    void RemoteTraceRecorder::record_issue_copy(const TraceLocalID &tlid,
+                                 ApEvent &lhs, IndexSpaceExpression *expr,
                                  const std::vector<CopySrcDstField>& src_fields,
                                  const std::vector<CopySrcDstField>& dst_fields,
+                                 const std::vector<Reservation> &reservations,
 #ifdef LEGION_SPY
                                              RegionTreeID src_tree_id,
                                              RegionTreeID dst_tree_id,
 #endif
                                              ApEvent precondition, 
-                                             PredEvent pred_guard,
-                                             ReductionOpID redop,
-                                             bool reduction_fold)
+                                             PredEvent pred_guard)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent done = Runtime::create_rt_user_event(); 
@@ -638,7 +629,7 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_ISSUE_COPY);
           rez.serialize(done);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize(&lhs);
           rez.serialize(lhs);
           expr->pack_expression(rez, origin_space);
@@ -651,35 +642,42 @@ namespace Legion {
             pack_src_dst_field(rez, src_fields[idx]);
             pack_src_dst_field(rez, dst_fields[idx]);
           }
+          rez.serialize<size_t>(reservations.size());
+          for (unsigned idx = 0; idx < reservations.size(); idx++)
+            rez.serialize(reservations[idx]);
 #ifdef LEGION_SPY
           rez.serialize(src_tree_id);
           rez.serialize(dst_tree_id);
 #endif
           rez.serialize(precondition);
           rez.serialize(pred_guard);
-          rez.serialize(redop);
-          rez.serialize<bool>(reduction_fold); 
         }
         runtime->send_remote_trace_update(origin_space, rez);
         // Wait to see if lhs changes
         done.wait();
       }
       else
-        remote_tpl->record_issue_copy(memo, lhs, expr, src_fields, dst_fields,
+        remote_tpl->record_issue_copy(tlid, lhs, expr, src_fields,
+                              dst_fields, reservations,
 #ifdef LEGION_SPY
                               src_tree_id, dst_tree_id,
 #endif
-                              precondition, pred_guard, redop, reduction_fold);
+                              precondition, pred_guard);
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_copy_views(ApEvent lhs, 
-                                                IndexSpaceExpression *expr,
-                                 const FieldMaskSet<InstanceView> &tracing_srcs,
-                                 const FieldMaskSet<InstanceView> &tracing_dsts,
-                                                PrivilegeMode src_mode,
-                                                PrivilegeMode dst_mode,
-                                                std::set<RtEvent> &applied)
+    void RemoteTraceRecorder::record_copy_insts(ApEvent lhs, 
+                                              const TraceLocalID &tlid,
+                                              unsigned src_idx,unsigned dst_idx,
+                                              IndexSpaceExpression *expr,
+                                              const UniqueInst &src_inst,
+                                              const UniqueInst &dst_inst,
+                                              const FieldMask &src_mask,
+                                              const FieldMask &dst_mask,
+                                              PrivilegeMode src_mode,
+                                              PrivilegeMode dst_mode,
+                                              ReductionOpID redop,
+                                              std::set<RtEvent> &applied)
     //--------------------------------------------------------------------------
     {
       if (local_space != origin_space)
@@ -689,142 +687,81 @@ namespace Legion {
         {
           RezCheck z(rez);
           rez.serialize(remote_tpl);
-          rez.serialize(REMOTE_TRACE_COPY_VIEWS);
+          rez.serialize(REMOTE_TRACE_COPY_INSTS);
           rez.serialize(done);
+          tlid.serialize(rez);
           rez.serialize(lhs);
+          rez.serialize(src_idx);
+          rez.serialize(dst_idx);
           rez.serialize(src_mode);
           rez.serialize(dst_mode);
           expr->pack_expression(rez, origin_space);
-          rez.serialize<size_t>(tracing_srcs.size());
-          for (FieldMaskSet<InstanceView>::const_iterator it = 
-                tracing_srcs.begin(); it != tracing_srcs.end(); it++)
-          {
-            rez.serialize(it->first->did);
-            rez.serialize(it->second);
-          }
-          rez.serialize<size_t>(tracing_dsts.size());
-          for (FieldMaskSet<InstanceView>::const_iterator it = 
-                tracing_dsts.begin(); it != tracing_dsts.end(); it++)
-          {
-            rez.serialize(it->first->did);
-            rez.serialize(it->second);
-          }
+          src_inst.serialize(rez);
+          dst_inst.serialize(rez);
+          rez.serialize(src_mask);
+          rez.serialize(dst_mask);
+          rez.serialize(redop);
         }
         runtime->send_remote_trace_update(origin_space, rez);
         applied.insert(done);
       }
       else
-        remote_tpl->record_copy_views(lhs, expr, tracing_srcs, 
-                    tracing_dsts, src_mode, dst_mode, applied);
+        remote_tpl->record_copy_insts(lhs, tlid, src_idx, dst_idx, expr,
+                                 src_inst, dst_inst, src_mask, dst_mask,
+                                 src_mode, dst_mode, redop, applied);
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_issue_indirect(Memoizable *memo, 
-                             ApEvent &lhs, IndexSpaceExpression *expr,
-                             const std::vector<CopySrcDstField>& src_fields,
-                             const std::vector<CopySrcDstField>& dst_fields,
-                             const std::vector<CopyIndirection*> &indirections,
-#ifdef LEGION_SPY
-                             unsigned unique_indirections_identifier,
-#endif
-                             ApEvent precondition, PredEvent pred_guard,
-                             ApEvent tracing_precondition)
+    void RemoteTraceRecorder::record_issue_across(const TraceLocalID &tlid,
+                                              ApEvent &lhs,
+                                              ApEvent collective_precondition,
+                                              ApEvent copy_precondition,
+                                              ApEvent src_indirect_precondition,
+                                              ApEvent dst_indirect_precondition,
+                                              CopyAcrossExecutor *executor)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
-      if (local_space != origin_space)
-      {
-        RtUserEvent done = Runtime::create_rt_user_event(); 
-        Serializer rez;
-        {
-          RezCheck z(rez);
-          rez.serialize(remote_tpl);
-          rez.serialize(REMOTE_TRACE_ISSUE_INDIRECT);
-          rez.serialize(done);
-          memo->pack_remote_memoizable(rez, origin_space);
-          rez.serialize(&lhs);
-          rez.serialize(lhs);
-          expr->pack_expression(rez, origin_space);
-#ifdef DEBUG_LEGION
-          assert(src_fields.size() == dst_fields.size());
-#endif
-          rez.serialize<size_t>(src_fields.size());
-          for (unsigned idx = 0; idx < src_fields.size(); idx++)
-          {
-            pack_src_dst_field(rez, src_fields[idx]);
-            pack_src_dst_field(rez, dst_fields[idx]);
-          }
-          rez.serialize<size_t>(indirections.size());
-          for (unsigned idx = 0; idx < indirections.size(); idx++)
-            indirections[idx]->serializer(rez);
-          rez.serialize(precondition);
-          rez.serialize(pred_guard);
-          rez.serialize(tracing_precondition);
-#ifdef LEGION_SPY
-          rez.serialize(unique_indirections_identifier);
-#endif
-        }
-        runtime->send_remote_trace_update(origin_space, rez);
-        // Wait to see if lhs changes
-        done.wait();
-      }
-      else
-        remote_tpl->record_issue_indirect(memo, lhs, expr, src_fields,
-                                          dst_fields, indirections,
-#ifdef LEGION_SPY
-                                          unique_indirections_identifier,
-#endif
-                                          precondition, pred_guard,
-                                          tracing_precondition);
+      // We should never get a call to record a remote indirection
+      assert(false);
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_indirect_views(ApEvent indirect_done,
+    void RemoteTraceRecorder::record_across_insts(ApEvent lhs, 
+                                 const TraceLocalID &tlid,
+                                 unsigned src_idx, unsigned dst_idx,
+                                 IndexSpaceExpression *expr,
+                                 const AcrossInsts &src_insts,
+                                 const AcrossInsts &dst_insts,
+                                 PrivilegeMode src_mode, PrivilegeMode dst_mode,
+                                 bool src_indirect, bool dst_indirect,
+                                 std::set<RtEvent> &applied)
+    //--------------------------------------------------------------------------
+    {
+      // We should never get a call to record a remote across
+      assert(false);
+    }
+
+    //--------------------------------------------------------------------------
+    void RemoteTraceRecorder::record_indirect_insts(ApEvent indirect_done,
                                                     ApEvent all_done,
                                                     IndexSpaceExpression *expr,
-                                        const FieldMaskSet<InstanceView> &views,
+                                                    const AcrossInsts &insts,
                                                     std::set<RtEvent> &applied,
                                                     PrivilegeMode privilege)
     //--------------------------------------------------------------------------
     {
-      if (local_space != origin_space)
-      {
-        const RtUserEvent done = Runtime::create_rt_user_event(); 
-        Serializer rez;
-        {
-          RezCheck z(rez);
-          rez.serialize(remote_tpl);
-          rez.serialize(REMOTE_TRACE_INDIRECT_VIEWS);
-          rez.serialize(done);
-          rez.serialize(indirect_done);
-          rez.serialize(all_done);
-          expr->pack_expression(rez, origin_space);
-          rez.serialize<size_t>(views.size());
-          for (FieldMaskSet<InstanceView>::const_iterator it = 
-                views.begin(); it != views.end(); it++)
-          {
-            rez.serialize(it->first->did);
-            rez.serialize(it->second);
-          }
-          rez.serialize(privilege);
-        }
-        runtime->send_remote_trace_update(origin_space, rez);
-        applied.insert(done);
-      }
-      else
-        remote_tpl->record_indirect_views(indirect_done, all_done, expr,
-                                          views, applied, privilege);
+      // We should never get a call to record a remote indirection
+      assert(false);
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_issue_fill(Memoizable *memo, ApEvent &lhs,
-                                             IndexSpaceExpression *expr,
+    void RemoteTraceRecorder::record_issue_fill(const TraceLocalID &tlid,
+                                 ApEvent &lhs, IndexSpaceExpression *expr,
                                  const std::vector<CopySrcDstField> &fields,
                                              const void *fill_value, 
                                              size_t fill_size,
 #ifdef LEGION_SPY
+                                             UniqueID fill_uid,
                                              FieldSpace handle,
                                              RegionTreeID tree_id,
 #endif
@@ -832,9 +769,6 @@ namespace Legion {
                                              PredEvent pred_guard)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent done = Runtime::create_rt_user_event(); 
@@ -844,7 +778,7 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_ISSUE_FILL);
           rez.serialize(done);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize(&lhs);
           rez.serialize(lhs);
           expr->pack_expression(rez, origin_space);
@@ -854,6 +788,7 @@ namespace Legion {
           rez.serialize(fill_size);
           rez.serialize(fill_value, fill_size);
 #ifdef LEGION_SPY
+          rez.serialize(fill_uid);
           rez.serialize(handle);
           rez.serialize(tree_id);
 #endif
@@ -865,19 +800,19 @@ namespace Legion {
         done.wait();
       }
       else
-        remote_tpl->record_issue_fill(memo, lhs, expr, fields, 
+        remote_tpl->record_issue_fill(tlid, lhs, expr, fields, 
                                       fill_value, fill_size, 
 #ifdef LEGION_SPY
-                                      handle, tree_id,
+                                      fill_uid, handle, tree_id,
 #endif
                                       precondition, pred_guard);
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_fill_views(ApEvent lhs,
+    void RemoteTraceRecorder::record_fill_inst(ApEvent lhs,
                                  IndexSpaceExpression *expr, 
-                                 const FieldMaskSet<FillView> &tracing_srcs,
-                                 const FieldMaskSet<InstanceView> &tracing_dsts,
+                                 const UniqueInst &inst,
+                                 const FieldMask &inst_mask,
                                  std::set<RtEvent> &applied_events,
                                  const bool reduction_initialization)
     //--------------------------------------------------------------------------
@@ -889,94 +824,26 @@ namespace Legion {
         {
           RezCheck z(rez);
           rez.serialize(remote_tpl);
-          rez.serialize(REMOTE_TRACE_FILL_VIEWS);
+          rez.serialize(REMOTE_TRACE_FILL_INST);
           rez.serialize(done);
           rez.serialize(lhs);
           expr->pack_expression(rez, origin_space);
-          rez.serialize<size_t>(tracing_srcs.size());
-          for (FieldMaskSet<FillView>::const_iterator it = 
-                tracing_srcs.begin(); it != tracing_srcs.end(); it++)
-          {
-            rez.serialize(it->first->did);
-            rez.serialize(it->second);
-          }
-          rez.serialize<size_t>(tracing_dsts.size());
-          for (FieldMaskSet<InstanceView>::const_iterator it = 
-                tracing_dsts.begin(); it != tracing_dsts.end(); it++)
-          {
-            rez.serialize(it->first->did);
-            rez.serialize(it->second);
-          }
+          inst.serialize(rez);
+          rez.serialize(inst_mask);
           rez.serialize<bool>(reduction_initialization);
         }
         runtime->send_remote_trace_update(origin_space, rez);
         applied_events.insert(done);
       }
       else
-        remote_tpl->record_fill_views(lhs, expr, tracing_srcs, tracing_dsts,
-                                      applied_events, reduction_initialization);
+        remote_tpl->record_fill_inst(lhs, expr, inst, inst_mask,
+                                     applied_events, reduction_initialization);
     }
 
-#ifdef LEGION_GPU_REDUCTIONS
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_gpu_reduction(Memoizable *memo, 
-                                 ApEvent &lhs, IndexSpaceExpression *expr,
-                                 const std::vector<CopySrcDstField>& src_fields,
-                                 const std::vector<CopySrcDstField>& dst_fields,
-                                 Processor gpu, TaskID gpu_task_id,
-                                 PhysicalManager *src, PhysicalManager *dst,
-                                 ApEvent precondition, PredEvent pred_guard,
-                                 ReductionOpID redop, bool reduction_fold)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
-      if (local_space != origin_space)
-      {
-        RtUserEvent done = Runtime::create_rt_user_event(); 
-        Serializer rez;
-        {
-          RezCheck z(rez);
-          rez.serialize(remote_tpl);
-          rez.serialize(REMOTE_TRACE_GPU_REDUCTION);
-          rez.serialize(done);
-          memo->pack_remote_memoizable(rez, origin_space);
-          rez.serialize(&lhs);
-          rez.serialize(lhs);
-          expr->pack_expression(rez, origin_space);
-#ifdef DEBUG_LEGION
-          assert(src_fields.size() == dst_fields.size());
-#endif
-          rez.serialize<size_t>(src_fields.size());
-          for (unsigned idx = 0; idx < src_fields.size(); idx++)
-          {
-            pack_src_dst_field(rez, src_fields[idx]);
-            pack_src_dst_field(rez, dst_fields[idx]);
-          }
-          rez.serialize(gpu);
-          rez.serialize(gpu_task_id);
-          rez.serialize(src->did);
-          rez.serialize(dst->did);
-          rez.serialize(precondition);
-          rez.serialize(pred_guard);
-          rez.serialize(redop);
-          rez.serialize<bool>(reduction_fold); 
-        }
-        runtime->send_remote_trace_update(origin_space, rez);
-        // Wait to see if lhs changes
-        done.wait();
-      }
-      else
-        remote_tpl->record_gpu_reduction(memo, lhs, expr, src_fields,dst_fields,
-          gpu,gpu_task_id,src,dst,precondition,pred_guard,redop,reduction_fold);
-    }
-#endif
-
-    //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_op_view(Memoizable *memo,
+    void RemoteTraceRecorder::record_op_inst(const TraceLocalID &tlid,
                                              unsigned idx,
-                                             InstanceView *view,
+                                             const UniqueInst &inst,
                                              RegionNode *node,
                                              const RegionUsage &usage,
                                              const FieldMask &user_mask,
@@ -984,9 +851,6 @@ namespace Legion {
                                              std::set<RtEvent> &effects)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent applied = Runtime::create_rt_user_event(); 
@@ -994,11 +858,11 @@ namespace Legion {
         {
           RezCheck z(rez);
           rez.serialize(remote_tpl);
-          rez.serialize(REMOTE_TRACE_RECORD_OP_VIEW);
+          rez.serialize(REMOTE_TRACE_RECORD_OP_INST);
           rez.serialize(applied);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize(idx);
-          rez.serialize(view->did);
+          inst.serialize(rez);
           rez.serialize(node->handle);
           rez.serialize(usage);
           rez.serialize(user_mask);
@@ -1009,18 +873,15 @@ namespace Legion {
         applied_events.insert(applied);
       }
       else
-        remote_tpl->record_op_view(memo, idx, view, node, usage, 
+        remote_tpl->record_op_inst(tlid, idx, inst, node, usage,
                                    user_mask, update_validity, effects);
     }
 
     //--------------------------------------------------------------------------
     void RemoteTraceRecorder::record_set_op_sync_event(ApEvent &lhs, 
-                                                       Memoizable *memo)
+                                                       const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent done = Runtime::create_rt_user_event(); 
@@ -1030,7 +891,7 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_SET_OP_SYNC);
           rez.serialize(done);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize(&lhs);
           rez.serialize(lhs);
         }
@@ -1039,7 +900,7 @@ namespace Legion {
         done.wait();
       }
       else
-        remote_tpl->record_set_op_sync_event(lhs, memo);
+        remote_tpl->record_set_op_sync_event(lhs, tlid);
     }
 
     //--------------------------------------------------------------------------
@@ -1052,7 +913,6 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
-      assert(memoizable->get_trace_local_id() == tlid);
       assert(output.future_locations.size() == future_size_bounds.size());
       assert(coords.size() == future_size_bounds.size());
 #endif
@@ -1065,8 +925,7 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_RECORD_MAPPER_OUTPUT);
           rez.serialize(applied);
-          rez.serialize(tlid.first);
-          rez.serialize(tlid.second);
+          tlid.serialize(rez);
           // We actually only need a few things here  
           rez.serialize<size_t>(output.target_procs.size());
           for (unsigned idx = 0; idx < output.target_procs.size(); idx++)
@@ -1085,10 +944,7 @@ namespace Legion {
             for (TaskTreeCoordinates::const_iterator it =
                   future_coordinates.begin(); it !=
                   future_coordinates.end(); it++)
-            {
-              rez.serialize(it->first);
-              rez.serialize(it->second);
-            }
+              it->serialize(rez);
           }
           rez.serialize(output.chosen_variant);
           rez.serialize(output.task_priority);
@@ -1108,13 +964,10 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_set_effects(Memoizable *memo, 
+    void RemoteTraceRecorder::record_set_effects(const TraceLocalID &tlid, 
                                                  ApEvent &rhs)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent applied = Runtime::create_rt_user_event();
@@ -1124,7 +977,7 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_SET_EFFECTS);
           rez.serialize(applied);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize(rhs);
         }
         runtime->send_remote_trace_update(origin_space, rez);
@@ -1132,17 +985,14 @@ namespace Legion {
         applied_events.insert(applied);
       }
       else
-        remote_tpl->record_set_effects(memo, rhs);
+        remote_tpl->record_set_effects(tlid, rhs);
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_complete_replay(Memoizable *memo, 
+    void RemoteTraceRecorder::record_complete_replay(const TraceLocalID &tlid, 
                                                      ApEvent rhs)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent applied = Runtime::create_rt_user_event();
@@ -1152,7 +1002,7 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_COMPLETE_REPLAY);
           rez.serialize(applied);
-          memo->pack_remote_memoizable(rez, origin_space);
+          tlid.serialize(rez);
           rez.serialize(rhs);
         }
         runtime->send_remote_trace_update(origin_space, rez);
@@ -1160,18 +1010,15 @@ namespace Legion {
         applied_events.insert(applied);
       }
       else
-        remote_tpl->record_complete_replay(memo, rhs);
+        remote_tpl->record_complete_replay(tlid, rhs);
     }
 
     //--------------------------------------------------------------------------
-    void RemoteTraceRecorder::record_reservations(Memoizable *memo,
-                  ApEvent &lhs, const std::map<Reservation,bool> &reservations,
-                  ApEvent precondition, ApEvent postcondition)
+    void RemoteTraceRecorder::record_reservations(const TraceLocalID &tlid,
+                                 const std::map<Reservation,bool> &reservations,
+                                 std::set<RtEvent> &applied_events)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(memoizable == memo);
-#endif
       if (local_space != origin_space)
       {
         RtUserEvent done = Runtime::create_rt_user_event(); 
@@ -1181,10 +1028,7 @@ namespace Legion {
           rez.serialize(remote_tpl);
           rez.serialize(REMOTE_TRACE_ACQUIRE_RELEASE);
           rez.serialize(done);
-          rez.serialize(&lhs);
-          rez.serialize(lhs);
-          rez.serialize(precondition);
-          rez.serialize(postcondition);
+          tlid.serialize(rez);
           rez.serialize<size_t>(reservations.size());
           for (std::map<Reservation,bool>::const_iterator it =
                 reservations.begin(); it != reservations.end(); it++)
@@ -1192,32 +1036,29 @@ namespace Legion {
             rez.serialize(it->first);
             rez.serialize<bool>(it->second);
           }
-          memo->pack_remote_memoizable(rez, origin_space);
         }
         runtime->send_remote_trace_update(origin_space, rez);
-        // Wait to see if lhs changes
-        done.wait();
+        applied_events.insert(done);
       }
       else
-        remote_tpl->record_reservations(memo, lhs, reservations, 
-                                        precondition, postcondition);
+        remote_tpl->record_reservations(tlid, reservations, applied_events); 
     }
 
     //--------------------------------------------------------------------------
     /*static*/ RemoteTraceRecorder* RemoteTraceRecorder::unpack_remote_recorder(
-                        Deserializer &derez, Runtime *runtime, Memoizable *memo)
+                Deserializer &derez, Runtime *runtime, const TraceLocalID &tlid)
     //--------------------------------------------------------------------------
     {
-      AddressSpaceID origin_space, local_space;
+      AddressSpaceID origin_space;
       derez.deserialize(origin_space);
-      derez.deserialize(local_space);
       PhysicalTemplate *remote_tpl;
       derez.deserialize(remote_tpl);
       RtUserEvent applied_event;
       derez.deserialize(applied_event);
       RtEvent collect_event;
       derez.deserialize(collect_event);
-      return new RemoteTraceRecorder(runtime, origin_space, local_space, memo,
+      return new RemoteTraceRecorder(runtime, origin_space, 
+                                     runtime->address_space, tlid,
                                      remote_tpl, applied_event, collect_event);
     }
 
@@ -1237,12 +1078,14 @@ namespace Legion {
           {
             RtUserEvent applied;
             derez.deserialize(applied);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
-            tpl->record_get_term_event(memo);
+            ApEvent lhs;
+            derez.deserialize(lhs);
+            unsigned op_kind;
+            derez.deserialize(op_kind);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
+            tpl->record_get_term_event(lhs, op_kind, tlid);
             Runtime::trigger_event(applied);
-            if (memo->get_origin_space() != runtime->address_space)
-              tpl->record_remote_memoizable(memo);
             break;
           }
         case REMOTE_TRACE_REQUEST_TERM_EVENT:
@@ -1271,14 +1114,24 @@ namespace Legion {
           {
             RtUserEvent applied;
             derez.deserialize(applied);
-            ApUserEvent lhs;
-            derez.deserialize(lhs);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
-            tpl->record_create_ap_user_event(lhs, memo);
-            Runtime::trigger_event(applied);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
+            ApUserEvent *target;
+            derez.deserialize(target);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
+            ApUserEvent result;
+            tpl->record_create_ap_user_event(result, tlid);
+#ifdef DEBUG_LEGION
+            assert(result.exists());
+#endif
+            Serializer rez;
+            {
+              RezCheck z2(rez);
+              rez.serialize(REMOTE_TRACE_CREATE_USER_EVENT);
+              rez.serialize(target);
+              rez.serialize(result);
+              rez.serialize(applied);
+            }
+            runtime->send_remote_trace_response(source, rez);
             break;
           }
         case REMOTE_TRACE_TRIGGER_EVENT:
@@ -1289,12 +1142,10 @@ namespace Legion {
             derez.deserialize(lhs);
             ApEvent rhs;
             derez.deserialize(rhs);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
-            tpl->record_trigger_event(lhs, rhs, memo);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
+            tpl->record_trigger_event(lhs, rhs, tlid);
             Runtime::trigger_event(applied);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
         case REMOTE_TRACE_MERGE_EVENTS:
@@ -1305,8 +1156,8 @@ namespace Legion {
             derez.deserialize(event_ptr);
             ApEvent lhs;
             derez.deserialize(lhs);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             size_t num_rhs;
             derez.deserialize(num_rhs);
             const ApEvent lhs_copy = lhs;
@@ -1315,7 +1166,7 @@ namespace Legion {
               ApEvent e1, e2;
               derez.deserialize(e1);
               derez.deserialize(e2);
-              tpl->record_merge_events(lhs, e1, e2, memo);
+              tpl->record_merge_events(lhs, e1, e2, tlid);
             }
             else if (num_rhs == 3)
             {
@@ -1323,7 +1174,7 @@ namespace Legion {
               derez.deserialize(e1);
               derez.deserialize(e2);
               derez.deserialize(e3);
-              tpl->record_merge_events(lhs, e1, e2, e3, memo);
+              tpl->record_merge_events(lhs, e1, e2, e3, tlid);
             }
             else
             {
@@ -1333,7 +1184,7 @@ namespace Legion {
                 ApEvent event;
                 derez.deserialize(rhs_events[idx]);
               }
-              tpl->record_merge_events(lhs, rhs_events, memo);
+              tpl->record_merge_events(lhs, rhs_events, tlid);
             }
             if (lhs != lhs_copy)
             {
@@ -1349,16 +1200,14 @@ namespace Legion {
             }
             else // didn't change so just trigger
               Runtime::trigger_event(done);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
         case REMOTE_TRACE_ISSUE_COPY:
           {
             RtUserEvent done;
             derez.deserialize(done);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             ApUserEvent *lhs_ptr;
             derez.deserialize(lhs_ptr);
             ApUserEvent lhs;
@@ -1375,6 +1224,11 @@ namespace Legion {
               unpack_src_dst_field(derez, src_fields[idx]);
               unpack_src_dst_field(derez, dst_fields[idx]);
             }
+            size_t num_reservations;
+            derez.deserialize(num_reservations);
+            std::vector<Reservation> reservations(num_reservations);
+            for (unsigned idx = 0; idx < num_reservations; idx++)
+              derez.deserialize(reservations[idx]);
 #ifdef LEGION_SPY
             RegionTreeID src_tree_id, dst_tree_id;
             derez.deserialize(src_tree_id);
@@ -1384,20 +1238,15 @@ namespace Legion {
             derez.deserialize(precondition);
             PredEvent pred_guard;
             derez.deserialize(pred_guard);
-            ReductionOpID redop;
-            derez.deserialize(redop);
-            bool reduction_fold;
-            derez.deserialize<bool>(reduction_fold);
             // Use this to track if lhs changes
             const ApUserEvent lhs_copy = lhs;
             // Do the base call
-            tpl->record_issue_copy(memo, lhs, expr,
-                                   src_fields, dst_fields,
+            tpl->record_issue_copy(tlid, lhs, expr,
+                                   src_fields, dst_fields, reservations,
 #ifdef LEGION_SPY
                                    src_tree_id, dst_tree_id,
 #endif
-                                   precondition, pred_guard,
-                                   redop, reduction_fold);
+                                   precondition, pred_guard);
             if (lhs != lhs_copy)
             {
               Serializer rez;
@@ -1412,169 +1261,38 @@ namespace Legion {
             }
             else // lhs was unchanged
               Runtime::trigger_event(done);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
-        case REMOTE_TRACE_COPY_VIEWS:
+        case REMOTE_TRACE_COPY_INSTS:
           {
             RtUserEvent done;
             derez.deserialize(done);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             ApUserEvent lhs;
             derez.deserialize(lhs);
+            unsigned src_idx, dst_idx;
+            derez.deserialize(src_idx);
+            derez.deserialize(dst_idx);
             PrivilegeMode src_mode, dst_mode;
             derez.deserialize(src_mode);
             derez.deserialize(dst_mode);
             RegionTreeForest *forest = runtime->forest;
-            IndexSpaceExpression *expr = 
+            IndexSpaceExpression *expr =
               IndexSpaceExpression::unpack_expression(derez, forest, source);
             FieldMaskSet<InstanceView> tracing_srcs, tracing_dsts;
+            UniqueInst src_inst, dst_inst;
+            src_inst.deserialize(derez);
+            dst_inst.deserialize(derez);
+            FieldMask src_mask, dst_mask;
+            derez.deserialize(src_mask);
+            derez.deserialize(dst_mask);
+            ReductionOpID redop;
+            derez.deserialize(redop);
             std::set<RtEvent> ready_events;
-            size_t num_srcs;
-            derez.deserialize(num_srcs);
-            for (unsigned idx = 0; idx < num_srcs; idx++)
-            {
-              DistributedID did;
-              derez.deserialize(did);
-              RtEvent ready;
-              InstanceView *view = static_cast<InstanceView*>(
-                  runtime->find_or_request_logical_view(did, ready));
-              if (ready.exists() && !ready.has_triggered())
-                ready_events.insert(ready);
-              FieldMask mask;
-              derez.deserialize(mask);
-              tracing_srcs.insert(view, mask);
-            }
-            size_t num_dsts;
-            derez.deserialize(num_dsts);
-            for (unsigned idx = 0; idx < num_dsts; idx++)
-            {
-              DistributedID did;
-              derez.deserialize(did);
-              RtEvent ready;
-              InstanceView *view = static_cast<InstanceView*>(
-                  runtime->find_or_request_logical_view(did, ready));
-              if (ready.exists() && !ready.has_triggered())
-                ready_events.insert(ready);
-              FieldMask mask;
-              derez.deserialize(mask);
-              tracing_dsts.insert(view, mask);
-            } 
-            if (!ready_events.empty())
-            {
-              const RtEvent wait_on = Runtime::merge_events(ready_events);
-              ready_events.clear();
-              if (wait_on.exists() && !wait_on.has_triggered())
-                wait_on.wait();
-            }
-            tpl->record_copy_views(lhs, expr, tracing_srcs, tracing_dsts,
-                                   src_mode, dst_mode, ready_events);
-            if (!ready_events.empty())
-              Runtime::trigger_event(done, Runtime::merge_events(ready_events));
-            else
-              Runtime::trigger_event(done);
-            break;
-          }
-        case REMOTE_TRACE_ISSUE_INDIRECT:
-          {
-            RtUserEvent done;
-            derez.deserialize(done);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
-            ApUserEvent *lhs_ptr;
-            derez.deserialize(lhs_ptr);
-            ApUserEvent lhs;
-            derez.deserialize(lhs);
-            RegionTreeForest *forest = runtime->forest;
-            IndexSpaceExpression *expr = 
-              IndexSpaceExpression::unpack_expression(derez, forest, source);
-            size_t num_fields;
-            derez.deserialize(num_fields);
-            std::vector<CopySrcDstField> src_fields(num_fields);
-            std::vector<CopySrcDstField> dst_fields(num_fields);
-            for (unsigned idx = 0; idx < num_fields; idx++)
-            {
-              unpack_src_dst_field(derez, src_fields[idx]);
-              unpack_src_dst_field(derez, dst_fields[idx]);
-            }
-            std::vector<CopyIndirection*> indirections;
-            expr->unpack_indirections(derez, indirections);
-            ApEvent precondition;
-            derez.deserialize(precondition);
-            PredEvent pred_guard;
-            derez.deserialize(pred_guard);
-            ApEvent tracing_precondition;
-            derez.deserialize(tracing_precondition);
-#ifdef LEGION_SPY
-            unsigned unique_indirections_identifier;
-            derez.deserialize(unique_indirections_identifier);
-#endif
-            // Use this to track if lhs changes
-            const ApUserEvent lhs_copy = lhs;
-            // Do the base call
-            tpl->record_issue_indirect(memo, lhs, expr, src_fields,
-                                       dst_fields, indirections,
-#ifdef LEGION_SPY
-                                       unique_indirections_identifier,
-#endif
-                                       precondition, pred_guard,
-                                       tracing_precondition);
-            if (lhs != lhs_copy)
-            {
-              Serializer rez;
-              {
-                RezCheck z2(rez);
-                rez.serialize(REMOTE_TRACE_ISSUE_INDIRECT);
-                rez.serialize(lhs_ptr);
-                rez.serialize(lhs);
-                rez.serialize(done);
-              }
-              runtime->send_remote_trace_response(source, rez);
-            }
-            else // lhs was unchanged
-              Runtime::trigger_event(done);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
-            break;
-          }
-        case REMOTE_TRACE_INDIRECT_VIEWS:
-          {
-            RtUserEvent done;
-            derez.deserialize(done);
-            ApEvent indirect_done, all_done;
-            derez.deserialize(indirect_done);
-            derez.deserialize(all_done);
-            RegionTreeForest *forest = runtime->forest;
-            IndexSpaceExpression *expr = 
-              IndexSpaceExpression::unpack_expression(derez, forest, source);
-            FieldMaskSet<InstanceView> tracing_views;
-            std::set<RtEvent> ready_events;
-            size_t num_views;
-            derez.deserialize(num_views);
-            for (unsigned idx = 0; idx < num_views; idx++)
-            {
-              DistributedID did;
-              derez.deserialize(did);
-              RtEvent ready;
-              InstanceView *view = static_cast<InstanceView*>(
-                  runtime->find_or_request_logical_view(did, ready));
-              if (ready.exists() && !ready.has_triggered())
-                ready_events.insert(ready);
-              FieldMask mask;
-              derez.deserialize(mask);
-              tracing_views.insert(view, mask);
-            }
-            PrivilegeMode privilege;
-            derez.deserialize(privilege);
-            if (!ready_events.empty())
-            {
-              const RtEvent wait_on = Runtime::merge_events(ready_events);
-              ready_events.clear();
-              if (wait_on.exists() && !wait_on.has_triggered())
-                wait_on.wait();
-            }
-            tpl->record_indirect_views(indirect_done, all_done, expr,
-                                       tracing_views, ready_events, privilege);
+            tpl->record_copy_insts(lhs, tlid, src_idx, dst_idx, expr,
+                                   src_inst, dst_inst, src_mask, dst_mask,
+                                   src_mode, dst_mode, redop, ready_events);
             if (!ready_events.empty())
               Runtime::trigger_event(done, Runtime::merge_events(ready_events));
             else
@@ -1585,8 +1303,8 @@ namespace Legion {
           {
             RtUserEvent done;
             derez.deserialize(done);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             ApUserEvent *lhs_ptr;
             derez.deserialize(lhs_ptr);
             ApUserEvent lhs;
@@ -1604,6 +1322,8 @@ namespace Legion {
             const void *fill_value = derez.get_current_pointer();
             derez.advance_pointer(fill_size);
 #ifdef LEGION_SPY
+            UniqueID fill_uid;
+            derez.deserialize(fill_uid);
             FieldSpace handle;
             derez.deserialize(handle);
             RegionTreeID tree_id;
@@ -1616,10 +1336,10 @@ namespace Legion {
             // Use this to track if lhs changes
             const ApUserEvent lhs_copy = lhs; 
             // Do the base call
-            tpl->record_issue_fill(memo, lhs, expr, fields,
+            tpl->record_issue_fill(tlid, lhs, expr, fields,
                                    fill_value, fill_size,
 #ifdef LEGION_SPY
-                                   handle, tree_id,
+                                   fill_uid, handle, tree_id,
 #endif
                                    precondition, pred_guard);
             if (lhs != lhs_copy)
@@ -1636,11 +1356,9 @@ namespace Legion {
             }
             else // lhs was unchanged
               Runtime::trigger_event(done);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
-        case REMOTE_TRACE_FILL_VIEWS:
+        case REMOTE_TRACE_FILL_INST:
           {
             RtUserEvent done;
             derez.deserialize(done);
@@ -1649,141 +1367,31 @@ namespace Legion {
             RegionTreeForest *forest = runtime->forest;
             IndexSpaceExpression *expr = 
               IndexSpaceExpression::unpack_expression(derez, forest, source);
-            FieldMaskSet<FillView> tracing_srcs;
-            std::set<RtEvent> ready_events;
-            size_t num_srcs;
-            derez.deserialize(num_srcs);
-            for (unsigned idx = 0; idx < num_srcs; idx++)
-            {
-              DistributedID did;
-              derez.deserialize(did);
-              RtEvent ready;
-              FillView *view = static_cast<FillView*>(
-                  runtime->find_or_request_logical_view(did, ready));
-              if (ready.exists() && !ready.has_triggered())
-                ready_events.insert(ready);
-              FieldMask mask;
-              derez.deserialize(mask);
-              tracing_srcs.insert(view, mask);
-            }
-            FieldMaskSet<InstanceView> tracing_dsts;
-            size_t num_dsts;
-            derez.deserialize(num_dsts);
-            for (unsigned idx = 0; idx < num_dsts; idx++)
-            {
-              DistributedID did;
-              derez.deserialize(did);
-              RtEvent ready;
-              InstanceView *view = static_cast<InstanceView*>(
-                  runtime->find_or_request_logical_view(did, ready));
-              if (ready.exists() && !ready.has_triggered())
-                ready_events.insert(ready);
-              FieldMask mask;
-              derez.deserialize(mask);
-              tracing_dsts.insert(view, mask);
-            }
+            UniqueInst inst;
+            inst.deserialize(derez);
+            FieldMask inst_mask;
+            derez.deserialize(inst_mask);
             bool reduction_initialization;
             derez.deserialize<bool>(reduction_initialization);
-            if (!ready_events.empty())
-            {
-              const RtEvent wait_on = Runtime::merge_events(ready_events);
-              ready_events.clear();
-              if (wait_on.exists() && !wait_on.has_triggered())
-                wait_on.wait();
-            }
-            tpl->record_fill_views(lhs, expr, tracing_srcs, tracing_dsts, 
-                                   ready_events, reduction_initialization);
+            std::set<RtEvent> ready_events;
+            tpl->record_fill_inst(lhs, expr, inst, inst_mask,
+                                  ready_events, reduction_initialization);
             if (!ready_events.empty())
               Runtime::trigger_event(done, Runtime::merge_events(ready_events));
             else
               Runtime::trigger_event(done);
             break;
           }
-#ifdef LEGION_GPU_REDUCTIONS
-        case REMOTE_TRACE_GPU_REDUCTION:
-          {
-            RtUserEvent done;
-            derez.deserialize(done);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
-            ApUserEvent *lhs_ptr;
-            derez.deserialize(lhs_ptr);
-            ApUserEvent lhs;
-            derez.deserialize(lhs);
-            RegionTreeForest *forest = runtime->forest;
-            IndexSpaceExpression *expr = 
-              IndexSpaceExpression::unpack_expression(derez, forest, source);
-            size_t num_fields;
-            derez.deserialize(num_fields);
-            std::vector<CopySrcDstField> src_fields(num_fields);
-            std::vector<CopySrcDstField> dst_fields(num_fields);
-            for (unsigned idx = 0; idx < num_fields; idx++)
-            {
-              unpack_src_dst_field(derez, src_fields[idx]);
-              unpack_src_dst_field(derez, dst_fields[idx]);
-            }
-            Processor gpu;
-            derez.deserialize(gpu);
-            TaskID gpu_task_id;
-            derez.deserialize(gpu_task_id);
-            DistributedID src_did, dst_did;
-            derez.deserialize(src_did);
-            derez.deserialize(dst_did);
-            RtEvent src_ready, dst_ready;
-            PhysicalManager *src = 
-              runtime->find_or_request_instance_manager(src_did, src_ready);
-            PhysicalManager *dst = 
-              runtime->find_or_request_instance_manager(dst_did, dst_ready);
-            ApEvent precondition;
-            derez.deserialize(precondition);
-            PredEvent pred_guard;
-            derez.deserialize(pred_guard);
-            ReductionOpID redop;
-            derez.deserialize(redop);
-            bool reduction_fold;
-            derez.deserialize<bool>(reduction_fold);
-            // Use this to track if lhs changes
-            const ApUserEvent lhs_copy = lhs;
-            if (src_ready.exists() && !src_ready.has_triggered())
-              src_ready.wait();
-            if (dst_ready.exists() && !dst_ready.has_triggered())
-              dst_ready.wait();
-            // Do the base call
-            tpl->record_gpu_reduction(memo, lhs, expr, src_fields, dst_fields,
-                                      gpu, gpu_task_id, src, dst, precondition,
-                                      pred_guard, redop, reduction_fold);
-            if (lhs != lhs_copy)
-            {
-              Serializer rez;
-              {
-                RezCheck z2(rez);
-                rez.serialize(REMOTE_TRACE_GPU_REDUCTION);
-                rez.serialize(lhs_ptr);
-                rez.serialize(lhs);
-                rez.serialize(done);
-              }
-              runtime->send_remote_trace_response(source, rez);
-            }
-            else // lhs was unchanged
-              Runtime::trigger_event(done);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
-            break;
-          }
-#endif
-        case REMOTE_TRACE_RECORD_OP_VIEW:
+        case REMOTE_TRACE_RECORD_OP_INST:
           {
             RtUserEvent applied;
             derez.deserialize(applied);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             unsigned index;
             derez.deserialize(index);
-            DistributedID did;
-            derez.deserialize(did);
-            RtEvent ready;
-            InstanceView *view = static_cast<InstanceView*>(
-                runtime->find_or_request_logical_view(did, ready));           
+            UniqueInst inst;
+            inst.deserialize(derez);
             LogicalRegion handle;
             derez.deserialize(handle);
             RegionUsage usage;
@@ -1793,31 +1401,27 @@ namespace Legion {
             bool update_validity;
             derez.deserialize<bool>(update_validity);
             RegionNode *node = runtime->forest->get_node(handle);
-            if (ready.exists() && !ready.has_triggered())
-              ready.wait();
             std::set<RtEvent> effects;
-            tpl->record_op_view(memo, index, view, node, usage, 
+            tpl->record_op_inst(tlid, index, inst, node, usage,
                                 user_mask, update_validity, effects);
             if (!effects.empty())
               Runtime::trigger_event(applied, Runtime::merge_events(effects));
             else
               Runtime::trigger_event(applied);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
         case REMOTE_TRACE_SET_OP_SYNC:
           {
             RtUserEvent done;
             derez.deserialize(done);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             ApUserEvent *lhs_ptr;
             derez.deserialize(lhs_ptr);
             ApUserEvent lhs;
             derez.deserialize(lhs);
             const ApUserEvent lhs_copy = lhs;
-            tpl->record_set_op_sync_event(lhs, memo);
+            tpl->record_set_op_sync_event(lhs, tlid);
             if (lhs != lhs_copy)
             {
               Serializer rez;
@@ -1832,8 +1436,6 @@ namespace Legion {
             }
             else // lhs didn't change
               Runtime::trigger_event(done);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
         case REMOTE_TRACE_RECORD_MAPPER_OUTPUT:
@@ -1841,8 +1443,7 @@ namespace Legion {
             RtUserEvent applied;
             derez.deserialize(applied);
             TraceLocalID tlid;
-            derez.deserialize(tlid.first);
-            derez.deserialize(tlid.second);
+            tlid.deserialize(derez);
             size_t num_target_processors;
             derez.deserialize(num_target_processors);
             Mapper::MapTaskOutput output;
@@ -1867,10 +1468,7 @@ namespace Legion {
                 derez.deserialize(num_coords);
                 coords.resize(num_coords);
                 for (unsigned idx2 = 0; idx2 < num_coords; idx2++)
-                {
-                  derez.deserialize(coords[idx2].first);
-                  derez.deserialize(coords[idx2].second);
-                }
+                  coords[idx2].deserialize(derez);
               }
             }
             derez.deserialize(output.chosen_variant);
@@ -1903,40 +1501,32 @@ namespace Legion {
           {
             RtUserEvent applied;
             derez.deserialize(applied);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             ApEvent postcondition;
             derez.deserialize(postcondition);
-            tpl->record_set_effects(memo, postcondition);
+            tpl->record_set_effects(tlid, postcondition);
             Runtime::trigger_event(applied);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
         case REMOTE_TRACE_COMPLETE_REPLAY:
           {
             RtUserEvent applied;
             derez.deserialize(applied);
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             ApEvent ready_event;
             derez.deserialize(ready_event);
-            tpl->record_complete_replay(memo, ready_event);
+            tpl->record_complete_replay(tlid, ready_event);
             Runtime::trigger_event(applied);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
             break;
           }
         case REMOTE_TRACE_ACQUIRE_RELEASE:
           {
-            RtUserEvent done;
-            derez.deserialize(done);
-            ApEvent *event_ptr;
-            derez.deserialize(event_ptr);
-            ApEvent lhs, precondition, postcondition;
-            derez.deserialize(lhs);
-            derez.deserialize(precondition);
-            derez.deserialize(postcondition);
+            RtUserEvent applied;
+            derez.deserialize(applied);
+            TraceLocalID tlid;
+            tlid.deserialize(derez);
             size_t num_reservations;
             derez.deserialize(num_reservations);
             std::map<Reservation,bool> reservations;
@@ -1946,26 +1536,13 @@ namespace Legion {
               derez.deserialize(reservation);
               derez.deserialize<bool>(reservations[reservation]);
             }
-            Memoizable *memo = RemoteMemoizable::unpack_remote_memoizable(derez,
-                                                           NULL/*op*/, runtime);
-            const ApEvent lhs_copy = lhs;
-            tpl->record_reservations(memo, lhs, reservations,
-                                     precondition, postcondition);
-            if (lhs != lhs_copy)
-            {
-              Serializer rez;
-              {
-                RezCheck z2(rez);
-                rez.serialize(event_ptr);
-                rez.serialize(lhs);
-                rez.serialize(done);
-              }
-              runtime->send_remote_trace_response(source, rez);
-            }
-            else // didn't change so just trigger
-              Runtime::trigger_event(done);
-            if (memo->get_origin_space() != runtime->address_space)
-              delete memo;
+            std::set<RtEvent> applied_events;
+            tpl->record_reservations(tlid, reservations, applied_events);
+            if (!applied_events.empty())
+              Runtime::trigger_event(applied, 
+                  Runtime::merge_events(applied_events));
+            else
+              Runtime::trigger_event(applied);
             break;
           }
         default:
@@ -1984,14 +1561,20 @@ namespace Legion {
       switch (kind)
       {
         case REMOTE_TRACE_REQUEST_TERM_EVENT:
+        case REMOTE_TRACE_CREATE_USER_EVENT:
+          {
+            ApUserEvent *event_ptr;
+            derez.deserialize(event_ptr);
+            derez.deserialize(*event_ptr);
+            RtUserEvent done;
+            derez.deserialize(done);
+            Runtime::trigger_event(done);
+            break;
+          }
         case REMOTE_TRACE_MERGE_EVENTS:
         case REMOTE_TRACE_ISSUE_COPY:
-        case REMOTE_TRACE_ISSUE_INDIRECT:
         case REMOTE_TRACE_ISSUE_FILL:
         case REMOTE_TRACE_SET_OP_SYNC:
-#ifdef LEGION_GPU_REDUCTIONS
-        case REMOTE_TRACE_GPU_REDUCTION:
-#endif
           {
             ApEvent *event_ptr;
             derez.deserialize(event_ptr);
@@ -2051,34 +1634,69 @@ namespace Legion {
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
-    TraceInfo::TraceInfo(Operation *o, bool init)
-      : op(o), memo((op == NULL) ? NULL : op->get_memoizable()), 
-        rec((memo == NULL) ? NULL : memo->get_template()),
+    TraceInfo::TraceInfo(Operation *op, bool init)
+      : rec(init_recorder(op)), tlid(init_tlid(op)),
         recording((rec == NULL) ? false : rec->is_recording())
     //--------------------------------------------------------------------------
     {
       if (recording && init)
-        record_get_term_event();
+        record_get_term_event(op->get_memoizable());
       if (rec != NULL)
         rec->add_recorder_reference();
     }
 
     //--------------------------------------------------------------------------
+    /*static*/ PhysicalTraceRecorder* TraceInfo::init_recorder(Operation *op)
+    //--------------------------------------------------------------------------
+    {
+      if (op == NULL)
+        return NULL;
+      Memoizable *memo = op->get_memoizable();
+      if (memo == NULL)
+        return NULL;
+      return memo->get_template();
+    }
+
+    //--------------------------------------------------------------------------
+    /*static*/ TraceLocalID TraceInfo::init_tlid(Operation *op)
+    //--------------------------------------------------------------------------
+    {
+      if (op == NULL)
+        return TraceLocalID();
+      Memoizable *memo = op->get_memoizable();
+      if (memo == NULL)
+        return TraceLocalID();
+      return memo->get_trace_local_id();
+    }
+
+    //--------------------------------------------------------------------------
     TraceInfo::TraceInfo(SingleTask *task, RemoteTraceRecorder *r, bool init)
-      : op(task), memo(task), rec(r), recording(rec != NULL)
+      : rec(r), tlid(task->get_trace_local_id()), recording(rec != NULL)
     //--------------------------------------------------------------------------
     {
       if (recording)
       {
         rec->add_recorder_reference();
         if (init)
-          record_get_term_event();
+          record_get_term_event(task);
       }
     }
 
     //--------------------------------------------------------------------------
+    void TraceInfo::record_get_term_event(Memoizable *memo)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(recording);
+      assert(memo != NULL);
+#endif
+      ApEvent completion = memo->get_memo_completion();
+      rec->record_get_term_event(completion, memo->get_memoizable_kind(), tlid);
+    }
+
+    //--------------------------------------------------------------------------
     TraceInfo::TraceInfo(const TraceInfo &rhs)
-      : op(rhs.op), memo(rhs.memo), rec(rhs.rec), recording(rhs.recording)
+      : rec(rhs.rec), tlid(rhs.tlid), recording(rhs.recording)
     //--------------------------------------------------------------------------
     {
       if (rec != NULL)
@@ -2086,9 +1704,8 @@ namespace Legion {
     }
 
    //--------------------------------------------------------------------------
-    TraceInfo::TraceInfo(Operation *o, Memoizable *m, 
-                         PhysicalTraceRecorder *r, const bool record)
-      : op(o), memo(m), rec(r), recording(record)
+    TraceInfo::TraceInfo(PhysicalTraceRecorder *r, const TraceLocalID &tld)
+      : rec(r), tlid(tld), recording((r != NULL) && r->is_recording())
     //--------------------------------------------------------------------------
     {
       if (rec != NULL)
@@ -2140,115 +1757,57 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    PhysicalTraceInfo::PhysicalTraceInfo(Operation *o, Memoizable *m, 
-        unsigned src_idx,unsigned dst_idx,bool update,PhysicalTraceRecorder *r)
-      : TraceInfo(o, m, r, (m != NULL)), index(src_idx), dst_index(dst_idx),
+    PhysicalTraceInfo::PhysicalTraceInfo(const TraceLocalID &tlid,
+                                         unsigned src_idx, unsigned dst_idx,
+                                         bool update, PhysicalTraceRecorder *r)
+      : TraceInfo(r, tlid), index(src_idx), dst_index(dst_idx),
         update_validity(update)
     //--------------------------------------------------------------------------
     {
     }
 
     //--------------------------------------------------------------------------
-    template<>
-    void PhysicalTraceInfo::pack_trace_info<true>(Serializer &rez,
-                                            std::set<RtEvent> &applied, 
-                                            const AddressSpaceID target) const
+    void PhysicalTraceInfo::pack_trace_info(Serializer &rez,
+                                            std::set<RtEvent> &applied) const 
     //--------------------------------------------------------------------------
     {
       rez.serialize<bool>(recording);
       if (recording)
       {
 #ifdef DEBUG_LEGION
-        assert(op != NULL);
-        assert(memo != NULL);
         assert(rec != NULL);
 #endif
-        op->pack_remote_operation(rez, target, applied);
-        memo->pack_remote_memoizable(rez, target);
+        tlid.serialize(rez);
         rez.serialize(index);
         rez.serialize(dst_index);
         rez.serialize<bool>(update_validity);
-        rec->pack_recorder(rez, applied, target); 
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    template<>
-    void PhysicalTraceInfo::pack_trace_info<false>(Serializer &rez,
-                                            std::set<RtEvent> &applied, 
-                                            const AddressSpaceID target) const
-    //--------------------------------------------------------------------------
-    {
-      rez.serialize<bool>(recording);
-      if (recording)
-      {
-#ifdef DEBUG_LEGION
-        assert(memo != NULL);
-        assert(rec != NULL);
-#endif
-        memo->pack_remote_memoizable(rez, target);
-        rez.serialize(index);
-        rez.serialize(dst_index);
-        rez.serialize<bool>(update_validity);
-        rec->pack_recorder(rez, applied, target); 
+        rec->pack_recorder(rez, applied); 
       }
     }
 
     //--------------------------------------------------------------------------
     /*static*/ PhysicalTraceInfo PhysicalTraceInfo::unpack_trace_info(
-         Deserializer &derez, Runtime *runtime, std::set<RtEvent> &ready_events)
+                                          Deserializer &derez, Runtime *runtime)
     //--------------------------------------------------------------------------
     {
       bool recording;
       derez.deserialize<bool>(recording);
       if (recording)
       {
-        RemoteOp *op = 
-          RemoteOp::unpack_remote_operation(derez, runtime, ready_events);
-        Memoizable *memo = 
-          RemoteMemoizable::unpack_remote_memoizable(derez, op, runtime);
+        TraceLocalID tlid;
+        tlid.deserialize(derez);
         unsigned index, dst_index;
         derez.deserialize(index);
         derez.deserialize(dst_index);
         bool update_validity;
         derez.deserialize(update_validity);
-        // PhysicalTraceRecord takes possible ownership of memoizable
-        PhysicalTraceRecorder *recorder = 
-          RemoteTraceRecorder::unpack_remote_recorder(derez, runtime, memo);
-        return PhysicalTraceInfo(op, memo, index, dst_index,
+        RemoteTraceRecorder *recorder = 
+          RemoteTraceRecorder::unpack_remote_recorder(derez, runtime, tlid);
+        return PhysicalTraceInfo(tlid, index, dst_index,
                                  update_validity, recorder);
       }
       else
         return PhysicalTraceInfo(NULL, -1U, false);
-    }
-
-    //--------------------------------------------------------------------------
-    /*static*/ PhysicalTraceInfo PhysicalTraceInfo::unpack_trace_info(
-                           Deserializer &derez, Runtime *runtime, Operation *op)
-    //--------------------------------------------------------------------------
-    {
-      bool recording;
-      derez.deserialize<bool>(recording);
-      if (recording)
-      {
-#ifdef DEBUG_LEGION
-        assert(op != NULL);
-#endif
-        Memoizable *memo = 
-          RemoteMemoizable::unpack_remote_memoizable(derez, op, runtime);
-        unsigned index, dst_index;
-        derez.deserialize(index);
-        derez.deserialize(dst_index);
-        bool update_validity;
-        derez.deserialize(update_validity);
-        // PhysicalTraceRecord takes possible ownership of memoizable
-        RemoteTraceRecorder *recorder = 
-          RemoteTraceRecorder::unpack_remote_recorder(derez, runtime, memo);
-        return PhysicalTraceInfo(op, memo, index, dst_index,
-                                 update_validity, recorder);
-      }
-      else
-        return PhysicalTraceInfo(op, -1U, false);
     }
 
     /////////////////////////////////////////////////////////////
@@ -2951,6 +2510,8 @@ namespace Legion {
       }
       disjoint_complete_accesses.swap(src.disjoint_complete_accesses);
       disjoint_complete_child_counts.swap(src.disjoint_complete_child_counts);
+      disjoint_complete_children.swap(src.disjoint_complete_children);
+      disjoint_complete_projections.swap(src.disjoint_complete_projections);
       for (LegionList<FieldState>::const_iterator fit = 
             field_states.begin(); fit != field_states.end(); fit++)
         for (FieldMaskSet<RegionTreeNode>::const_iterator it = 
@@ -2960,7 +2521,6 @@ namespace Legion {
             disjoint_complete_children.begin(); it != 
             disjoint_complete_children.end(); it++)
         to_traverse.insert(it->first);
-      disjoint_complete_projections.swap(src.disjoint_complete_projections);
 #ifdef DEBUG_LEGION
       src.check_init();
 #endif
@@ -3224,7 +2784,7 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FieldState::FieldState(void)
-      : open_state(NOT_OPEN), redop(0), disjoint_shallow(false)
+      : open_state(NOT_OPEN), redop(0)
     //--------------------------------------------------------------------------
     {
     }
@@ -3232,7 +2792,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     FieldState::FieldState(const GenericUser &user, const FieldMask &m, 
                            RegionTreeNode *child, std::set<RtEvent> &applied)
-      : redop(0), disjoint_shallow(false)
+      : redop(0)
     //--------------------------------------------------------------------------
     {
       if (IS_READ_ONLY(user.usage))
@@ -3257,7 +2817,7 @@ namespace Legion {
                            ShardingFunction *fn, IndexSpaceNode *shard_space,
                            std::set<RtEvent> &applied_events,
                            RegionTreeNode *node, bool dirty_reduction)
-      : redop(0), disjoint_shallow(false)
+      : redop(0)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -3279,17 +2839,12 @@ namespace Legion {
         open_state = OPEN_READ_WRITE_PROJ;
         projections.insert(ProjectionSummary(proj_space, proj, fn,
                                              shard_space, applied_events));
-        // Check for disjoint shallow completeness
-        if ((fn == NULL) && (proj->depth == 0) && !node->is_region() &&
-            node->are_all_children_disjoint())
-          disjoint_shallow = true;
       }
     }
 
     //--------------------------------------------------------------------------
     FieldState::FieldState(const FieldState &rhs)
-      : open_state(rhs.open_state), redop(rhs.redop), 
-        disjoint_shallow(rhs.disjoint_shallow)
+      : open_state(rhs.open_state), redop(rhs.redop)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -3306,7 +2861,6 @@ namespace Legion {
       open_state = rhs.open_state;
       redop = rhs.redop;
       projections.swap(rhs.projections);
-      disjoint_shallow = rhs.disjoint_shallow;
     }
 
     //--------------------------------------------------------------------------
@@ -3331,7 +2885,6 @@ namespace Legion {
 #endif
       open_state = rhs.open_state;
       redop = rhs.redop;
-      disjoint_shallow = rhs.disjoint_shallow;
       return *this;
     }
 
@@ -3343,7 +2896,6 @@ namespace Legion {
       open_state = rhs.open_state;
       redop = rhs.redop;
       projections.swap(rhs.projections);
-      disjoint_shallow = rhs.disjoint_shallow;
       return *this;
     }
 
@@ -3526,63 +3078,25 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
-      assert(!projections.empty()); // should be in a projection mode
+      // should be in a projection mode
+      assert(is_projection_state());
+      assert(!projections.empty());
 #endif
       // This function is super important! It decides whether this new
       // projection info can be added to the current projection epoch, if
       // it can't then we will need a close operation to be inserted
       bool elide = true;
-      // We have two different paths corresponding to whether we are in
-      // a control replication context or not
-      if (info.sharding_function == NULL)
-      {
-        // If we don't have a sharding function, then we aren't in a 
-        // control replication context
-        // See if we are in a disjoint shallow complete mode
-        // If we're disjoint shallow then we can definitely always
-        // elide the close operation as we can do more writes or 
-        // reads on this epoch without any issues, for reductions
-        // though we can only go in the same epoch if we're reducing
-        // to a subset of the writes that have already been done
-        if (!disjoint_shallow || reduction)
-        {
-          // If we're not disjoint shallow complete we have more work to do
-          // Run through the list and see if all the index spaces
-          // are the same or dominate our index space and all the
-          // projection functions are the same as ours, if this is
-          // true then we know this is a totally data parallel
-          // computation and there is no need for a close
-          for (std::set<ProjectionSummary>::const_iterator it = 
-                projections.begin(); it != projections.end(); it++)
-          {
-            if (it->projection != info.projection)    
-            {
-              elide = false;
-              break;
-            }
-            if ((it->domain != info.projection_space) && 
-                !it->domain->dominates(info.projection_space))
-            {
-              elide = false;
-              break;
-            }
-          }
-          if (!elide)
-          {
-            // Next we're going to need to compute the actual interference
-            // sets so check to see if we've memoized the result or not
-            if (!info.projection->find_elide_close_result(info, projections,
-                                                node, elide, applied_events))
-            {
-              elide = expensive_elide_test(op, index, info, node, reduction);
-              // Now memoize the results for later
-              info.projection->record_elide_close_result(info, projections,
-                                               node, elide, applied_events);
-            }
-          }
-        }
-      }
-      else
+#ifndef LEGION_SPY
+      // Technically we only need to do this analysis to insert close operations
+      // if we're control replicated because close operations are the only way
+      // to enforce dependences between points in different shards. Without
+      // control replication, each index space operations guarantees that all
+      // its points are mapped before it is mapped so we get an implicit fence
+      // and there is no need for an explicit close operation. Legion Spy
+      // though doesn't make this distinction though and will check for the
+      // presence of a close operation no matter what.
+      if (info.sharding_function != NULL)
+#endif
       {
         // We have a sharding function so we are in a 
         // control replication context
@@ -3638,15 +3152,6 @@ namespace Legion {
                         RegionTreeNode *node, std::set<RtEvent> &applied_events)
     //--------------------------------------------------------------------------
     {
-      if (disjoint_shallow || projections.empty())
-      {
-        if ((info.sharding_function == NULL) && 
-            (info.projection->depth == 0) && !node->is_region() &&
-            node->are_all_children_disjoint())
-          disjoint_shallow = true;
-        else
-          disjoint_shallow = false;
-      }
       projections.insert(ProjectionSummary(info, applied_events));
     }
 
@@ -3963,34 +3468,16 @@ namespace Legion {
     //--------------------------------------------------------------------------
     LogicalCloser::LogicalCloser(ContextID c, const LogicalUser &u, 
                                  RegionTreeNode *r, bool val)
-      : ctx(c), user(u), root_node(r), validates(val), close_op(NULL)
+      : ctx(c), user(u), root_node(r), validates(val),
+        tracing(user.op->is_tracing()), close_op(NULL)
     //--------------------------------------------------------------------------
     {
-    }
-
-    //--------------------------------------------------------------------------
-    LogicalCloser::LogicalCloser(const LogicalCloser &rhs)
-      : ctx(rhs.ctx), user(rhs.user), root_node(rhs.root_node), 
-        validates(rhs.validates)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
     }
 
     //--------------------------------------------------------------------------
     LogicalCloser::~LogicalCloser(void)
     //--------------------------------------------------------------------------
     {
-    }
-
-    //--------------------------------------------------------------------------
-    LogicalCloser& LogicalCloser::operator=(const LogicalCloser &rhs)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
-      return *this;
     }
 
     //--------------------------------------------------------------------------
@@ -4136,7 +3623,7 @@ namespace Legion {
       assert(state.owner == root_node);
 #endif
       root_node->filter_prev_epoch_users(state, close_mask);
-      root_node->filter_curr_epoch_users(state, close_mask);
+      root_node->filter_curr_epoch_users(state, close_mask, tracing);
       root_node->filter_disjoint_complete_accesses(state, close_mask); 
     }
 
@@ -4525,8 +4012,7 @@ namespace Legion {
         guard_precondition((previous == NULL) ? RtEvent::NO_RT_EVENT :
                             RtEvent(previous->effects_applied)),
 #endif
-        predicate_guard(p), track_events(t), tracing_src_fills(NULL), 
-        tracing_srcs(NULL), tracing_dsts(NULL)
+        predicate_guard(p), track_events(t)
     //--------------------------------------------------------------------------
     {
       // Need to transitively chain effects across aggregators since they
@@ -4556,8 +4042,7 @@ namespace Legion {
         guard_precondition((previous == NULL) ? alternative_precondition:
                             RtEvent(previous->effects_applied)),
 #endif
-        predicate_guard(p), track_events(t), tracing_src_fills(NULL), 
-        tracing_srcs(NULL), tracing_dsts(NULL)
+        predicate_guard(p), track_events(t)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -4618,13 +4103,6 @@ namespace Legion {
             delete it->first;
         }
       }
-      // Clean up any data structures that we made for tracing
-      if (tracing_src_fills != NULL)
-        delete tracing_src_fills;
-      if (tracing_srcs != NULL)
-        delete tracing_srcs;
-      if (tracing_dsts != NULL)
-        delete tracing_dsts;
     }
 
     //--------------------------------------------------------------------------
@@ -4669,26 +4147,6 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void CopyFillAggregator::CopyUpdate::compute_source_preconditions(
-                     RegionTreeForest *forest, const FieldMask &src_mask,
-                     const std::map<InstanceView*,EventFieldMap> &src_pre,
-                     std::set<ApEvent> &preconditions) const
-    //--------------------------------------------------------------------------
-    {
-      std::map<InstanceView*,EventFieldMap>::const_iterator finder = 
-        src_pre.find(source);
-      if (finder == src_pre.end())
-        return;
-      for (EventFieldMap::const_iterator it =
-            finder->second.begin(); it != finder->second.end(); it++)
-      {
-        if (src_mask * it->second)
-          continue;
-        preconditions.insert(it->first);
-      }
-    }
-
-    //--------------------------------------------------------------------------
     void CopyFillAggregator::CopyUpdate::sort_updates(
                     std::map<InstanceView*, std::vector<CopyUpdate*> > &copies,
                     std::vector<FillUpdate*> &fills)
@@ -4703,16 +4161,6 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       // Do nothing, we have no source expressions
-    }
-
-    //--------------------------------------------------------------------------
-    void CopyFillAggregator::FillUpdate::compute_source_preconditions(
-                     RegionTreeForest *forest, const FieldMask &src_mask,
-                     const std::map<InstanceView*,EventFieldMap> &src_pre,
-                     std::set<ApEvent> &preconditions) const
-    //--------------------------------------------------------------------------
-    {
-      // Do nothing, we have no source preconditions to worry about
     }
 
     //--------------------------------------------------------------------------
@@ -5340,19 +4788,6 @@ namespace Legion {
 #endif 
       update_fields.set_bit(src_fidx);
       record_view(dst_view);
-#ifdef LEGION_GPU_REDUCTIONS
-#ifndef LEGION_SPY
-      // Realm is really bad at applying reductions to GPU instances right
-      // now so let's help it out by moving data into a shadow instance in
-      // the same memory which will allow us to run our own GPU reduction
-      // application kernels, see github issues #372 and #821
-      PhysicalManager *dst_manager = dst_view->get_manager();
-      const bool gpu_dst = (Memory::GPU_FB_MEM == 
-        dst_manager->layout->constraints->memory_constraint.get_kind());
-      const GPUReductionTable &gpu_reduction_tasks = 
-        Runtime::get_gpu_reduction_table();
-#endif
-#endif
       const std::pair<InstanceView*,unsigned> dst_key(dst_view, dst_fidx);
       std::vector<ReductionOpID> &redop_epochs = reduction_epochs[dst_key];
       FieldMask src_mask, dst_mask;
@@ -5368,60 +4803,8 @@ namespace Legion {
 #endif
         record_view(it->first);
         const ReductionOpID redop = it->first->get_redop();
-        CopyUpdate *update;
-#ifdef LEGION_GPU_REDUCTIONS
-#ifndef LEGION_SPY
-        // See if we're reducing into a remote GPU memory 
-        // for a reduction operator that we have a reduction task for
-        if (gpu_dst && 
-            (gpu_reduction_tasks.find(redop) != gpu_reduction_tasks.end()) &&
-            !dst_manager->is_gpu_visible(it->first->get_manager()))
-        {
-          // Get the shadow reduction instance for this manager
-          ReductionView *shadow_reduction = 
-            dst_manager->find_or_create_shadow_reduction(dst_fidx, redop, 
-                                    local_space, op->get_unique_op_id());
-          // If we fail to make the shadow instance then we'll fall back
-          // to the slow path of asking Realm to do it for us
-          if (shadow_reduction != NULL)
-          {
-            const std::pair<InstanceView*,unsigned> 
-              shadow_key(shadow_reduction, dst_fidx);     
-            std::vector<ReductionOpID> &shadow_epochs = 
-              reduction_epochs[shadow_key];
-            // put this in the next epoch for this shadow instance
-            // so that all the copies to the shadow instance are serialized
-            const unsigned shadow_index = shadow_epochs.size();
-            // These need to count by 2 because the intermediate epoch
-            // is going to be the one that reads the shadow instance
-            shadow_epochs.resize(shadow_index + 2, 0/*no reduction*/);
-            if (reductions.size() == shadow_index)
-              resize_reductions(shadow_index + 1);
-            update = new CopyUpdate(it->first, src_mask, it->second, 
-                  0/*no reduction here*/, across_helper);
-            // Also bump the redop_index for so the next application happens
-            // in the following reduction epoch
-            reductions[shadow_index][shadow_reduction].insert(update, dst_mask);
-            // Need to make sure the application of the reduction happens
-            // in the next epoch so figure out what that is
-            redop_index = (redop_index >= (shadow_index + 1)) ? redop_index : 
-                                                          (shadow_index + 1);
-            if (redop_index >= redop_epochs.size())
-              redop_epochs.resize(redop_index + 1, 0);
-            if (redop_index >= reductions.size())
-              resize_reductions(redop_index + 1);
-            update = 
-              new CopyUpdate(shadow_reduction, dst_mask, it->second, redop);
-          }
-          else 
-            update = 
-              new CopyUpdate(it->first,src_mask,it->second,redop,across_helper);
-        }
-        else
-#endif
-#endif
-          update = 
-            new CopyUpdate(it->first,src_mask,it->second,redop,across_helper);
+        CopyUpdate *update =
+          new CopyUpdate(it->first,src_mask,it->second,redop,across_helper);
         // Ignore shadows when tracing, we only care about the normal
         // preconditions and postconditions for the copies
         if (tracing_eq != NULL)
@@ -5457,125 +4840,77 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void CopyFillAggregator::record_preconditions(InstanceView *view, 
-                                     bool reading, EventFieldMap &preconditions)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(!preconditions.empty());
-#endif
-      WrapperReferenceMutator mutator(effects);
-      AutoLock p_lock(pre_lock);
-      std::map<InstanceView*,EventFieldMap>::iterator finder = 
-        reading ? src_pre.find(view) : dst_pre.find(view);
-      if (finder != (reading ? src_pre.end() : dst_pre.end()))
-      {
-        for (EventFieldMap::const_iterator it =
-              preconditions.begin(); it != preconditions.end(); it++)
-          finder->second[it->first] |= it->second;
-      }
-      else
-      {
-        EventFieldMap &pre = reading ? src_pre[view] : dst_pre[view];
-        pre.swap(preconditions);
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    void CopyFillAggregator::record_precondition(InstanceView *view,
-                             bool reading, ApEvent event, const FieldMask &mask)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock p_lock(pre_lock);
-      EventFieldMap &pre = reading ? src_pre[view] : dst_pre[view];
-      pre[event] |= mask;
-    }
-
-    //--------------------------------------------------------------------------
     void CopyFillAggregator::issue_updates(const PhysicalTraceInfo &trace_info,
-                                       ApEvent precondition,
-                                       const bool has_src_preconditions,
-                                       const bool has_dst_preconditions,
-                                       const bool need_deferral, unsigned pass,
-                                       bool need_pass_preconditions)
+                      ApEvent precondition, const bool restricted_output,
+                      const bool manage_dst_events,
+                      std::map<InstanceView*,std::vector<ApEvent> > *dst_events)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(!sources.empty() || !reductions.empty());
 #endif
-      if (need_deferral || 
-          (guard_precondition.exists() && !guard_precondition.has_triggered()))
+      if (guard_precondition.exists() && !guard_precondition.has_triggered())
       {
-        CopyFillAggregation args(this, trace_info, precondition, 
-                    has_src_preconditions, has_dst_preconditions, 
-                    op->get_unique_op_id(), pass, need_pass_preconditions);
+        CopyFillAggregation args(this, trace_info, precondition,
+                                 manage_dst_events, restricted_output,
+                                 op->get_unique_op_id(), dst_events);
         op->runtime->issue_runtime_meta_task(args, 
-                           LG_THROUGHPUT_DEFERRED_PRIORITY, guard_precondition);
+            LG_THROUGHPUT_DEFERRED_PRIORITY, guard_precondition);
         return;
       }
 #ifdef DEBUG_LEGION
       assert(!guard_precondition.exists() || 
               guard_precondition.has_triggered());
 #endif
-      if (pass == 0)
-      {
-        // Perform updates from any sources first
-        if (!sources.empty())
-        {
-          const RtEvent deferral_event = 
-            perform_updates(sources, trace_info, precondition, 
-                -1/*redop index*/, has_src_preconditions, 
-                has_dst_preconditions, need_pass_preconditions);
-          if (deferral_event.exists())
-          {
-            CopyFillAggregation args(this, trace_info, precondition, 
-                        has_src_preconditions, has_dst_preconditions,
-                        op->get_unique_op_id(), pass, false/*need pre*/);
-            op->runtime->issue_runtime_meta_task(args, 
-                             LG_THROUGHPUT_DEFERRED_PRIORITY, deferral_event);
-            return;
-          }
-        }
-        // We made it through the first pass
-        pass++;
-        need_pass_preconditions = true;
-      }
+#ifndef NON_AGGRESSIVE_AGGREGATORS
+      std::set<RtEvent> recorded_events;
+#endif
+      // Perform updates from any sources first
+      if (!sources.empty())
+        perform_updates(sources, trace_info, precondition, 
+#ifdef NON_AGGRESSIVE_AGGREGATORS
+            effects,
+#else
+            recorded_events,
+#endif
+            -1/*redop index*/, manage_dst_events, restricted_output,dst_events);
       // Then apply any reductions that we might have
       if (!reductions.empty())
       {
-#ifdef DEBUG_LEGION
-        assert(pass > 0);
-#endif
         // Skip any passes that we might have already done
-        for (unsigned idx = pass-1; idx < reductions.size(); idx++)
-        {
-          const RtEvent deferral_event = 
-            perform_updates(reductions[idx], trace_info, precondition,
-                            idx/*redop index*/, has_src_preconditions, 
-                            has_dst_preconditions, need_pass_preconditions);
-          if (deferral_event.exists())
-          {
-            CopyFillAggregation args(this, trace_info, precondition, 
-                        has_src_preconditions, has_dst_preconditions,
-                        op->get_unique_op_id(), pass, false/*need pre*/);
-            op->runtime->issue_runtime_meta_task(args, 
-                             LG_THROUGHPUT_DEFERRED_PRIORITY, deferral_event);
-            return;
-          }
-          // Made it through this pass
-          pass++;
-          need_pass_preconditions = true;
-        }
+        for (unsigned idx = 0; idx < reductions.size(); idx++)
+          perform_updates(reductions[idx], trace_info, precondition,
+#ifdef NON_AGGRESSIVE_AGGREGATORS
+                          effects,
+#else
+                          recorded_events,
+#endif
+                          idx/*redop index*/, manage_dst_events,
+                          restricted_output, dst_events);
       }
 #ifndef NON_AGGRESSIVE_AGGREGATORS
-      Runtime::trigger_event(guard_postcondition);
-#endif
-      // We can also trigger our guard event once the effects are applied
+      if (!recorded_events.empty())
+        Runtime::trigger_event(guard_postcondition,
+            Runtime::merge_events(recorded_events));
+      else
+        Runtime::trigger_event(guard_postcondition);
+      // Make sure the guard postcondition is chained on the deletion
+      if (!effects.empty())
+      {
+        effects.insert(guard_postcondition);
+        Runtime::trigger_event(effects_applied,
+            Runtime::merge_events(effects));
+      }
+      else
+        Runtime::trigger_event(effects_applied, guard_postcondition);
+#else
+      // We can also trigger our effects event once the effects are applied
       if (!effects.empty())
         Runtime::trigger_event(effects_applied,
             Runtime::merge_events(effects));
       else
         Runtime::trigger_event(effects_applied);
+#endif
     } 
 
     //--------------------------------------------------------------------------
@@ -5626,210 +4961,50 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void CopyFillAggregator::find_reduction_preconditions(InstanceView *view,
-        const PhysicalTraceInfo &trace_info, IndexSpaceExpression *copy_expr,
-        const FieldMask &copy_mask, UniqueID op_id, unsigned redop_index,
-        std::set<RtEvent> &preconditions_ready)
-    //--------------------------------------------------------------------------
-    {
-      // Break up the fields in the copy mask based on their
-      // different reduction operators, we'll handle the special
-      // case where they all have the same reduction ID since
-      // it is going to be very common
-      FieldMask first_mask;
-      ReductionOpID first_redop = 0;
-      LegionMap<ReductionOpID,FieldMask> *other_masks = NULL;
-      int fidx = copy_mask.find_first_set();
-      while (fidx >= 0)
-      {
-        const std::pair<InstanceView*,unsigned> key(view, fidx);
-#ifdef DEBUG_LEGION
-        assert(reduction_epochs.find(key) != reduction_epochs.end());
-        assert(redop_index < reduction_epochs[key].size());
-#endif
-        const ReductionOpID op = reduction_epochs[key][redop_index];
-        if (op != first_redop)
-        {
-          if (first_redop != 0)
-          {
-            if (other_masks == NULL)
-              other_masks = new LegionMap<ReductionOpID,FieldMask>();
-            (*other_masks)[op].set_bit(fidx);
-          }
-          else
-          {
-            first_redop = op;
-            first_mask.set_bit(fidx);
-          }
-        }
-        else
-          first_mask.set_bit(fidx);
-        fidx = copy_mask.find_next_set(fidx+1);
-      }
-      RtEvent first_ready = view->find_copy_preconditions(
-          false/*reading*/, first_redop, first_mask, copy_expr, op_id,
-          dst_index, *this, trace_info.recording, local_space);
-      if (first_ready.exists())
-        preconditions_ready.insert(first_ready);
-      if (other_masks != NULL)
-      {
-        for (LegionMap<ReductionOpID,FieldMask>::const_iterator it =
-              other_masks->begin(); it != other_masks->end(); it++)
-        {
-          RtEvent pre_ready = view->find_copy_preconditions(
-              false/*reading*/, it->first, it->second, copy_expr, op_id, 
-              dst_index, *this, trace_info.recording, local_space);
-          if (pre_ready.exists())
-            preconditions_ready.insert(pre_ready);
-        }
-        delete other_masks;
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    RtEvent CopyFillAggregator::perform_updates(
+    void CopyFillAggregator::perform_updates(
          const LegionMap<InstanceView*,FieldMaskSet<Update> > &updates,
-         const PhysicalTraceInfo &trace_info, const ApEvent all_precondition,
-         int redop_index, const bool has_src_preconditions, 
-         const bool has_dst_preconditions, const bool needs_preconditions)
+         const PhysicalTraceInfo &trace_info, const ApEvent precondition,
+         std::set<RtEvent> &recorded_events, const int redop_index,
+         const bool manage_dst_events, const bool restricted_output,
+         std::map<InstanceView*,std::vector<ApEvent> > *dst_events)
     //--------------------------------------------------------------------------
     {
-      if (needs_preconditions && 
-          (!has_src_preconditions || !has_dst_preconditions))
-      {
-        // First compute the access expressions for all the copies
-        InstanceFieldExprs dst_exprs, src_exprs;
-        for (LegionMap<InstanceView*,FieldMaskSet<Update> >::const_iterator
-              uit = updates.begin(); uit != updates.end(); uit++)
-        {
-          FieldMaskSet<IndexSpaceExpression> &dst_expr = dst_exprs[uit->first];
-          for (FieldMaskSet<Update>::const_iterator it = 
-                uit->second.begin(); it != uit->second.end(); it++)
-          {
-            // Update the destinations first
-            if (!has_dst_preconditions)
-            {
-#ifdef DEBUG_LEGION
-              // We should not have an across helper in this case
-              assert(it->first->across_helper == NULL);
-#endif
-              FieldMaskSet<IndexSpaceExpression>::iterator finder = 
-                dst_expr.find(it->first->expr);
-              if (finder == dst_expr.end())
-                dst_expr.insert(it->first->expr, it->second);
-              else
-                finder.merge(it->second);
-            }
-            // Now record the source expressions
-            if (!has_src_preconditions)
-              it->first->record_source_expressions(src_exprs);
-          }
-        }
-        // Next compute the event preconditions for these accesses
-        std::set<RtEvent> preconditions_ready; 
-        const UniqueID op_id = op->get_unique_op_id();
-        if (!has_dst_preconditions)
-        {
-          dst_pre.clear();
-          for (InstanceFieldExprs::const_iterator dit = 
-                dst_exprs.begin(); dit != dst_exprs.end(); dit++)
-          {
-            if (dit->second.size() == 1)
-            {
-              // No need to do any kind of sorts here
-              IndexSpaceExpression *copy_expr = dit->second.begin()->first;
-              const FieldMask &copy_mask = dit->second.get_valid_mask();
-              // See if we're doing reductions or not
-              if (redop_index < 0)
-              {
-                // No reductions so do the normal precondition test
-                RtEvent pre_ready = dit->first->find_copy_preconditions(
-                    false/*reading*/, 0/*redop*/, copy_mask, copy_expr, op_id, 
-                    dst_index, *this, trace_info.recording, local_space);
-                if (pre_ready.exists())
-                  preconditions_ready.insert(pre_ready);
-              }
-              else
-                find_reduction_preconditions(dit->first, trace_info, copy_expr,
-                    copy_mask, op_id, redop_index, preconditions_ready);
-            }
-            else
-            {
-              // Sort into field sets and merge expressions
-              LegionList<FieldSet<IndexSpaceExpression*> > sorted_exprs;
-              dit->second.compute_field_sets(FieldMask(), sorted_exprs);
-              for (LegionList<FieldSet<IndexSpaceExpression*> >::const_iterator
-                    it = sorted_exprs.begin(); it != sorted_exprs.end(); it++)
-              {
-                const FieldMask &copy_mask = it->set_mask; 
-                IndexSpaceExpression *copy_expr = (it->elements.size() == 1) ?
-                  *(it->elements.begin()) : 
-                  forest->union_index_spaces(it->elements);
-                if (redop_index < 0)
-                {
-                  RtEvent pre_ready = dit->first->find_copy_preconditions(
-                      false/*reading*/, 0/*redop*/, copy_mask, copy_expr, op_id,
-                      dst_index, *this, trace_info.recording, local_space);
-                  if (pre_ready.exists())
-                    preconditions_ready.insert(pre_ready);
-                }
-                else
-                  find_reduction_preconditions(dit->first, trace_info,copy_expr,
-                      copy_mask, op_id, redop_index, preconditions_ready);
-              }
-            }
-          }
-        }
-        if (!has_src_preconditions)
-        {
-          src_pre.clear();
-          for (InstanceFieldExprs::const_iterator sit = 
-                src_exprs.begin(); sit != src_exprs.end(); sit++)
-          {
-            if (sit->second.size() == 1)
-            {
-              // No need to do any kind of sorts here
-              IndexSpaceExpression *copy_expr = sit->second.begin()->first;
-              const FieldMask &copy_mask = sit->second.get_valid_mask();
-              RtEvent pre_ready = sit->first->find_copy_preconditions(
-                  true/*reading*/, 0/*redop*/, copy_mask, copy_expr, op_id, 
-                  src_index, *this, trace_info.recording, local_space);
-              if (pre_ready.exists())
-                preconditions_ready.insert(pre_ready);
-            }
-            else
-            {
-              // Sort into field sets and merge expressions
-              LegionList<FieldSet<IndexSpaceExpression*> > sorted_exprs;
-              sit->second.compute_field_sets(FieldMask(), sorted_exprs);
-              for (LegionList<FieldSet<IndexSpaceExpression*> >::const_iterator
-                    it = sorted_exprs.begin(); it != sorted_exprs.end(); it++)
-              {
-                const FieldMask &copy_mask = it->set_mask; 
-                IndexSpaceExpression *copy_expr = (it->elements.size() == 1) ?
-                  *(it->elements.begin()) : 
-                  forest->union_index_spaces(it->elements);
-                RtEvent pre_ready = sit->first->find_copy_preconditions(
-                    true/*reading*/, 0/*redop*/, copy_mask, copy_expr, op_id,
-                    src_index, *this, trace_info.recording, local_space);
-                if (pre_ready.exists())
-                  preconditions_ready.insert(pre_ready);
-              }
-            }
-          }
-        }
-        // If necessary wait until all we have all the preconditions
-        if (!preconditions_ready.empty())
-        {
-          const RtEvent wait_on = Runtime::merge_events(preconditions_ready);
-          if (wait_on.exists())
-            return wait_on;
-        }
-      }
+      std::vector<ApEvent> *target_events = NULL;
       for (LegionMap<InstanceView*,FieldMaskSet<Update> >::const_iterator
             uit = updates.begin(); uit != updates.end(); uit++)
       {
-        const EventFieldMap &dst_preconditions = dst_pre[uit->first];
+        ApEvent dst_precondition = precondition;
+        // In the case where we're not managing destination events
+        // then we need to incorporate any event postconditions from
+        // previous passes as part of the preconditions for this pass
+        if (!manage_dst_events)
+        {
+#ifdef DEBUG_LEGION
+          assert(dst_events != NULL);
+#endif
+          // This only happens in the case of across copies
+          std::map<InstanceView*,std::vector<ApEvent> >::iterator finder =
+            dst_events->find(uit->first);
+#ifdef DEBUG_LEGION
+          assert(finder != dst_events->end());
+#endif
+          if (!finder->second.empty())
+          {
+            // Update our precondition to incude the copies from 
+            // any previous passes that we performed
+            finder->second.push_back(precondition);
+            dst_precondition =
+              Runtime::merge_events(&trace_info, finder->second);
+            // Clear this for the next iteration
+            // It's not obvious why this safe, but it is
+            // We are guaranteed to issue at least one fill/copy that
+            // will depend on this and therefore either test that it
+            // has triggered or record itself back in the set of events
+            // which gives us a transitive precondition
+            finder->second.clear();
+          }
+          target_events = &finder->second;
+        }
         // Group by fields first
         LegionList<FieldSet<Update*> > field_groups;
         uit->second.compute_field_sets(FieldMask(), field_groups);
@@ -5838,7 +5013,7 @@ namespace Legion {
         {
           const FieldMask &dst_mask = fit->set_mask;
           // Now that we have the src mask for these operations group 
-          // them into fills and copies and then do their event analysis
+          // them into fills and copies
           std::vector<FillUpdate*> fills;
           std::map<InstanceView* /*src*/,std::vector<CopyUpdate*> > copies;
           for (std::set<Update*>::const_iterator it = fit->elements.begin();
@@ -5846,151 +5021,81 @@ namespace Legion {
             (*it)->sort_updates(copies, fills);
           // Issue the copies and fills
           if (!fills.empty())
-          {
-            std::set<ApEvent> preconditions;
-            if (all_precondition.exists())
-              preconditions.insert(all_precondition);
-            for (EventFieldMap::const_iterator it = 
-                 dst_preconditions.begin(); it != dst_preconditions.end(); it++)
-            {
-              if (dst_mask * it->second)
-                continue;
-              preconditions.insert(it->first);
-            }
-            CopyAcrossHelper *across_helper = fills[0]->across_helper; 
-            const FieldMask src_mask = (across_helper == NULL) ? dst_mask :
-              across_helper->convert_dst_to_src(dst_mask);
-            if (!preconditions.empty())
-            {
-              const ApEvent fill_precondition = 
-                Runtime::merge_events(&trace_info, preconditions);
-              issue_fills(uit->first, fills, fill_precondition, 
-                          src_mask, trace_info, has_dst_preconditions);
-            }
-            else
-              issue_fills(uit->first, fills, ApEvent::NO_AP_EVENT, 
-                          src_mask, trace_info, has_dst_preconditions);
-          }
+            issue_fills(uit->first, fills, recorded_events, dst_precondition,
+                        dst_mask, trace_info, manage_dst_events,
+                        restricted_output, target_events);
           if (!copies.empty())
-          {
-            std::set<ApEvent> preconditions;
-            if (all_precondition.exists())
-              preconditions.insert(all_precondition);
-            // Destination preconditions first
-            for (EventFieldMap::const_iterator it =
-                 dst_preconditions.begin(); it != dst_preconditions.end(); it++)
-            {
-              if (dst_mask * it->second)
-                continue;
-              preconditions.insert(it->first);
-            }
-            // Be careful that we get the destination fields right in the
-            // case that this is an across copy
-            CopyAcrossHelper *across_helper = 
-              copies.begin()->second[0]->across_helper;
-            const FieldMask src_mask = (across_helper == NULL) ? dst_mask :
-              across_helper->convert_dst_to_src(dst_mask);
-            if (!preconditions.empty())
-            {
-              const ApEvent copy_precondition = 
-                Runtime::merge_events(&trace_info, preconditions);
-              issue_copies(uit->first, copies, copy_precondition, 
-                           src_mask, trace_info, has_dst_preconditions);
-            }
-            else
-              issue_copies(uit->first, copies, ApEvent::NO_AP_EVENT, 
-                           src_mask, trace_info, has_dst_preconditions);
-          }
+            issue_copies(uit->first, copies, recorded_events, dst_precondition,
+                         dst_mask, trace_info, manage_dst_events,
+                         restricted_output, target_events);
         }
       }
-      return RtEvent::NO_RT_EVENT;
     }
 
     //--------------------------------------------------------------------------
     void CopyFillAggregator::issue_fills(InstanceView *target,
                                          const std::vector<FillUpdate*> &fills,
-                                         ApEvent precondition, 
+                                         std::set<RtEvent> &recorded_events,
+                                         const ApEvent precondition, 
                                          const FieldMask &fill_mask,
                                          const PhysicalTraceInfo &trace_info,
-                                         const bool has_dst_preconditions)
+                                         const bool manage_dst_events,
+                                         const bool restricted_output,
+                                         std::vector<ApEvent> *dst_events)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(!fills.empty());
       assert(!!fill_mask); 
+      // Should only have across helper on across copies
+      assert((fills[0]->across_helper == NULL) || !manage_dst_events);
 #endif
-      const UniqueID op_id = op->get_unique_op_id();
       PhysicalManager *manager = target->get_manager();
       if (fills.size() == 1)
       {
         FillUpdate *update = fills[0];
 #ifdef DEBUG_LEGION
+#ifndef NDEBUG
         // Should cover all the fields
-        assert(!(fill_mask - update->src_mask));
+        if (fills[0]->across_helper != NULL)
+        {
+          const FieldMask src_mask =
+            fills[0]->across_helper->convert_dst_to_src(fill_mask);
+          assert(!(src_mask - update->src_mask));
+        }
+        else
+        {
+          assert(!(fill_mask - update->src_mask));
+        }
+#endif
 #endif
         IndexSpaceExpression *fill_expr = update->expr;
         FillView *fill_view = update->source;
-        // Check to see if we need to do any work for tracing
-        if (trace_info.recording)
-        {
-          if (tracing_src_fills == NULL)
-            tracing_src_fills = new FieldMaskSet<FillView>();
-          else
-            tracing_src_fills->clear();
-          // Record the source view
-          tracing_src_fills->insert(fill_view, fill_mask);
-          if (tracing_dsts == NULL)
-            tracing_dsts = new FieldMaskSet<InstanceView>();
-          else
-            tracing_dsts->clear();
-          // Record the destination view, convert field mask if necessary 
-          if (update->across_helper != NULL)
-          {
-            const FieldMask dst_mask = 
-              update->across_helper->convert_src_to_dst(fill_mask);
-            tracing_dsts->insert(target, dst_mask);
-          }
-          else
-            tracing_dsts->insert(target, fill_mask);
-        }
-        const ApEvent result = manager->fill_from(fill_view, precondition,
-                                                  predicate_guard, fill_expr,
+        const ApEvent result = manager->fill_from(fill_view, target, 
+                                                  precondition, predicate_guard,
+                                                  fill_expr, op, dst_index,
                                                   fill_mask, trace_info, 
-                                                  tracing_src_fills, 
-                                                  tracing_dsts, effects, 
-                                                  fills[0]->across_helper);
-        // Record the fill result in the destination 
+                                                  recorded_events, effects,
+                                                  fills[0]->across_helper,
+                                                  manage_dst_events,
+                                                  restricted_output);
         if (result.exists())
         {
-          const RtEvent collect_event = trace_info.get_collect_event();
-          if (update->across_helper != NULL)
-          {
-            const FieldMask dst_mask = 
-                update->across_helper->convert_src_to_dst(fill_mask);
-            target->add_copy_user(false/*reading*/, 0, result, collect_event,
-                                  dst_mask, fill_expr, op_id, dst_index,
-                                  effects, trace_info.recording, local_space);
-            // Record this for the next iteration if necessary
-            if (has_dst_preconditions)
-              record_precondition(target, false/*reading*/, result, dst_mask);
-          }
-          else
-          {
-            target->add_copy_user(false/*reading*/, 0, result, collect_event,
-                                  fill_mask, fill_expr, op_id,dst_index,
-                                  effects, trace_info.recording, local_space);
-            // Record this for the next iteration if necessary
-            if (has_dst_preconditions)
-              record_precondition(target, false/*reading*/, result, fill_mask);
-          }
           if (track_events)
             events.insert(result);
+          if (dst_events != NULL)
+            dst_events->push_back(result);
         }
       }
       else
       {
 #ifdef DEBUG_LEGION
 #ifndef NDEBUG
+        FieldMask src_mask;
+        if (fills[0]->across_helper != NULL)
+          src_mask = fills[0]->across_helper->convert_dst_to_src(fill_mask);
+        else
+          src_mask = fill_mask;
         // These should all have had the same across helper
         for (unsigned idx = 1; idx < fills.size(); idx++)
           assert(fills[idx]->across_helper == fills[0]->across_helper);
@@ -6002,57 +5107,33 @@ namespace Legion {
         {
 #ifdef DEBUG_LEGION
           // Should cover all the fields
-          assert(!(fill_mask - (*it)->src_mask));
+          assert(!(src_mask - (*it)->src_mask));
           // Should also have the same across helper as the first one
           assert(fills[0]->across_helper == (*it)->across_helper);
 #endif
           exprs[(*it)->source].insert((*it)->expr);
-        }
-        const FieldMask dst_mask = 
-          (fills[0]->across_helper == NULL) ? fill_mask : 
-           fills[0]->across_helper->convert_src_to_dst(fill_mask);
-        // See if we have any work to do for tracing
-        if (trace_info.recording)
-        {
-          // Destination is the same for all the fills
-          if (tracing_dsts == NULL)
-            tracing_dsts = new FieldMaskSet<InstanceView>();
-          else
-            tracing_dsts->clear();
-          tracing_dsts->insert(target, dst_mask);
         }
         for (std::map<FillView*,std::set<IndexSpaceExpression*> >::
               const_iterator it = exprs.begin(); it != exprs.end(); it++)
         {
           IndexSpaceExpression *fill_expr = (it->second.size() == 1) ?
             *(it->second.begin()) : forest->union_index_spaces(it->second);
-          if (trace_info.recording)
-          {
-            if (tracing_src_fills == NULL)
-              tracing_src_fills = new FieldMaskSet<FillView>();
-            else
-              tracing_src_fills->clear();
-            // Record the source view
-            tracing_src_fills->insert(it->first, fill_mask);
-          }
           // See if we have any work to do for tracing
-          const ApEvent result = manager->fill_from(it->first, precondition,
+          const ApEvent result = manager->fill_from(it->first, target,
+                                                    precondition,
                                                     predicate_guard, fill_expr,
+                                                    op, dst_index, 
                                                     fill_mask, trace_info,
-                                                    tracing_src_fills,
-                                                    tracing_dsts, effects,
-                                                    fills[0]->across_helper);
-          const RtEvent collect_event = trace_info.get_collect_event();
+                                                    recorded_events, effects, 
+                                                    fills[0]->across_helper,
+                                                    manage_dst_events,
+                                                    restricted_output);
           if (result.exists())
           {
-            target->add_copy_user(false/*reading*/, 0, result, collect_event,
-                                  dst_mask, fill_expr, op_id, dst_index,
-                                  effects, trace_info.recording, local_space);
             if (track_events)
               events.insert(result);
-            // Record this for the next iteration if necessary
-            if (has_dst_preconditions)
-              record_precondition(target, false/*reading*/, result, dst_mask);
+            if (dst_events != NULL)
+              dst_events->push_back(result);
           }
         }
       }
@@ -6061,185 +5142,112 @@ namespace Legion {
     //--------------------------------------------------------------------------
     void CopyFillAggregator::issue_copies(InstanceView *target, 
                const std::map<InstanceView*,std::vector<CopyUpdate*> > &copies,
-               const ApEvent dst_precondition, const FieldMask &copy_mask,
+               std::set<RtEvent> &recorded_events,
+               const ApEvent precondition, const FieldMask &copy_mask,
                const PhysicalTraceInfo &trace_info,
-               const bool has_dst_preconditions)
+               const bool manage_dst_events, const bool restricted_output,
+               std::vector<ApEvent> *dst_events)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(!copies.empty());
       assert(!!copy_mask);
+      assert((src_index == dst_index) || !manage_dst_events);
 #endif
-      const UniqueID op_id = op->get_unique_op_id();
       PhysicalManager *target_manager = target->get_manager();
       for (std::map<InstanceView*,std::vector<CopyUpdate*> >::const_iterator
             cit = copies.begin(); cit != copies.end(); cit++)
       {
 #ifdef DEBUG_LEGION
         assert(!cit->second.empty());
+        // Should only have across helpers for across copies
+        assert((cit->second[0]->across_helper == NULL) || !manage_dst_events);
 #endif
         if (cit->second.size() == 1)
         {
           // Easy case of a single update copy
           CopyUpdate *update = cit->second[0];
 #ifdef DEBUG_LEGION
-          // Should cover all the fields
-          assert(!(copy_mask - update->src_mask));
+#ifndef NDEBUG
+          if (cit->second[0]->across_helper != NULL)
+          {
+            const FieldMask src_mask =
+              cit->second[0]->across_helper->convert_dst_to_src(copy_mask);
+            assert(!(src_mask - update->src_mask));
+          }
+          else
+          {
+            // Should cover all the fields
+            assert(!(copy_mask - update->src_mask));
+          }
+#endif
 #endif
           InstanceView *source = update->source;
           IndexSpaceExpression *copy_expr = update->expr;
-          // See if we have any work to do for tracing
-          if (trace_info.recording)
-          {
-            if (tracing_srcs == NULL)
-              tracing_srcs = new FieldMaskSet<InstanceView>();
-            else
-              tracing_srcs->clear();
-            tracing_srcs->insert(source, copy_mask);
-            if (tracing_dsts == NULL)
-              tracing_dsts = new FieldMaskSet<InstanceView>();
-            else
-              tracing_dsts->clear();
-            // Handle the across case properly here
-            if (update->across_helper != NULL)
-            {
-              const FieldMask dst_mask = 
-                update->across_helper->convert_src_to_dst(copy_mask);
-              tracing_dsts->insert(target, dst_mask);
-            }
-            else
-              tracing_dsts->insert(target, copy_mask);
-          }
-          // Incorporate the source preconditions
-          std::set<ApEvent> preconditions;
-          update->compute_source_preconditions(forest, copy_mask,
-                                               src_pre, preconditions);
-          ApEvent copy_precondition;
-          if (!preconditions.empty())
-          {
-            if (dst_precondition.exists())
-              preconditions.insert(dst_precondition);
-            copy_precondition = 
-              Runtime::merge_events(&trace_info, preconditions);
-          }
-          else
-            copy_precondition = dst_precondition;
-          const ApEvent result = target_manager->copy_from(
-                                    source->get_manager(), copy_precondition,
-                                    predicate_guard, update->redop,
-                                    copy_expr, copy_mask, trace_info,
-                                    tracing_srcs, tracing_dsts,
-                                    effects, cit->second[0]->across_helper);
+          const ApEvent result = target_manager->copy_from(source, target,
+                                    source->get_manager(), precondition,
+                                    predicate_guard, update->redop, copy_expr,
+                                    op, manage_dst_events ? dst_index
+                                      : src_index, copy_mask, trace_info,
+                                    recorded_events, effects,
+                                    cit->second[0]->across_helper,
+                                    manage_dst_events, restricted_output);
           if (result.exists())
           {
-            const RtEvent collect_event = trace_info.get_collect_event();
-            source->add_copy_user(true/*reading*/, 0, result, collect_event,
-                                  copy_mask, copy_expr, op_id,src_index,
-                                  effects, trace_info.recording, local_space);
-            if (update->across_helper != NULL)
-            {
-              const FieldMask dst_mask = 
-                update->across_helper->convert_src_to_dst(copy_mask);
-              target->add_copy_user(false/*reading*/, update->redop, result, 
-                        collect_event, dst_mask, copy_expr, op_id, dst_index,
-                        effects, trace_info.recording, local_space);
-              // Record this for the next iteration if necessary
-              if (has_dst_preconditions)
-                record_precondition(target, false/*reading*/, result, dst_mask);
-            }
-            else
-            {
-              target->add_copy_user(false/*reading*/, update->redop, result, 
-                  collect_event, copy_mask, copy_expr, op_id,dst_index,
-                  effects, trace_info.recording, local_space);
-              // Record this for the next iteration if necessary
-              if (has_dst_preconditions)
-                record_precondition(target, false/*reading*/, result,copy_mask);
-            }
             if (track_events)
               events.insert(result);
+            if (dst_events != NULL)
+              dst_events->push_back(result);
           }
         }
         else
         {
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
+          FieldMask src_mask;
+          if (cit->second[0]->across_helper != NULL)
+            src_mask = 
+              cit->second[0]->across_helper->convert_dst_to_src(copy_mask);
+          else
+            src_mask = copy_mask;
+#endif
+#endif
           // Have to group by source instances in order to merge together
           // different index space expressions for the same copy
-          std::map<InstanceView*,FusedCopy> fused_copies;
+          std::map<InstanceView*,std::set<IndexSpaceExpression*> > fused_exprs;
           const ReductionOpID redop = cit->second[0]->redop;
           for (std::vector<CopyUpdate*>::const_iterator it = 
                 cit->second.begin(); it != cit->second.end(); it++)
           {
 #ifdef DEBUG_LEGION
             // Should cover all the fields
-            assert(!(copy_mask - (*it)->src_mask));
+            assert(!(src_mask - (*it)->src_mask));
             // Should have the same redop
             assert(redop == (*it)->redop);
             // Should also have the same across helper as the first one
             assert(cit->second[0]->across_helper == (*it)->across_helper);
 #endif
-            FusedCopy &fused = fused_copies[(*it)->source];
-            fused.expressions.insert((*it)->expr);
-            (*it)->compute_source_preconditions(forest, copy_mask,
-                                    src_pre, fused.preconditions);
+            fused_exprs[(*it)->source].insert((*it)->expr);
           }
-          const FieldMask dst_mask = 
-            (cit->second[0]->across_helper == NULL) ? copy_mask : 
-             cit->second[0]->across_helper->convert_src_to_dst(copy_mask);
-          // If we're tracing we can get the destination now
-          if (trace_info.recording)
+          for (std::map<InstanceView*,std::set<IndexSpaceExpression*> >::
+               iterator it = fused_exprs.begin(); it != fused_exprs.end(); it++)
           {
-            if (tracing_dsts == NULL)
-              tracing_dsts = new FieldMaskSet<InstanceView>();
-            else
-              tracing_dsts->clear();
-            tracing_dsts->insert(target, dst_mask);
-          }
-          for (std::map<InstanceView*,FusedCopy>::iterator it =
-                fused_copies.begin(); it != fused_copies.end(); it++)
-          {
-            IndexSpaceExpression *copy_expr =
-              (it->second.expressions.size() == 1) ?
-                *(it->second.expressions.begin()) :
-                forest->union_index_spaces(it->second.expressions);
-            // If we're tracing then get the source information
-            if (trace_info.recording)
-            {
-              if (tracing_srcs == NULL)
-                tracing_srcs = new FieldMaskSet<InstanceView>();
-              else
-                tracing_srcs->clear();
-              tracing_srcs->insert(it->first, copy_mask);
-            }
-            ApEvent copy_precondition;
-            if (!it->second.preconditions.empty())
-            {
-              if (dst_precondition.exists())
-                it->second.preconditions.insert(dst_precondition);
-              copy_precondition =
-                Runtime::merge_events(&trace_info, it->second.preconditions);
-            }
-            else
-              copy_precondition = dst_precondition;
-            const ApEvent result = target_manager->copy_from(
-                                    it->first->get_manager(), copy_precondition,
-                                    predicate_guard, redop, copy_expr,
-                                    copy_mask, trace_info, 
-                                    tracing_srcs, tracing_dsts,
-                                    effects, cit->second[0]->across_helper);
-            const RtEvent collect_event = trace_info.get_collect_event();
+            IndexSpaceExpression *copy_expr = (it->second.size() == 1) ?
+                *(it->second.begin()) : forest->union_index_spaces(it->second);
+            const ApEvent result = target_manager->copy_from(it->first, target,
+                                    it->first->get_manager(), precondition,
+                                    predicate_guard, redop, copy_expr, op,
+                                    manage_dst_events ? dst_index : 
+                                      src_index, copy_mask, trace_info,
+                                    recorded_events, effects,
+                                    cit->second[0]->across_helper,
+                                    manage_dst_events, restricted_output);
             if (result.exists())
             {
-              it->first->add_copy_user(true/*reading*/, 0, result,collect_event,
-                                  copy_mask, copy_expr, op_id,src_index,
-                                  effects, trace_info.recording, local_space);
-              target->add_copy_user(false/*reading*/,redop,result,collect_event,
-                                  dst_mask, copy_expr, op_id, dst_index,
-                                  effects, trace_info.recording, local_space);
               if (track_events)
                 events.insert(result);
-              // Record this for the next iteration if necessary
-              if (has_dst_preconditions)
-                record_precondition(target, false/*reading*/, result, dst_mask);
+              if (dst_events != NULL)
+                dst_events->push_back(result);
             }
           }
         }
@@ -6251,10 +5259,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       const CopyFillAggregation *cfargs = (const CopyFillAggregation*)args;
-      cfargs->aggregator->issue_updates(*cfargs, cfargs->pre,
-          cfargs->has_src, cfargs->has_dst, false/*needs deferral*/, 
-          cfargs->pass, cfargs->need_pass_preconditions);
+      cfargs->aggregator->issue_updates(*cfargs, cfargs->pre, 
+          cfargs->restricted_output, cfargs->manage_dst_events,
+          cfargs->dst_events);
       cfargs->remove_recorder_reference();
+      if (cfargs->dst_events != NULL)
+        delete cfargs->dst_events;
     } 
 
     /////////////////////////////////////////////////////////////
@@ -7677,7 +6687,7 @@ namespace Legion {
           rez.serialize<size_t>(source_views.size());
           for (unsigned idx = 0; idx < source_views.size(); idx++)
             rez.serialize(source_views[idx]->did);
-          trace_info.pack_trace_info<false>(rez, applied_events, target);
+          trace_info.pack_trace_info(rez, applied_events);
           rez.serialize(precondition);
           rez.serialize(term_event);
           rez.serialize(updated);
@@ -7724,16 +6734,13 @@ namespace Legion {
       }
       if (!input_aggregators.empty())
       {
-        const bool needs_deferral = !already_deferred || 
-          (input_aggregators.size() > 1);
 #ifndef NON_AGGRESSIVE_AGGREGATORS
         const bool is_local = (original_source == runtime->address_space);
 #endif
         for (std::map<RtEvent,CopyFillAggregator*>::const_iterator it = 
               input_aggregators.begin(); it != input_aggregators.end(); it++)
         {
-          it->second->issue_updates(trace_info, precondition,
-              false/*has src*/, false/*has dst*/, needs_deferral);
+          it->second->issue_updates(trace_info, precondition);
 #ifdef NON_AGGRESSIVE_AGGREGATORS
           if (!it->second->effects_applied.has_triggered())
             guard_events.insert(it->second->effects_applied);
@@ -7790,7 +6797,8 @@ namespace Legion {
 #ifdef DEBUG_LEGION
         assert(!skip_output);
 #endif
-        output_aggregator->issue_updates(trace_info, term_event);
+        output_aggregator->issue_updates(trace_info, term_event,
+                                         true/*restricted output*/);
         // We need to wait for the aggregator updates to be applied
         // here before we can summarize the output
 #ifdef NON_AGGRESSIVE_AGGREGATORS
@@ -7878,7 +6886,7 @@ namespace Legion {
           ready_events.insert(ready);
       }
       PhysicalTraceInfo trace_info = 
-        PhysicalTraceInfo::unpack_trace_info(derez, runtime, op);
+        PhysicalTraceInfo::unpack_trace_info(derez, runtime);
       ApEvent precondition;
       derez.deserialize(precondition);
       ApEvent term_event;
@@ -8321,7 +7329,7 @@ namespace Legion {
           rez.serialize(returned);
           rez.serialize(applied);
           rez.serialize(target_analysis);
-          trace_info.pack_trace_info<false>(rez, applied_events, target);
+          trace_info.pack_trace_info(rez, applied_events);
         }
         runtime->send_equivalence_set_remote_releases(target, rez);
         applied_events.insert(applied);
@@ -8476,7 +7484,7 @@ namespace Legion {
       ReleaseAnalysis *target;
       derez.deserialize(target);
       const PhysicalTraceInfo trace_info = 
-        PhysicalTraceInfo::unpack_trace_info(derez, runtime, op);
+        PhysicalTraceInfo::unpack_trace_info(derez, runtime);
 
       ReleaseAnalysis *analysis = new ReleaseAnalysis(runtime, original_source,
           previous, op, index, expr, precondition, target, target_instances,
@@ -8742,7 +7750,7 @@ namespace Legion {
           }
           rez.serialize(applied);
           rez.serialize(copy);
-          trace_info.pack_trace_info<false>(rez, applied_events, target);
+          trace_info.pack_trace_info(rez, applied_events);
         }
         runtime->send_equivalence_set_remote_copies_across(target, rez);
         applied_events.insert(applied);
@@ -8797,64 +7805,23 @@ namespace Legion {
         else
           Runtime::trigger_event(aggregator_guard);
         // Record the event field preconditions for each view
-        // Use the destination expr since we know we we're only actually
-        // issuing copies for that particular expression
-        if (local_exprs.size() > 1)
+        std::map<InstanceView*,std::vector<ApEvent> > dst_events;
+        for (unsigned idx = 0; idx < target_instances.size(); idx++)
         {
-          LegionList<FieldSet<IndexSpaceExpression*> > field_sets;
-          local_exprs.compute_field_sets(FieldMask(), field_sets);
-          for (LegionList<FieldSet<IndexSpaceExpression*> >::const_iterator
-                it = field_sets.begin(); it != field_sets.end(); it++)
-          {
-            IndexSpaceExpression *expr = (it->elements.size() == 1) ? 
-              *(it->elements.begin()) :
-              runtime->forest->union_index_spaces(it->elements);
-            if (expr->is_empty())
-              continue;
-            for (unsigned idx = 0; idx < target_instances.size(); idx++)
-            {
-              const InstanceRef &ref = target_instances[idx];
-              const ApEvent event = ref.get_ready_event();
-              if (!event.exists())
-                continue;
-              const FieldMask &mask = ref.get_valid_fields();
-              // Convert these to destination fields if necessary
-              const FieldMask overlap = mask & (perfect ? it->set_mask :
-                  across_helpers[idx]->convert_src_to_dst(it->set_mask));
-              if (!overlap)
-                continue;
-              InstanceView *view = target_views[idx];
-              across_aggregator->record_precondition(view, false/*reading*/,
-                                                     event, overlap);
-            }
-          }
+          const InstanceRef &ref = target_instances[idx];
+          InstanceView *view = target_views[idx];
+          // Always instantiate the entry in the map
+          std::vector<ApEvent> &events = dst_events[view];
+          const ApEvent event = ref.get_ready_event();
+          if (!event.exists())
+            continue;
+          events.push_back(event);
         }
-        else
-        {
-          FieldMaskSet<IndexSpaceExpression>::const_iterator first = 
-            local_exprs.begin();
-          if (!first->first->is_empty())
-          {
-            for (unsigned idx = 0; idx < target_instances.size(); idx++)
-            {
-              const InstanceRef &ref = target_instances[idx];
-              const ApEvent event = ref.get_ready_event();
-              if (!event.exists())
-                continue;
-              const FieldMask &mask = ref.get_valid_fields();
-              // Convert these to destination fields if necessary
-              const FieldMask overlap = mask & (perfect ? first->second : 
-                  across_helpers[idx]->convert_src_to_dst(first->second));
-              if (!overlap)
-                continue;
-              InstanceView *view = target_views[idx];
-              across_aggregator->record_precondition(view, false/*reading*/,
-                                                     event, overlap);
-            }
-          }
-        }
+        // This is a copy-across aggregator so the destination events
+        // are being handled by the copy operation that mapped the
+        // target instance for us
         across_aggregator->issue_updates(trace_info, precondition,
-            false/*has src preconditions*/, true/*has dst preconditions*/);
+            false/*restricted*/, false/*manage dst events*/, &dst_events);
 #ifdef NON_AGGRESSIVE_AGGREGATORS
         if (!across_aggregator->effects_applied.has_triggered())
           return across_aggregator->effects_applied;
@@ -8997,7 +7964,7 @@ namespace Legion {
       ApUserEvent copy;
       derez.deserialize(copy);
       const PhysicalTraceInfo trace_info =
-        PhysicalTraceInfo::unpack_trace_info(derez, runtime, op); 
+        PhysicalTraceInfo::unpack_trace_info(derez, runtime);
 
       std::vector<CopyAcrossHelper*> across_helpers;
       std::set<RtEvent> deferral_events, applied_events;
@@ -9253,7 +8220,7 @@ namespace Legion {
               rez.serialize(it->second);
             }
           }
-          trace_info.pack_trace_info<false>(rez, applied_events, target);
+          trace_info.pack_trace_info(rez, applied_events);
           rez.serialize(pred_guard);
           rez.serialize(precondition);
           rez.serialize(guard_event);
@@ -9287,7 +8254,8 @@ namespace Legion {
       }
       if (output_aggregator != NULL)
       {
-        output_aggregator->issue_updates(trace_info, precondition);
+        output_aggregator->issue_updates(trace_info, precondition, 
+                                         true/*restricted output*/);
         // Need to wait before we can get the summary
 #ifdef NON_AGGRESSIVE_AGGREGATORS
         if (!output_aggregator->effects_applied.has_triggered())
@@ -9401,7 +8369,7 @@ namespace Legion {
         views.insert(static_cast<ReductionView*>(view), mask);
       }
       const PhysicalTraceInfo trace_info = 
-        PhysicalTraceInfo::unpack_trace_info(derez, runtime, op);
+        PhysicalTraceInfo::unpack_trace_info(derez, runtime);
       PredEvent pred_guard;
       derez.deserialize(pred_guard);
       ApEvent precondition;
@@ -10864,6 +9832,13 @@ namespace Legion {
                         found_exprs.insert(it->second);
                         // Promote this up to the full set expression
                         set_expr->add_nested_expression_reference(did,&mutator);
+                        // Since we're going to use the old expression, we need
+                        // to keep it live until the end of the task
+                        it->second->add_base_expression_reference(LIVE_EXPR_REF,
+                                                                  &mutator);
+                        ImplicitReferenceTracker::record_live_expression(
+                                                                  it->second);
+                        // Now we can remove the previous live reference
                         if (it->second->remove_nested_expression_reference(did))
                           delete it->second;
                         it->second = set_expr;
@@ -16391,230 +15366,6 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void EquivalenceSet::record_tracker(EqSetTracker *tracker, 
-                                        const FieldMask &mask)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock eq(eq_lock);
-      recorded_trackers.insert(tracker, mask);
-    }
-
-    //--------------------------------------------------------------------------
-    void EquivalenceSet::remove_tracker(EqSetTracker *tracker,
-                                        const FieldMask &mask)
-    //--------------------------------------------------------------------------
-    {
-      AutoLock eq(eq_lock);
-      FieldMaskSet<EqSetTracker>::iterator finder = 
-        recorded_trackers.find(tracker);
-      // might already have been removed as part of invalidation
-      if (finder == recorded_trackers.end())
-        return;
-      finder.filter(mask);
-      if (!finder->second)
-        recorded_trackers.erase(finder);
-    }
-
-    //--------------------------------------------------------------------------
-    EquivalenceSet::InvalidateFunctor::InvalidateFunctor(DistributedID id,
-              const FieldMask &m, std::set<RtEvent> &ap, AddressSpaceID o, 
-              UniqueID uid, const CollectiveMapping *mapping, Runtime *rt)
-      : did(id), mask(m), applied(ap), origin(o), ctx_uid(uid),
-        invalidate_mapping(mapping), runtime(rt)
-    //--------------------------------------------------------------------------
-    {
-    }
-
-    //--------------------------------------------------------------------------
-    void EquivalenceSet::InvalidateFunctor::apply(AddressSpaceID target)
-    //--------------------------------------------------------------------------
-    {
-      if ((invalidate_mapping != NULL) && invalidate_mapping->contains(target))
-        return;
-      const RtUserEvent done_event = Runtime::create_rt_user_event();
-      Serializer rez;
-      {
-        RezCheck z(rez);
-        rez.serialize(did);
-        rez.serialize(mask);
-        rez.serialize(origin);
-        rez.serialize(ctx_uid);
-        rez.serialize(done_event);
-      }
-      runtime->send_equivalence_set_invalidate_trackers(target, rez);
-      applied.insert(done_event);
-    }
-
-    //--------------------------------------------------------------------------
-    void EquivalenceSet::invalidate_trackers(const FieldMask &mask,
-                                    std::set<RtEvent> &applied_events,
-                                    const AddressSpaceID origin_space,
-                                    const CollectiveMapping *invalidate_mapping,
-                                    UniqueID context_uid /* = 0*/)
-    //--------------------------------------------------------------------------
-    {
-      // First send out any messages to remote nodes that need to be sent
-      if (invalidate_mapping != NULL)
-      {
-        if (collective_mapping != NULL)
-        {
-          if ((invalidate_mapping != collective_mapping) &&
-              (*invalidate_mapping != *collective_mapping))
-          {
-#ifdef DEBUG_LEGION
-            assert(invalidate_mapping->contains(runtime->address_space));
-#endif
-            // If we're the first ones in the invalidate mapping
-            // Go through and compute the difference and send invalidate
-            // requests to all the ones that will not get it automatically
-            if ((*invalidate_mapping)[0] == runtime->address_space)
-            {
-              for (unsigned idx = 0; idx < collective_mapping->size(); idx++)
-              {
-                const AddressSpace target = (*collective_mapping)[idx];
-                if (invalidate_mapping->contains(target))
-                  continue;
-                const RtUserEvent done_event = Runtime::create_rt_user_event();
-                Serializer rez;
-                {
-                  RezCheck z(rez);
-                  rez.serialize(did);
-                  rez.serialize(mask);
-                  rez.serialize(origin_space);
-                  rez.serialize(context_uid);
-                  rez.serialize(done_event);
-                }
-                runtime->send_equivalence_set_invalidate_trackers(target, rez);
-                applied_events.insert(done_event);   
-              }
-            }
-          }
-        }
-      }
-      else
-      {
-        if (collective_mapping != NULL)
-        {
-          // Send it to each of the children
-          std::vector<AddressSpaceID> children;
-          collective_mapping->get_children(origin_space, local_space, children);
-          for (std::vector<AddressSpaceID>::const_iterator it =
-                children.begin(); it != children.end(); it++)
-          {
-            const RtUserEvent done_event = Runtime::create_rt_user_event();
-            Serializer rez;
-            {
-              RezCheck z(rez);
-              rez.serialize(did);
-              rez.serialize(mask);
-              rez.serialize(origin_space);
-              rez.serialize(context_uid);
-              rez.serialize(done_event);
-            }
-            runtime->send_equivalence_set_invalidate_trackers(*it, rez);
-            applied_events.insert(done_event);
-          }
-        }
-      }
-      if (is_owner() && has_remote_instances())
-      {
-        InvalidateFunctor functor(did, mask, applied_events, origin_space,
-                                  context_uid, invalidate_mapping, runtime);
-        map_over_remote_instances(functor);
-      }
-      // Finally perform our invalidation here
-      // Just need to pull these out locally and remove 
-      FieldMaskSet<EqSetTracker> to_remove;
-      {
-        AutoLock eq(eq_lock);
-        if (recorded_trackers.empty() || 
-            (mask * recorded_trackers.get_valid_mask()))
-          return;
-        if ((context_uid == 0) && !(recorded_trackers.get_valid_mask() - mask))
-        {
-          // Mask dominates all trackers, so we can just grab them all
-          // Add reference to them all to keep them alive until we 
-          // can finish the removal
-          for (FieldMaskSet<EqSetTracker>::const_iterator it =
-                recorded_trackers.begin(); it != recorded_trackers.end(); it++)
-            it->first->add_tracker_reference();
-          to_remove.swap(recorded_trackers);
-        }
-        else
-        {
-          // Filter out specific trackers
-          std::vector<EqSetTracker*> to_delete;
-          for (FieldMaskSet<EqSetTracker>::iterator it =
-                recorded_trackers.begin(); it != recorded_trackers.end(); it++)
-          {
-            const FieldMask overlap = mask & it->second;
-            if (!overlap)
-              continue;
-            if ((context_uid > 0) &&
-                !it->first->can_filter_context(context_uid))
-              continue;
-            if (to_remove.insert(it->first, overlap))
-              it->first->add_tracker_reference();
-            it.filter(overlap);
-            if (!it->second)
-              to_delete.push_back(it->first);
-          }
-          if (!to_delete.empty())
-            for (std::vector<EqSetTracker*>::const_iterator it =
-                  to_delete.begin(); it != to_delete.end(); it++)
-              recorded_trackers.erase(*it);
-          recorded_trackers.tighten_valid_mask();
-        }
-      }
-      if (!to_remove.empty())
-      {
-        for (FieldMaskSet<EqSetTracker>::const_iterator it =
-              to_remove.begin(); it != to_remove.end(); it++)
-        {
-          it->first->remove_equivalence_set(this, it->second);
-          if (it->first->remove_tracker_reference())
-            delete it->first;
-        }
-      }
-    }
-
-    //--------------------------------------------------------------------------
-    /*static*/ void EquivalenceSet::handle_invalidate_trackers(
-                                          Deserializer &derez, Runtime *runtime)
-    //--------------------------------------------------------------------------
-    {
-      DerezCheck z(derez);
-      DistributedID did;
-      derez.deserialize(did);
-      EquivalenceSet *set = static_cast<EquivalenceSet*>(
-          runtime->weak_find_distributed_collectable(did));
-      FieldMask mask;
-      derez.deserialize(mask);
-      AddressSpaceID origin;
-      derez.deserialize(origin);
-      UniqueID context_uid;
-      derez.deserialize(context_uid);
-      RtUserEvent done_event;
-      derez.deserialize(done_event);
-
-      if (set != NULL)
-      {
-        std::set<RtEvent> applied_events; 
-        set->invalidate_trackers(mask, applied_events, origin,
-                                 NULL/*mapping*/, context_uid);
-        if (set->remove_base_resource_ref(RUNTIME_REF))
-          delete set;
-        if (!applied_events.empty())
-        {
-          Runtime::trigger_event(done_event,
-              Runtime::merge_events(applied_events));
-          return;
-        }
-      }
-      Runtime::trigger_event(done_event);
-    }
-
-    //--------------------------------------------------------------------------
     /*static*/ void EquivalenceSet::handle_replication_request(
                                           Deserializer &derez, Runtime *runtime)
     //--------------------------------------------------------------------------
@@ -16814,7 +15565,7 @@ namespace Legion {
                                  node, false/*register now*/);
       set->unpack_replicated_states(derez);
       // Once construction is complete then we do the registration
-      set->register_with_runtime(NULL/*no remote registration needed*/);
+      set->register_with_runtime();
     }
 
     //--------------------------------------------------------------------------
@@ -18392,6 +17143,8 @@ namespace Legion {
       
       if (ready.exists() && !ready.has_triggered())
         ready.wait();
+      // Add a reference to make sure we don't race with sending the response
+      set->add_base_resource_ref(RUNTIME_REF);
       if (target_space == runtime->address_space)
       {
         // We've been sent back to the owner node
@@ -18414,6 +17167,8 @@ namespace Legion {
         set->clone_to_remote(target, target_space, node, mask, done_event, 
                              invalidate_overlap, forward_to_owner);
       }
+      if (set->remove_base_resource_ref(RUNTIME_REF))
+        delete set;
     }
 
     //--------------------------------------------------------------------------
@@ -18682,6 +17437,230 @@ namespace Legion {
     }
 
     /////////////////////////////////////////////////////////////
+    // Equivalence Set Tracker
+    /////////////////////////////////////////////////////////////
+
+    //--------------------------------------------------------------------------
+    void EqSetTracker::cancel_subscriptions(Runtime *runtime,
+        const std::map<AddressSpaceID,std::vector<VersionManager*> > &to_cancel)
+    //--------------------------------------------------------------------------
+    {
+      const AddressSpaceID local_space = runtime->address_space;
+      for (std::map<AddressSpaceID,std::vector<VersionManager*> >::
+            const_iterator ait = to_cancel.begin(); 
+            ait != to_cancel.end(); ait++)
+      {
+        if (ait->first != local_space)
+        {
+          Serializer rez;
+          {
+            RezCheck z(rez);
+            rez.serialize(this);
+            rez.serialize<size_t>(ait->second.size());
+            for (std::vector<VersionManager*>::const_iterator it =
+                  ait->second.begin(); it != ait->second.end(); it++)
+              rez.serialize(*it);
+          }
+          runtime->send_cancel_equivalence_sets_subscription(ait->first, rez);
+        }
+        else
+        {
+          for (std::vector<VersionManager*>::const_iterator it =
+                ait->second.begin(); it != ait->second.end(); it++)
+            if ((*it)->cancel_subscription(this, local_space) &&
+                finish_subscription(*it, local_space))
+              assert(false); // should never need to delete ourselves
+        }
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    /*static*/ void EqSetTracker::handle_cancel_subscription(
+                   Deserializer &derez, Runtime *runtime, AddressSpaceID source)
+    //--------------------------------------------------------------------------
+    {
+      DerezCheck z(derez);
+      EqSetTracker *subscriber;
+      derez.deserialize(subscriber);
+      size_t num_owners;
+      derez.deserialize(num_owners);
+      std::vector<VersionManager*> to_finish;
+      for (unsigned idx = 0; idx < num_owners; idx++)
+      {
+        VersionManager *owner;
+        derez.deserialize(owner);
+        if (owner->cancel_subscription(subscriber, source))
+          to_finish.push_back(owner);
+      }
+      if (!to_finish.empty())
+      {
+        Serializer rez;
+        {
+          RezCheck z2(rez);
+          rez.serialize<size_t>(0); // nothing to filter
+          rez.serialize(subscriber);
+          rez.serialize<size_t>(to_finish.size());
+          for (std::vector<VersionManager*>::const_iterator it =
+                to_finish.begin(); it != to_finish.end(); it++)
+            rez.serialize(*it);
+        }
+        runtime->send_finish_equivalence_sets_subscription(source, rez);
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    /*static*/ void EqSetTracker::finish_subscriptions(
+        Runtime *runtime, VersionManager &manager,
+        LegionMap<AddressSpaceID,SubscriberInvalidations> &subscribers,
+        const FieldMaskSet<EquivalenceSet> &to_filter,
+        std::set<RtEvent> &applied_events, bool remove_references)
+    //--------------------------------------------------------------------------
+    {
+      const AddressSpaceID local_space = runtime->address_space;
+      for (LegionMap<AddressSpaceID,SubscriberInvalidations>::const_iterator
+            ait = subscribers.begin(); ait != subscribers.end(); ait++)
+      {
+#ifdef DEBUG_LEGION
+        assert(!to_filter.empty());
+#endif
+        if (ait->first != local_space)
+        {
+          const RtUserEvent applied = Runtime::create_rt_user_event();
+          Serializer rez;
+          {
+            RezCheck z(rez);
+            rez.serialize<size_t>(to_filter.size());
+            for (FieldMaskSet<EquivalenceSet>::const_iterator it =
+                  to_filter.begin(); it != to_filter.end(); it++)
+            {
+              rez.serialize(it->first->did);
+              rez.serialize(it->second);
+            }
+            rez.serialize<VersionManager*>(&manager);
+            rez.serialize(applied);
+            rez.serialize<size_t>(ait->second.subscribers.size());
+            if (ait->second.delete_all)
+              rez.serialize<size_t>(ait->second.subscribers.size());
+            else
+              rez.serialize<size_t>(ait->second.finished.size());
+            for (FieldMaskSet<EqSetTracker>::const_iterator it =
+                  ait->second.subscribers.begin(); it != 
+                  ait->second.subscribers.end(); it++)
+            {
+              rez.serialize(it->first);
+              rez.serialize(it->second);
+            }
+            if (ait->second.finished.size() < ait->second.subscribers.size())
+            {
+              for (std::vector<EqSetTracker*>::const_iterator it =
+                    ait->second.finished.begin(); it !=
+                    ait->second.finished.end(); it++)
+                rez.serialize(*it);
+            }
+          }
+          runtime->send_finish_equivalence_sets_subscription(ait->first, rez);
+          applied_events.insert(applied);
+        }
+        else
+        {
+          for (FieldMaskSet<EqSetTracker>::const_iterator it = 
+                ait->second.subscribers.begin(); it != 
+                ait->second.subscribers.end(); it++)
+          {
+            it->first->remove_equivalence_sets(it->second, to_filter);
+            if (ait->second.delete_all && 
+                it->first->finish_subscription(&manager, local_space))
+              delete it->first;
+          }
+          for (std::vector<EqSetTracker*>::const_iterator it =
+                ait->second.finished.begin(); it != 
+                ait->second.finished.end(); it++)
+            if ((*it)->finish_subscription(&manager, local_space))
+              delete *it;
+        }
+      }
+      if (remove_references)
+      {
+        for (FieldMaskSet<EquivalenceSet>::const_iterator it =
+              to_filter.begin(); it != to_filter.end(); it++)
+          if (it->first->remove_base_resource_ref(VERSION_MANAGER_REF))
+            delete it->first;
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    /*static*/ void EqSetTracker::handle_finish_subscription(
+                   Deserializer &derez, Runtime *runtime, AddressSpaceID source)
+    //--------------------------------------------------------------------------
+    {
+      DerezCheck z(derez);
+      size_t num_sets;
+      derez.deserialize(num_sets);
+      if (num_sets > 0)
+      {
+        FieldMaskSet<EquivalenceSet> to_filter;
+        for (unsigned idx = 0; idx < num_sets; idx++)
+        {
+          DistributedID did;
+          derez.deserialize(did);
+          EquivalenceSet *set = static_cast<EquivalenceSet*>(
+              runtime->weak_find_distributed_collectable(did));
+          FieldMask mask;
+          derez.deserialize(mask);
+          if (set != NULL)
+            to_filter.insert(set, mask);
+        }
+        VersionManager *owner;
+        derez.deserialize(owner);
+        RtUserEvent done;
+        derez.deserialize(done);
+        size_t num_subscribers, num_finished;
+        derez.deserialize(num_subscribers);
+        derez.deserialize(num_finished);
+        for (unsigned idx = 0; idx < num_subscribers; idx++)
+        {
+          EqSetTracker *subscriber;
+          derez.deserialize(subscriber);
+          FieldMask mask;
+          derez.deserialize(mask);
+          subscriber->remove_equivalence_sets(mask, to_filter);
+          if ((num_finished == num_subscribers) &&
+              subscriber->finish_subscription(owner, source))
+            delete subscriber;
+        }
+        if (num_finished < num_subscribers)
+        {
+          for (unsigned idx = 0; idx < num_finished; idx++)
+          {
+            EqSetTracker *to_finish;
+            derez.deserialize(to_finish);
+            if (to_finish->finish_subscription(owner, source))
+              delete to_finish;
+          }
+        }
+        Runtime::trigger_event(done);
+        for (FieldMaskSet<EquivalenceSet>::const_iterator it =
+              to_filter.begin(); it != to_filter.end(); it++)
+          if (it->first->remove_base_resource_ref(RUNTIME_REF))
+            delete it->first;
+      }
+      else
+      {
+        EqSetTracker *subscriber;
+        derez.deserialize(subscriber);
+        size_t num_owners;
+        derez.deserialize(num_owners);
+        for (unsigned idx = 0; idx < num_owners; idx++)
+        {
+          VersionManager *owner;
+          derez.deserialize(owner);
+          if (subscriber->finish_subscription(owner, source))
+            delete subscriber;
+        }
+      }
+    }
+
+    /////////////////////////////////////////////////////////////
     // Version Manager 
     ///////////////////////////////////////////////////////////// 
 
@@ -18690,15 +17669,6 @@ namespace Legion {
       : ctx(c), node(n), runtime(n->context->runtime)
     //--------------------------------------------------------------------------
     {
-    }
-
-    //--------------------------------------------------------------------------
-    VersionManager::VersionManager(const VersionManager &rhs)
-      : ctx(rhs.ctx), node(rhs.node), runtime(rhs.runtime)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
     }
 
     //--------------------------------------------------------------------------
@@ -18712,16 +17682,9 @@ namespace Legion {
       assert(equivalence_sets_ready.empty());
       assert(!disjoint_complete);
       assert(disjoint_complete_children.empty());
+      assert(refinement_subscriptions.empty());
+      assert(subscription_owners.empty());
 #endif
-    }
-
-    //--------------------------------------------------------------------------
-    VersionManager& VersionManager::operator=(const VersionManager &rhs)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
-      return *this;
     }
 
     //--------------------------------------------------------------------------
@@ -18878,19 +17841,71 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void VersionManager::add_tracker_reference(unsigned cnt)
+    void VersionManager::record_subscription(VersionManager *owner,
+                                             AddressSpaceID space)
     //--------------------------------------------------------------------------
     {
-      node->add_base_resource_ref(VERSION_MANAGER_REF, cnt);
+      bool add_reference;
+      {
+        const std::pair<VersionManager*,AddressSpaceID> key(owner, space);
+        AutoLock m_lock(manager_lock);
+        add_reference = subscription_owners.empty();
+        std::map<std::pair<VersionManager*,AddressSpaceID>,unsigned>::iterator
+          finder = subscription_owners.find(key);
+        if (finder == subscription_owners.end())
+          subscription_owners[key] = 1;
+        else
+          finder->second++;
+      }
+      if (add_reference)
+        node->add_base_resource_ref(VERSION_MANAGER_REF);
     }
 
     //--------------------------------------------------------------------------
-    bool VersionManager::remove_tracker_reference(unsigned cnt)
+    bool VersionManager::finish_subscription(VersionManager *owner,
+                                             AddressSpaceID space)
     //--------------------------------------------------------------------------
     {
-      if (node->remove_base_resource_ref(VERSION_MANAGER_REF, cnt))
+      bool remove_reference;
+      {
+        const std::pair<VersionManager*,AddressSpaceID> key(owner, space);
+        AutoLock m_lock(manager_lock);
+        std::map<std::pair<VersionManager*,AddressSpaceID>,unsigned>::iterator
+          finder = subscription_owners.find(key);
+#ifdef DEBUG_LEGION
+        assert(finder != subscription_owners.end());
+        assert(finder->second > 0);
+#endif
+        if (--finder->second == 0)
+          subscription_owners.erase(finder);
+        remove_reference = subscription_owners.empty();
+      }
+      // Do this last to avoid 
+      if (remove_reference &&
+          node->remove_base_resource_ref(VERSION_MANAGER_REF))
         delete node;
+      // Never delete this directly
       return false;
+    }
+
+    //--------------------------------------------------------------------------
+    bool VersionManager::cancel_subscription(EqSetTracker *subscriber,
+                                             AddressSpaceID space)
+    //--------------------------------------------------------------------------
+    {
+      AutoLock m_lock(manager_lock);
+      LegionMap<AddressSpaceID,FieldMaskSet<EqSetTracker> >::iterator
+        refinement_finder = refinement_subscriptions.find(space);
+      if (refinement_finder == refinement_subscriptions.end())
+        return false;
+      FieldMaskSet<EqSetTracker>::iterator finder =
+        refinement_finder->second.find(subscriber);
+      if (finder == refinement_finder->second.end())
+        return false;
+      refinement_finder->second.erase(finder);
+      if (refinement_finder->second.empty())
+        refinement_subscriptions.erase(refinement_finder);
+      return true;
     }
 
     //--------------------------------------------------------------------------
@@ -18899,13 +17914,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
-      assert(!node->as_region_node()->row_source->is_empty() ||
-             (node == set->region_node));
+      assert((node == set->region_node)
+             || !node->as_region_node()->row_source->is_empty());
 #endif
       AutoLock m_lock(manager_lock);
       if (equivalence_sets.insert(set, mask))
         set->add_base_resource_ref(VERSION_MANAGER_REF);
-      set->record_tracker(this, mask);
     }
 
     //--------------------------------------------------------------------------
@@ -18921,42 +17935,27 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    bool VersionManager::can_filter_context(ContextID filter_id) const
+    void VersionManager::remove_equivalence_sets(const FieldMask &mask,
+                                  const FieldMaskSet<EquivalenceSet> &to_filter)
     //--------------------------------------------------------------------------
     {
-      return (filter_id == ctx);
-    }
-
-    //--------------------------------------------------------------------------
-    void VersionManager::remove_equivalence_set(EquivalenceSet *set,
-                                                const FieldMask &mask)
-    //--------------------------------------------------------------------------
-    {
+      AutoLock m_lock(manager_lock);
+      for (FieldMaskSet<EquivalenceSet>::const_iterator it =
+            to_filter.begin(); it != to_filter.end(); it++)
       {
-        AutoLock m_lock(manager_lock);
         FieldMaskSet<EquivalenceSet>::iterator finder = 
-          equivalence_sets.find(set);
-        // This can happen if the version manager is finalized but has not
-        // finished removing the tracker before we get this call back 
+          equivalence_sets.find(it->first);
         if (finder == equivalence_sets.end())
-          return;
-#ifdef DEBUG_LEGION
-        assert(!(mask - finder->second));
-#endif
-        finder.filter(mask);
-        equivalence_sets.tighten_valid_mask();
+          continue;
+        finder.filter(it->second);
         if (!finder->second)
         {
           equivalence_sets.erase(finder);
-          if (!set->remove_base_resource_ref(VERSION_MANAGER_REF))
-            return;
+          if (it->first->remove_base_resource_ref(VERSION_MANAGER_REF))
+            assert(false); // should never end up deleting this here
         }
-        else
-          return;
       }
-      // If we get here it's because we remove our reference on the set
-      // and it was deleted, so perform the deletion
-      delete set;
+      equivalence_sets.tighten_valid_mask();
     }
 
     //--------------------------------------------------------------------------
@@ -18985,12 +17984,11 @@ namespace Legion {
             if (it->second * finder->second)
               continue;
 #ifdef DEBUG_LEGION
-            assert(!node->as_region_node()->row_source->is_empty() ||
-                   (node == it->first->region_node));
+            assert((node == it->first->region_node)
+                   || !node->as_region_node()->row_source->is_empty());
 #endif
             if (equivalence_sets.insert(it->first, it->second))
               it->first->add_base_resource_ref(VERSION_MANAGER_REF);
-            it->first->record_tracker(this, it->second);
             to_delete.push_back(it->first);
           }
           if (!to_delete.empty())
@@ -19044,6 +18042,7 @@ namespace Legion {
     {
       // We need to remove any tracked equivalence sets that we have
       FieldMaskSet<EquivalenceSet> to_remove;
+      std::map<AddressSpaceID,std::vector<VersionManager*> > to_cancel;
       {
         AutoLock m_lock(manager_lock);
 #ifdef DEBUG_LEGION
@@ -19055,13 +18054,20 @@ namespace Legion {
         assert(!disjoint_complete);
         assert(disjoint_complete_children.empty());
 #endif
-        if (equivalence_sets.empty())
+        if (!equivalence_sets.empty())
+          to_remove.swap(equivalence_sets);
+        else if (subscription_owners.empty())
           return;
-        to_remove.swap(equivalence_sets);
+        for (std::map<std::pair<VersionManager*,AddressSpaceID>,unsigned>::
+              const_iterator it = subscription_owners.begin();
+              it != subscription_owners.end(); it++)
+          to_cancel[it->first.second].push_back(it->first.first);
       }
 #ifdef DEBUG_LEGION
       assert(node->is_region());
 #endif
+      if (!to_cancel.empty())
+        cancel_subscriptions(runtime, to_cancel);
       for (FieldMaskSet<EquivalenceSet>::const_iterator it = 
             to_remove.begin(); it != to_remove.end(); it++)
       {
@@ -19072,7 +18078,6 @@ namespace Legion {
         //assert((it->first->region_node != node) ||
         //        it->first->region_node->row_source->is_empty());
 #endif
-        it->first->remove_tracker(this, it->second);
         if (it->first->remove_base_resource_ref(VERSION_MANAGER_REF))
           delete it->first;
       }
@@ -19224,10 +18229,11 @@ namespace Legion {
       // If we have deferral events then save this traversal for another time
       if (!deferral_events.empty())
         return;
+      bool new_subscriber = false;
       FieldMaskSet<EquivalenceSet> to_record;
       {
         // Do the local analysis on our owned equivalence sets
-        AutoLock m_lock(manager_lock,1,false/*exclusive*/);
+        AutoLock m_lock(manager_lock);
         if (!downward_only)
         {
           if (!disjoint_complete)
@@ -19314,11 +18320,17 @@ namespace Legion {
           }
           if (!to_send.empty())
           {
+            // Record that we have a refinement tracker
+            new_subscriber = refinement_subscriptions[target_space].insert(
+                                          target, to_send.get_valid_mask());
             const RtUserEvent done = Runtime::create_rt_user_event();
             Serializer rez;
             {
               RezCheck z(rez);
               rez.serialize(target);
+              rez.serialize<bool>(new_subscriber);
+              if (new_subscriber)
+                rez.serialize(this);
               rez.serialize<size_t>(to_send.size());
               for (FieldMaskSet<EquivalenceSet>::const_iterator it =
                     to_send.begin(); it != to_send.end(); it++)
@@ -19330,6 +18342,7 @@ namespace Legion {
             }
             runtime->send_compute_equivalence_sets_response(target_space, rez);
             ready_events.insert(done);
+            
           }
         }
         else if (target != this)
@@ -19352,6 +18365,10 @@ namespace Legion {
 #endif
             to_record.insert(it->first, overlap);
           }
+          if (!to_record.empty())
+            // Record that we have a refinement tracker
+            new_subscriber = refinement_subscriptions[target_space].insert(
+                                        target, to_record.get_valid_mask());
         }
 #ifdef DEBUG_LEGION
         else
@@ -19361,6 +18378,8 @@ namespace Legion {
       }
       if (!to_record.empty())
       {
+        if (new_subscriber)
+          target->record_subscription(this, runtime->address_space);
         for (FieldMaskSet<EquivalenceSet>::const_iterator it = 
               to_record.begin(); it != to_record.end(); it++)
           target->record_equivalence_set(it->first, it->second);
@@ -19369,12 +18388,20 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     /*static*/ void VersionManager::handle_compute_equivalence_sets_response(
-                                          Deserializer &derez, Runtime *runtime)
+                   Deserializer &derez, Runtime *runtime, AddressSpaceID source)
     //--------------------------------------------------------------------------
     {
       DerezCheck z(derez);
       EqSetTracker *target;
       derez.deserialize(target);
+      bool new_subscriber;
+      derez.deserialize<bool>(new_subscriber);
+      if (new_subscriber)
+      {
+        VersionManager *owner;
+        derez.deserialize(owner);
+        target->record_subscription(owner, source);
+      }
       size_t num_sets;
       derez.deserialize(num_sets);
       std::set<RtEvent> ready_events;
@@ -19543,10 +18570,12 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void VersionManager::invalidate_refinement(InnerContext *context,
+    void VersionManager::invalidate_refinement(InnerContext &context,
                                       const FieldMask &mask, bool self,
                                       FieldMaskSet<RegionTreeNode> &to_traverse,
                                       FieldMaskSet<EquivalenceSet> &to_untrack,
+                                      LegionMap<AddressSpaceID,
+                                        SubscriberInvalidations> &subscribers,
                                       std::vector<EquivalenceSet*> &to_release,
                                       bool nonexclusive_virtual_mapping_root)
     //--------------------------------------------------------------------------
@@ -19563,8 +18592,8 @@ namespace Legion {
           // to tell the context that it can invalidate
           const FieldMask invalidate_mask = mask - disjoint_complete;
           if (!!invalidate_mask)
-            context->invalidate_disjoint_complete_sets(node->as_region_node(), 
-                                                       invalidate_mask);
+            context.invalidate_disjoint_complete_sets(node->as_region_node(), 
+                                                      invalidate_mask);
         }
 #ifdef DEBUG_LEGION
 #ifndef NDEBUG
@@ -19585,6 +18614,7 @@ namespace Legion {
 #ifdef DEBUG_LEGION
         assert(node->is_region());
 #endif
+        FieldMask untrack_mask;
         // Handle the nasty case where there is just one equivalence set
         // and the index space is empty so the summary valid mask is aliased
         if ((equivalence_sets.size() == 1) &&
@@ -19597,6 +18627,7 @@ namespace Legion {
           {
             finder.filter(overlap);
             to_untrack.insert(finder->first, overlap);
+            untrack_mask |= overlap;
             // Remove this if the only remaining fields are not refinements
             if (!finder->second || (finder->second * disjoint_complete))
             {
@@ -19635,6 +18666,7 @@ namespace Legion {
                 continue;
             }
             to_untrack.insert(it->first, overlap);
+            untrack_mask |= overlap; 
             it.filter(overlap);
             if (!it->second)
             {
@@ -19647,6 +18679,8 @@ namespace Legion {
               it->first->add_base_resource_ref(VERSION_MANAGER_REF);
           }
         }
+        if (!!untrack_mask && !refinement_subscriptions.empty())
+          filter_refinement_subscriptions(untrack_mask, subscribers);
         if (!to_delete.empty())
         {
           for (std::vector<EquivalenceSet*>::const_iterator it =
@@ -19689,9 +18723,90 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void VersionManager::filter_refinement_subscriptions(const FieldMask &mask,
+                 LegionMap<AddressSpaceID,SubscriberInvalidations> &subscribers)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(subscribers.empty());
+#endif
+      for (LegionMap<AddressSpaceID,FieldMaskSet<EqSetTracker> >::iterator 
+            ait = refinement_subscriptions.begin(); 
+            ait != refinement_subscriptions.end(); /*nothing*/)
+      {
+        const FieldMask space_overlap = ait->second.get_valid_mask() & mask;
+        if (!space_overlap)
+        {
+          ait++;
+          continue;
+        }
+        SubscriberInvalidations &to_untrack = subscribers[ait->first];
+        to_untrack.delete_all = true;
+        if (space_overlap != ait->second.get_valid_mask())
+        {
+          std::vector<EqSetTracker*> to_delete;
+          for (FieldMaskSet<EqSetTracker>::iterator it =
+                ait->second.begin(); it != ait->second.end(); it++)
+          {
+            const FieldMask overlap = it->second & space_overlap;
+            if (!overlap)
+              continue;
+            to_untrack.subscribers.insert(it->first, overlap);
+            it.filter(overlap);
+            if (!it->second)
+            {
+              to_delete.push_back(it->first);
+              if (!to_untrack.delete_all)
+                to_untrack.finished.push_back(it->first);
+            }
+            else if (to_untrack.delete_all)
+            {
+              to_untrack.delete_all = false;
+              if (to_untrack.subscribers.size() > 1)
+              {
+                to_untrack.finished.reserve(to_untrack.subscribers.size() - 1);
+                for (FieldMaskSet<EqSetTracker>::const_iterator sit =
+                      to_untrack.subscribers.begin(); sit !=
+                      to_untrack.subscribers.end(); sit++)
+                {
+                  if (sit->first == it->first)
+                    continue;
+                  to_untrack.finished.push_back(sit->first);
+                }
+              }
+            }
+          }
+          for (std::vector<EqSetTracker*>::const_iterator it =
+                to_delete.begin(); it != to_delete.end(); it++)
+            ait->second.erase(*it);
+          if (ait->second.empty())
+          {
+            LegionMap<AddressSpaceID,FieldMaskSet<EqSetTracker> >::iterator
+              delete_it = ait++;
+            refinement_subscriptions.erase(delete_it);
+          }
+          else
+          {
+            ait->second.tighten_valid_mask();
+            ait++;
+          }
+        }
+        else
+        {
+          to_untrack.subscribers.swap(ait->second);
+          LegionMap<AddressSpaceID,FieldMaskSet<EqSetTracker> >::iterator
+            delete_it = ait++;
+          refinement_subscriptions.erase(delete_it);
+        }
+      }
+    }
+
+    //--------------------------------------------------------------------------
     void VersionManager::merge(VersionManager &src, 
                                std::set<RegionTreeNode*> &to_traverse,
-                               FieldMaskSet<EquivalenceSet> &to_untrack)
+                               FieldMaskSet<EquivalenceSet> &to_untrack,
+                               LegionMap<AddressSpaceID,
+                                SubscriberInvalidations> &subscribers)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -19700,6 +18815,7 @@ namespace Legion {
 #endif
       if (!src.equivalence_sets.empty())
       {
+        FieldMask untrack_mask;
         for (FieldMaskSet<EquivalenceSet>::iterator it = 
               src.equivalence_sets.begin(); it != 
               src.equivalence_sets.end(); it++)
@@ -19714,6 +18830,7 @@ namespace Legion {
           assert(!(it->second - src.disjoint_complete));
 #endif
           to_untrack.insert(it->first, it->second);
+          untrack_mask |= it->second; 
           // Figure out whether we've already recorded this equivalence set
           FieldMaskSet<EquivalenceSet>::iterator finder = 
             equivalence_sets.find(it->first);
@@ -19736,6 +18853,8 @@ namespace Legion {
             // References flow back
             equivalence_sets.insert(it->first, it->second);
         }
+        if (!!untrack_mask && !refinement_subscriptions.empty())
+            filter_refinement_subscriptions(untrack_mask, subscribers);
         src.equivalence_sets.clear();
       }
       disjoint_complete |= src.disjoint_complete;
@@ -19759,7 +18878,9 @@ namespace Legion {
     //--------------------------------------------------------------------------
     void VersionManager::swap(VersionManager &src,
                               std::set<RegionTreeNode*> &to_traverse,
-                              FieldMaskSet<EquivalenceSet> &to_untrack)
+                              FieldMaskSet<EquivalenceSet> &to_untrack,
+                              LegionMap<AddressSpaceID,
+                                SubscriberInvalidations> &subscribers)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -19773,6 +18894,7 @@ namespace Legion {
       src.disjoint_complete.clear();
       if (!src.equivalence_sets.empty())
       {
+        FieldMask untrack_mask;
         for (FieldMaskSet<EquivalenceSet>::iterator it = 
               src.equivalence_sets.begin(); it != 
               src.equivalence_sets.end(); it++)
@@ -19790,7 +18912,10 @@ namespace Legion {
           if (!equivalence_sets.insert(it->first, it->second))
             assert(false); // should never already be there
           to_untrack.insert(it->first, it->second);
+          untrack_mask |= it->second;
         }
+        if (!!untrack_mask && !refinement_subscriptions.empty())
+          filter_refinement_subscriptions(untrack_mask, subscribers);
         src.equivalence_sets.clear();
       }
       disjoint_complete_children.swap(src.disjoint_complete_children);
@@ -19804,6 +18929,8 @@ namespace Legion {
     void VersionManager::pack_manager(Serializer &rez, const bool invalidate,
                           std::map<LegionColor,RegionTreeNode*> &to_traverse,
                           FieldMaskSet<EquivalenceSet> &to_untrack,
+                          LegionMap<AddressSpaceID,
+                            SubscriberInvalidations> &subscribers,
                           std::vector<DistributedCollectable*> &to_remove)
     //--------------------------------------------------------------------------
     {
@@ -19816,6 +18943,7 @@ namespace Legion {
       {
         const FieldMask eq_overlap = 
           equivalence_sets.get_valid_mask() & disjoint_complete;
+        FieldMask untrack_mask;
         if (eq_overlap == disjoint_complete)
         {
           // We're sending all the equivalence sets
@@ -19835,6 +18963,7 @@ namespace Legion {
               if (to_untrack.insert(it->first, it->second))
                 it->first->add_base_resource_ref(VERSION_MANAGER_REF);
               it->first->remove_base_valid_ref(DISJOINT_COMPLETE_REF);
+              untrack_mask |= it->second; 
             }
           }
         }
@@ -19864,6 +18993,7 @@ namespace Legion {
                 if (to_untrack.insert(it->first, it->second))
                   it->first->add_base_resource_ref(VERSION_MANAGER_REF);
                 it->first->remove_base_valid_ref(DISJOINT_COMPLETE_REF);
+                untrack_mask |= it->second;
               }
             }
           }
@@ -19889,6 +19019,8 @@ namespace Legion {
               delete it->first;
           }
         }
+        if (!!untrack_mask && !refinement_subscriptions.empty())
+          filter_refinement_subscriptions(untrack_mask, subscribers);
       }
       else
         rez.serialize<size_t>(0);

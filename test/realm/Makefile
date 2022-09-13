@@ -35,7 +35,7 @@ GEN_GPU_SRC	:=				# .cu files
 INC_FLAGS	?=
 CC_FLAGS	?=
 NVCC_FLAGS	?=
-HIPCC_FLAGS     ?=
+HIPCC_FLAGS	?=
 GASNET_FLAGS	?=
 LD_FLAGS	?=
 
@@ -62,9 +62,11 @@ TESTS += alltoall
 TESTS += simple_reduce
 TESTS += realm_reinit
 TESTS += sparse_construct
+TESTS += memmodel
+TESTS += extres_alias
 
 # can set arguments to be passed to a test when running
-TESTARGS_ctxswitch := -ll:io 1 -t 20 -i 10000
+TESTARGS_ctxswitch := -ll:io 1 -t 30 -i 10000
 TESTARGS_proc_group := -ll:cpu 4
 TESTARGS_compqueue := -ll:cpu 4
 TESTARGS_event_subscribe := -ll:cpu 4
@@ -127,12 +129,12 @@ memspeed : memspeed_gpu.o
 simple_reduce : simple_reduce_gpu.o
 
 ifeq ($(strip $(HIP_TARGET)),ROCM)
-%.o : %.cpp $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
+%.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
 	$(HIPCC) -o $@ -c $< $(INC_FLAGS) $(HIPCC_FLAGS)
 endif
 ifeq ($(strip $(HIP_TARGET)),CUDA)
 %.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
-        $(NVCC) -o $@ -c $< $(INC_FLAGS) $(NVCC_FLAGS)
+	$(NVCC) -o $@ -c $< $(INC_FLAGS) $(NVCC_FLAGS)
 endif
 endif
 

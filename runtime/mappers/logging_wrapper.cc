@@ -20,21 +20,23 @@
 
 using namespace Legion::Mapping::Utilities;
 
-Realm::Logger log_maplog("mapper");
+Legion::Logger log_maplog("mapper");
 
 namespace Legion {
 namespace Mapping {
 
 class MessageBuffer {
  public:
-  MessageBuffer(MapperRuntime* _runtime, const MapperContext _ctx)
-      : runtime(_runtime), ctx(_ctx) {
+  MessageBuffer(MapperRuntime* _runtime,
+                const MapperContext _ctx,
+                Legion::Logger* _logger)
+      : runtime(_runtime), ctx(_ctx), logger(_logger) {
     // Do nothing;
   }
   ~MessageBuffer() {
     for (std::vector<std::stringstream*>::iterator it = lines.begin();
          it != lines.end(); ++it) {
-      log_maplog.info() << (*it)->str();
+      logger->info() << (*it)->str();
       delete(*it);
     }
   }
@@ -52,8 +54,20 @@ class MessageBuffer {
       line() << "      " << to_string(runtime, ctx, *it);
     }
   }
+  void report(const RegionRequirement& req,
+              const PhysicalInstance& inst,
+              unsigned req_idx) {
+    line() << "    " << to_string(runtime, ctx, req, req_idx);
+    line() << "      " << to_string(runtime, ctx, inst);
+  }
   void report(const std::vector<RegionRequirement>& reqs,
               const std::vector<std::vector<PhysicalInstance> >& instances) {
+    for (size_t idx = 0; idx < reqs.size(); ++idx) {
+      report(reqs[idx], instances[idx], idx);
+    }
+  }
+  void report(const std::vector<RegionRequirement>& reqs,
+              const std::vector<PhysicalInstance>& instances) {
     for (size_t idx = 0; idx < reqs.size(); ++idx) {
       report(reqs[idx], instances[idx], idx);
     }
@@ -74,12 +88,15 @@ class MessageBuffer {
  private:
   MapperRuntime* const runtime;
   const MapperContext ctx;
+  Logger* logger;
   std::vector<std::stringstream*> lines;
 };
 
-LoggingWrapper::LoggingWrapper(Mapper* mapper)
-    : ForwardingMapper(mapper) {
-  MessageBuffer buf(runtime, NULL);
+LoggingWrapper::LoggingWrapper(Mapper* mapper, Logger* _logger)
+    : ForwardingMapper(mapper),
+      logger(_logger != NULL ? _logger : &log_maplog) {
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, NULL, logger);
   Machine machine = Machine::get_machine();
   AddressSpace rank = Processor::get_executing_processor().address_space();
   buf.line() << "Memories on rank " << rank << ":";
@@ -112,18 +129,54 @@ LoggingWrapper::~LoggingWrapper() {
 }
 
 #ifndef NO_LEGION_CONTROL_REPLICATION
+template <typename OPERATION>
+void LoggingWrapper::select_sharding_functor_impl(
+                              const MapperContext ctx,
+                              const OPERATION& op,
+                              const SelectShardingFunctorInput& input,
+                              SelectShardingFunctorOutput& output) {
+  mapper->select_sharding_functor(ctx, op, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
+  buf.line() << "SELECT_SHARDING_FUNCTOR for "
+             << to_string(runtime, ctx, op, false /*include_index_point*/);
+  ShardingFunctor* functor =
+    Runtime::get_sharding_functor(output.chosen_functor);
+  Domain point_space =
+    op.is_index_space
+    ? op.index_domain
+    : Domain(op.index_point, op.index_point);
+  Domain sharding_space =
+    (op.sharding_space != IndexSpace::NO_SPACE)
+    ? runtime->get_index_space_domain(ctx, op.sharding_space)
+    : point_space;
+  size_t num_shards = input.shard_mapping.size();
+  std::vector<std::vector<DomainPoint>> points_per_shard(num_shards);
+  for (Domain::DomainPointIterator it(point_space); it; ++it) {
+    ShardID shard = functor->shard(*it, sharding_space, num_shards);
+    points_per_shard[shard].push_back(*it);
+  }
+  for (size_t shard = 0; shard < num_shards; ++shard) {
+    std::stringstream& ss = buf.line();
+    ss << "  " << shard << " <-";
+    for (const DomainPoint& p : points_per_shard[shard]) {
+      ss << " " << p;
+    }
+  }
+}
+
 void LoggingWrapper::map_replicate_task(const MapperContext ctx,
                                         const Task& task,
                                         const MapTaskInput& input,
                                         const MapTaskOutput& default_output,
                                         MapReplicateTaskOutput& output) {
-  MessageBuffer buf(runtime, ctx);
+  mapper->map_replicate_task(ctx, task, input, default_output, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
   buf.line() << "MAP_REPLICATE_TASK for "
-             << to_string(runtime, ctx, task, false /*include_index_point*/)
-             << " <" << task.get_unique_id() << ">";
+             << to_string(runtime, ctx, task, false /*include_index_point*/);
   buf.line() << "  INPUT:";
   buf.report(task.regions, input.valid_instances);
-  mapper->map_replicate_task(ctx, task, input, default_output, output);
   buf.line() << "  OUTPUT:";
   for (unsigned i = 0; i < output.task_mappings.size(); ++i) {
     std::stringstream& ss = buf.line();
@@ -140,34 +193,15 @@ void LoggingWrapper::select_sharding_functor(
                               const Task& task,
                               const SelectShardingFunctorInput& input,
                               SelectShardingFunctorOutput& output) {
-  MessageBuffer buf(runtime, ctx);
-  buf.line() << "SELECT_SHARDING_FUNCTOR for "
-             << to_string(runtime, ctx, task, false /*include_index_point*/)
-             << " <" << task.get_unique_id() << ">";
-  mapper->select_sharding_functor(ctx, task, input, output);
-  ShardingFunctor* functor =
-    Runtime::get_sharding_functor(output.chosen_functor);
-  Domain point_space =
-    task.is_index_space
-    ? task.index_domain
-    : Domain(task.index_point, task.index_point);
-  Domain sharding_space =
-    (task.sharding_space != IndexSpace::NO_SPACE)
-    ? runtime->get_index_space_domain(ctx, task.sharding_space)
-    : point_space;
-  size_t num_shards = input.shard_mapping.size();
-  std::vector<std::vector<DomainPoint>> points_per_shard(num_shards);
-  for (Domain::DomainPointIterator it(point_space); it; ++it) {
-    ShardID shard = functor->shard(*it, sharding_space, num_shards);
-    points_per_shard[shard].push_back(*it);
-  }
-  for (size_t shard = 0; shard < num_shards; ++shard) {
-    std::stringstream& ss = buf.line();
-    ss << "  " << shard << " <-";
-    for (const DomainPoint& p : points_per_shard[shard]) {
-      ss << " " << p;
-    }
-  }
+  select_sharding_functor_impl(ctx, task, input, output);
+}
+
+void LoggingWrapper::select_sharding_functor(
+                              const MapperContext ctx,
+                              const Copy& copy,
+                              const SelectShardingFunctorInput& input,
+                              SelectShardingFunctorOutput& output) {
+  select_sharding_functor_impl(ctx, copy, input, output);
 }
 #endif // NO_LEGION_CONTROL_REPLICATION
 
@@ -175,12 +209,12 @@ void LoggingWrapper::slice_task(const MapperContext ctx,
                                 const Task& task,
                                 const SliceTaskInput& input,
                                 SliceTaskOutput& output) {
-  MessageBuffer buf(runtime, ctx);
-  buf.line() << "SLICE_TASK for "
-             << to_string(runtime, ctx, task, false /*include_index_point*/)
-             << " <" << task.get_unique_id() << ">";
-  buf.line() << "  INPUT: " << to_string(runtime, ctx, input.domain);
   mapper->slice_task(ctx, task, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
+  buf.line() << "SLICE_TASK for "
+             << to_string(runtime, ctx, task, false /*include_index_point*/);
+  buf.line() << "  INPUT: " << to_string(runtime, ctx, input.domain);
   buf.line() << "  OUTPUT:";
   for (std::vector<TaskSlice>::const_iterator it = output.slices.begin();
        it != output.slices.end(); ++it) {
@@ -193,12 +227,12 @@ void LoggingWrapper::map_task(const MapperContext ctx,
                               const Task& task,
                               const MapTaskInput& input,
                               MapTaskOutput& output) {
-  MessageBuffer buf(runtime, ctx);
-  buf.line() << "MAP_TASK for " << to_string(runtime, ctx, task)
-             << " <" << task.get_unique_id() << ">";
+  mapper->map_task(ctx, task, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
+  buf.line() << "MAP_TASK for " << to_string(runtime, ctx, task);
   buf.line() << "  INPUT:";
   buf.report(task.regions, input.valid_instances);
-  mapper->map_task(ctx, task, input, output);
   buf.report(task, output);
 }
 
@@ -206,16 +240,16 @@ void LoggingWrapper::select_task_sources(const MapperContext ctx,
                                          const Task& task,
                                          const SelectTaskSrcInput& input,
                                          SelectTaskSrcOutput& output) {
-  MessageBuffer buf(runtime, ctx);
-  buf.line() << "SELECT_TASK_SOURCES for " << to_string(runtime, ctx, task)
-             << " <" << task.get_unique_id() << ">";
+  mapper->select_task_sources(ctx, task, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
+  buf.line() << "SELECT_TASK_SOURCES for " << to_string(runtime, ctx, task);
   buf.line() << "  INPUT:";
   buf.report(task.regions[input.region_req_index],
              input.source_instances,
              input.region_req_index);
   buf.line() << "  TARGET:";
   buf.line() << "    " << to_string(runtime, ctx, input.target);
-  mapper->select_task_sources(ctx, task, input, output);
   buf.line() << "  OUTPUT:";
   for (std::deque<PhysicalInstance>::iterator it =
          output.chosen_ranking.begin();
@@ -228,13 +262,15 @@ void LoggingWrapper::map_inline(const MapperContext ctx,
                                 const InlineMapping& inline_op,
                                 const MapInlineInput& input,
                                 MapInlineOutput& output) {
-  MessageBuffer buf(runtime, ctx);
-  buf.line() << "MAP_INLINE in "
-             << to_string(runtime, ctx, *(inline_op.get_parent_task()))
-             << " <" << inline_op.get_unique_id() << ">";
+  mapper->map_inline(ctx, inline_op, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
+  buf.line() << "MAP_INLINE for "
+             << to_string(runtime, ctx, inline_op)
+             << " in "
+             << to_string(runtime, ctx, *(inline_op.get_parent_task()));
   buf.line() << "  INPUT:";
   buf.report(inline_op.requirement, input.valid_instances, 0);
-  mapper->map_inline(ctx, inline_op, input, output);
   buf.line() << "  OUTPUT:";
   buf.report(inline_op.requirement, output.chosen_instances, 0);
 }
@@ -243,15 +279,71 @@ void LoggingWrapper::select_inline_sources(const MapperContext ctx,
                                            const InlineMapping& inline_op,
                                            const SelectInlineSrcInput& input,
                                            SelectInlineSrcOutput& output) {
-  MessageBuffer buf(runtime, ctx);
+  mapper->select_inline_sources(ctx, inline_op, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
   buf.line() << "SELECT_INLINE_SOURCES in "
-             << to_string(runtime, ctx, *(inline_op.get_parent_task()))
-             << " <" << inline_op.get_unique_id() << ">";
+             << to_string(runtime, ctx, inline_op)
+             << " in "
+             << to_string(runtime, ctx, *(inline_op.get_parent_task()));
   buf.line() << "  INPUT:";
   buf.report(inline_op.requirement, input.source_instances, 0);
   buf.line() << "  TARGET:";
   buf.line() << "      " << to_string(runtime, ctx, input.target);
-  mapper->select_inline_sources(ctx, inline_op, input, output);
+  buf.line() << "  OUTPUT:";
+  for (std::deque<PhysicalInstance>::iterator it =
+         output.chosen_ranking.begin();
+       it != output.chosen_ranking.end(); ++it) {
+    buf.line() << "      " << to_string(runtime, ctx, *it);
+  }
+}
+
+void LoggingWrapper::map_copy(const MapperContext ctx,
+                              const Copy& copy,
+                              const MapCopyInput& input,
+                              MapCopyOutput& output) {
+  mapper->map_copy(ctx, copy, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
+  buf.line() << "MAP_COPY for " << to_string(runtime, ctx, copy);
+  buf.line() << "  INPUT SRC:";
+  buf.report(copy.src_requirements, input.src_instances);
+  buf.line() << "  INPUT SRC_INDIRECT:";
+  buf.report(copy.src_indirect_requirements, input.src_indirect_instances);
+  buf.line() << "  INPUT DST_INDIRECT:";
+  buf.report(copy.dst_indirect_requirements, input.dst_indirect_instances);
+  buf.line() << "  INPUT DST:";
+  buf.report(copy.dst_requirements, input.dst_instances);
+  buf.line() << "  OUTPUT SRC:";
+  buf.report(copy.src_requirements, output.src_instances);
+  buf.line() << "  OUTPUT SRC_INDIRECT:";
+  buf.report(copy.src_indirect_requirements, output.src_indirect_instances);
+  buf.line() << "  OUTPUT DST_INDIRECT:";
+  buf.report(copy.dst_indirect_requirements, output.dst_indirect_instances);
+  buf.line() << "  OUTPUT DST:";
+  buf.report(copy.dst_requirements, output.dst_instances);
+}
+
+void LoggingWrapper::select_copy_sources(const MapperContext ctx,
+                                         const Copy& copy,
+                                         const SelectCopySrcInput& input,
+                                         SelectCopySrcOutput& output) {
+  mapper->select_copy_sources(ctx, copy, input, output);
+  if (!logger->want_info()) return;
+  MessageBuffer buf(runtime, ctx, logger);
+  buf.line() << "SELECT_COPY_SOURCES for " << to_string(runtime, ctx, copy)
+             << " "
+             << (input.is_src ? "SRC" : input.is_dst ? "DST" :
+                 input.is_src_indirect ? "SRC_INDIRECT" : "DST_INDIRECT");
+  buf.line() << "  INPUT:";
+  buf.report((input.is_src ? copy.src_requirements :
+              input.is_dst ? copy.dst_requirements :
+              input.is_src_indirect ? copy.src_indirect_requirements :
+              copy.dst_indirect_requirements)[input.region_req_index],
+             input.source_instances,
+             input.region_req_index);
+  buf.line() << "  TARGET:";
+  buf.line() << "    " << to_string(runtime, ctx, input.target);
   buf.line() << "  OUTPUT:";
   for (std::deque<PhysicalInstance>::iterator it =
          output.chosen_ranking.begin();

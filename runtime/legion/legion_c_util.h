@@ -149,6 +149,7 @@ namespace Legion {
       NEW_OPAQUE_WRAPPER(legion_mapper_context_t, Mapping::MapperContext);
       typedef std::map<FieldID, const char *> FieldMap;
       NEW_OPAQUE_WRAPPER(legion_field_map_t, FieldMap *);
+      NEW_OPAQUE_WRAPPER(legion_point_transform_functor_t, PointTransformFunctor *);
 #undef NEW_OPAQUE_WRAPPER
 #ifdef __ICC
 // icpc complains about "error #858: type qualifier on return type is meaningless"
@@ -721,6 +722,26 @@ namespace Legion {
       virtual const char* get_task_name(void) const {
         assert(false);
         return NULL;
+      }
+      virtual Domain get_slice_domain(void) const {
+        assert(false);
+        return Domain::NO_DOMAIN;
+      }
+      virtual ShardID get_shard_id(void) const {
+        assert(false);
+        return 0;
+      }
+      virtual size_t get_total_shards(void) const {
+        assert(false);
+        return 1;
+      };
+      virtual DomainPoint get_shard_point(void) const {
+        assert(false);
+        return DomainPoint();
+      };
+      virtual Domain get_shard_domain(void) const {
+        assert(false);
+        return Domain();
       }
     };
 };

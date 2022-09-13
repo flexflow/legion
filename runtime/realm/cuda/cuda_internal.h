@@ -512,6 +512,7 @@ namespace Realm {
 
       void create_processor(RuntimeImpl *runtime, size_t stack_size);
       void create_fb_memory(RuntimeImpl *runtime, size_t size, size_t ib_size);
+      void create_dynamic_fb_memory(RuntimeImpl *runtime, size_t max_size);
 
       void create_dma_channels(Realm::RuntimeImpl *r);
 
@@ -754,6 +755,20 @@ namespace Realm {
       Realm::CoreReservation *core_rsrv;
     };
 
+    // this can be attached to any MemoryImpl if the underlying memory is
+    //  guaranteed to belong to a given CUcontext - this will allow that
+    //  context's processor and dma channels to work with it
+    // the creator is expected to know what CUcontext they want but need
+    //  not know which GPU object that corresponds to
+    class CudaDeviceMemoryInfo : public ModuleSpecificInfo
+    {
+    public:
+      CudaDeviceMemoryInfo(CUcontext _context);
+
+      CUcontext context;
+      GPU *gpu;
+    };
+
     class GPUFBMemory : public LocalManagedMemory {
     public:
       GPUFBMemory(Memory _me, GPU *_gpu, CUdeviceptr _base, size_t _size);
@@ -766,10 +781,65 @@ namespace Realm {
 
       virtual void *get_direct_ptr(off_t offset, size_t size);
 
+      // GPUFBMemory supports ExternalCudaMemoryResource and
+      //  ExternalCudaArrayResource
+      virtual bool attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                      size_t& inst_offset);
+      virtual void unregister_external_resource(RegionInstanceImpl *inst);
+
+      // for re-registration purposes, generate an ExternalInstanceResource *
+      //  (if possible) for a given instance, or a subset of one
+      virtual ExternalInstanceResource *generate_resource_info(RegionInstanceImpl *inst,
+							       const IndexSpaceGeneric *subspace,
+							       span<const FieldID> fields,
+							       bool read_only);
+
     public:
       GPU *gpu;
       CUdeviceptr base;
       NetworkSegment local_segment;
+    };
+
+    class GPUDynamicFBMemory : public MemoryImpl {
+    public:
+      GPUDynamicFBMemory(Memory _me, GPU *_gpu, size_t _max_size);
+
+      virtual ~GPUDynamicFBMemory(void);
+
+      // deferred allocation not supported
+      virtual AllocationResult allocate_storage_immediate(RegionInstanceImpl *inst,
+							  bool need_alloc_result,
+							  bool poisoned,
+							  TimeLimit work_until);
+
+      virtual void release_storage_immediate(RegionInstanceImpl *inst,
+					     bool poisoned,
+					     TimeLimit work_until);
+
+      // these work, but they are SLOW
+      virtual void get_bytes(off_t offset, void *dst, size_t size);
+      virtual void put_bytes(off_t offset, const void *src, size_t size);
+
+      virtual void *get_direct_ptr(off_t offset, size_t size);
+
+      // GPUDynamicFBMemory supports ExternalCudaMemoryResource and
+      //  ExternalCudaArrayResource
+      virtual bool attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                      size_t& inst_offset);
+      virtual void unregister_external_resource(RegionInstanceImpl *inst);
+
+      // for re-registration purposes, generate an ExternalInstanceResource *
+      //  (if possible) for a given instance, or a subset of one
+      virtual ExternalInstanceResource *generate_resource_info(RegionInstanceImpl *inst,
+							       const IndexSpaceGeneric *subspace,
+							       span<const FieldID> fields,
+							       bool read_only);
+
+    public:
+      GPU *gpu;
+      Mutex mutex;
+      size_t cur_size;
+      std::map<RegionInstance, std::pair<CUdeviceptr, size_t> > alloc_bases;
     };
 
     class GPUZCMemory : public LocalManagedMemory {
@@ -785,6 +855,18 @@ namespace Realm {
       virtual void put_bytes(off_t offset, const void *src, size_t size);
 
       virtual void *get_direct_ptr(off_t offset, size_t size);
+
+      // GPUZCMemory supports ExternalCudaPinnedHostResource
+      virtual bool attempt_register_external_resource(RegionInstanceImpl *inst,
+                                                      size_t& inst_offset);
+      virtual void unregister_external_resource(RegionInstanceImpl *inst);
+
+      // for re-registration purposes, generate an ExternalInstanceResource *
+      //  (if possible) for a given instance, or a subset of one
+      virtual ExternalInstanceResource *generate_resource_info(RegionInstanceImpl *inst,
+							       const IndexSpaceGeneric *subspace,
+							       span<const FieldID> fields,
+							       bool read_only);
 
     public:
       CUdeviceptr gpu_base;
@@ -837,6 +919,30 @@ namespace Realm {
       size_t write_offset, write_size;
     };
 
+    class MemSpecificCudaArray : public MemSpecificInfo {
+    public:
+      MemSpecificCudaArray(CUarray _array);
+      virtual ~MemSpecificCudaArray();
+
+      CUarray array;
+    };
+
+    class AddressInfoCudaArray : public TransferIterator::AddressInfoCustom {
+    public:
+      virtual int set_rect(const RegionInstanceImpl *inst,
+                           const InstanceLayoutPieceBase *piece,
+                           size_t field_size, size_t field_offset,
+                           int ndims,
+                           const int64_t lo[/*ndims*/],
+                           const int64_t hi[/*ndims*/],
+                           const int order[/*ndims*/]);
+
+      CUarray array;
+      int dim;
+      size_t pos[3];
+      size_t width_in_bytes, height, depth;
+    };
+
     class GPUChannel;
 
     class GPUXferDes : public XferDes {
@@ -873,7 +979,8 @@ namespace Realm {
 				       const std::vector<XferDesPortInfo>& outputs_info,
 				       int priority,
 				       XferDesRedopInfo redop_info,
-				       const void *fill_data, size_t fill_size);
+				       const void *fill_data, size_t fill_size,
+                                       size_t fill_total);
 
       long submit(Request** requests, long nr);
 
@@ -891,7 +998,8 @@ namespace Realm {
 		     const std::vector<XferDesPortInfo>& inputs_info,
 		     const std::vector<XferDesPortInfo>& outputs_info,
 		     int _priority,
-		     const void *_fill_data, size_t _fill_size);
+		     const void *_fill_data, size_t _fill_size,
+                     size_t _fill_total);
 
       long get_requests(Request** requests, long nr);
 
@@ -915,7 +1023,8 @@ namespace Realm {
 				       const std::vector<XferDesPortInfo>& outputs_info,
 				       int priority,
 				       XferDesRedopInfo redop_info,
-				       const void *fill_data, size_t fill_size);
+				       const void *fill_data, size_t fill_size,
+                                       size_t fill_total);
 
       long submit(Request** requests, long nr);
 
@@ -983,7 +1092,8 @@ namespace Realm {
 				       const std::vector<XferDesPortInfo>& outputs_info,
 				       int priority,
 				       XferDesRedopInfo redop_info,
-				       const void *fill_data, size_t fill_size);
+				       const void *fill_data, size_t fill_size,
+                                       size_t fill_total);
 
       long submit(Request** requests, long nr);
 
@@ -1061,6 +1171,7 @@ namespace Realm {
   #define CUDA_RUNTIME_FNPTR(name) (name ## _fnptr)
 
   #define CUDA_DRIVER_APIS(__op__) \
+    __op__(cuModuleGetFunction);   \
     __op__(cuCtxEnablePeerAccess); \
     __op__(cuCtxGetFlags); \
     __op__(cuCtxGetStreamPriorityRange); \
@@ -1093,7 +1204,9 @@ namespace Realm {
     __op__(cuMemcpy3DAsync); \
     __op__(cuMemcpyAsync); \
     __op__(cuMemcpyDtoDAsync); \
+    __op__(cuMemcpyDtoH); \
     __op__(cuMemcpyDtoHAsync); \
+    __op__(cuMemcpyHtoD); \
     __op__(cuMemcpyHtoDAsync); \
     __op__(cuMemFreeHost); \
     __op__(cuMemFree); \

@@ -13,6 +13,9 @@
  * limitations under the License.
  */
 
+// Useful for IDEs
+#include "legion_domain.h"
+
 namespace Legion {
 
   //----------------------------------------------------------------------------
@@ -241,10 +244,14 @@ namespace Legion {
   //----------------------------------------------------------------------------
   {
     static_assert(std::is_same<coord_t,long long>::value,"coord_t changed");
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
     constexpr bool CHECK =
       std::is_unsigned<T>::value && (sizeof(T) >= sizeof(coord_t));
     assert(!CHECK || 
         (((unsigned long long)value) <= ((unsigned long long)LLONG_MAX)));
+#endif
+#endif
     return coord_t(value);
   }
 
@@ -749,10 +756,14 @@ namespace Legion {
   //----------------------------------------------------------------------------
   {
     static_assert(std::is_same<coord_t,long long>::value, "coord_t changed");
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
     constexpr bool CHECK =
       std::is_unsigned<T>::value && (sizeof(T) >= sizeof(coord_t));
     assert(!CHECK ||
         (((unsigned long long)value) <= ((unsigned long long)LLONG_MAX)));
+#endif
+#endif
     return coord_t(value);
   }
 
@@ -1009,8 +1020,12 @@ namespace Legion {
     DomainT<DIM,T> result;
     if (is_id > 0)
     {
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
       TypeTag type = Internal::NT_TemplateHelper::template encode_tag<DIM,T>();
       assert(is_type == type); 
+#endif
+#endif
       result.sparsity.id = is_id;
     }
     else
@@ -2070,9 +2085,15 @@ namespace Legion {
   template<typename FT>
   class Span<FT,LEGION_READ_ONLY> {
   public:
-    class iterator : 
-      public std::iterator<std::random_access_iterator_tag,FT> {
+    class iterator {
     public:
+      // explicitly set iterator traits
+      typedef std::random_access_iterator_tag iterator_category;
+      typedef FT value_type;
+      typedef std::ptrdiff_t difference_type;
+      typedef FT *pointer;
+      typedef FT& reference;
+
       iterator(void) : ptr(NULL), stride(0) { } 
     private:
       iterator(const uint8_t *p, size_t s) : ptr(p), stride(s) { }
@@ -2131,9 +2152,15 @@ namespace Legion {
       const uint8_t *ptr;
       size_t stride;
     };
-    class reverse_iterator : 
-      public std::iterator<std::random_access_iterator_tag,FT> {
+    class reverse_iterator {
     public:
+      // explicitly set iterator traits
+      typedef std::random_access_iterator_tag iterator_category;
+      typedef FT value_type;
+      typedef std::ptrdiff_t difference_type;
+      typedef FT *pointer;
+      typedef FT& reference;
+
       reverse_iterator(void) : ptr(NULL), stride(0) { } 
     private:
       reverse_iterator(const uint8_t *p, size_t s) : ptr(p), stride(s) { }
