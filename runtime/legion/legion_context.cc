@@ -2629,7 +2629,7 @@ namespace Legion {
       IndexSpaceNode *launch_node = runtime->forest->get_node(launch_space);
       FutureMapImpl *result = new FutureMapImpl(this, runtime,
           launch_node, runtime->get_available_distributed_id(),
-          context_index, runtime->address_space, RtEvent::NO_RT_EVENT);
+          context_index, runtime->address_space, ApEvent::NO_AP_EVENT);
       if (launcher.predicate_false_future.impl != NULL)
       {
         FutureInstance *canonical = 
@@ -6466,7 +6466,7 @@ namespace Legion {
       const DistributedID did = runtime->get_available_distributed_id();
       IndexSpaceNode *launch_node = runtime->forest->get_node(space);
       FutureMapImpl *impl = new FutureMapImpl(this, runtime, launch_node, did,
-          total_children_count++, runtime->address_space, RtEvent::NO_RT_EVENT);
+          total_children_count++, runtime->address_space, ApEvent::NO_AP_EVENT);
       LocalReferenceMutator mutator;
       for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
             data.begin(); it != data.end(); it++)
@@ -6519,9 +6519,8 @@ namespace Legion {
             "does not match the volume of the domain (%zd) for the future map "
             "in task %s (UID %lld)", futures.size(), launch_node->get_volume(),
             get_task_name(), get_unique_id())
-      FutureMapImpl *impl = new FutureMapImpl(this, creation_op, 
-                            RtEvent::NO_RT_EVENT, launch_node, runtime, 
-                            did, runtime->address_space);
+      FutureMapImpl *impl = new FutureMapImpl(this, creation_op, launch_node,
+                                        runtime, did, runtime->address_space);
       add_to_dependence_queue(creation_op);
       impl->set_all_futures(futures);
       return FutureMap(impl);
@@ -7878,31 +7877,35 @@ namespace Legion {
       std::vector<RtEvent> ready_events(vector_width);
       size_t num_ready =
         comp_queue.pop_events(&ready_events.front(), vector_width);
-#ifdef DEBUG_LEGION
-      assert(num_ready > 0);
-#endif
-      ready_events.resize(num_ready);
-      std::sort(ready_events.begin(), ready_events.end());
-      // Find the entries
-      for (typename std::list<QueueEntry<T> >::iterator it =
-            queue.begin(); it != queue.end(); /*nothing*/)
+      // Realm permits spurious wake-ups sometimes on completion queues where
+      // no events are actually ready. The number of times this can happen is
+      // bounded by the number of events that are added into the queue so we
+      // don't need to worry about indefinite starvation.
+      if (num_ready > 0)
       {
-        std::vector<RtEvent>::iterator finder = 
-          std::lower_bound(ready_events.begin(), ready_events.end(), it->ready);
-        if ((finder != ready_events.end()) && (*finder == it->ready))
+        ready_events.resize(num_ready);
+        std::sort(ready_events.begin(), ready_events.end());
+        // Find the entries
+        for (typename std::list<QueueEntry<T> >::iterator it =
+              queue.begin(); it != queue.end(); /*nothing*/)
         {
-          to_perform.push_back(it->op);
-          it = queue.erase(it);
-          ready_events.erase(finder);
-          if (ready_events.empty())
-            break;
+          std::vector<RtEvent>::iterator finder = 
+            std::lower_bound(ready_events.begin(),ready_events.end(),it->ready);
+          if ((finder != ready_events.end()) && (*finder == it->ready))
+          {
+            to_perform.push_back(it->op);
+            it = queue.erase(it);
+            ready_events.erase(finder);
+            if (ready_events.empty())
+              break;
+          }
+          else
+            it++;
         }
-        else
-          it++;
-      }
 #ifdef DEBUG_LEGION
-      assert(ready_events.empty());
+        assert(ready_events.empty());
 #endif
+      }
       if (!queue.empty())
       {
         next_ready = RtEvent(comp_queue.get_nonempty_event());
@@ -8329,32 +8332,36 @@ namespace Legion {
         else // We can just use the comp queue to get the ready events
           num_ready = post_task_comp_queue.pop_events(
             &ready_events.front(), ready_events.size());
-#ifdef DEBUG_LEGION
-        assert(num_ready > 0);
-#endif
-        // Find all the entries for all the ready events
-        for (std::list<PostTaskArgs>::iterator it = post_task_queue.begin();
-              it != post_task_queue.end(); /*nothing*/)
+        // Realm permits spurious wake-ups sometimes on completion queues where
+        // no events are actually ready. The number of times this can happen is
+        // bounded by the number of events that are added into the queue so we
+        // don't need to worry about indefinite starvation.
+        if (num_ready > 0)
         {
-          bool found = false;
-          for (unsigned idx = 0; idx < num_ready; idx++)
+          // Find all the entries for all the ready events
+          for (std::list<PostTaskArgs>::iterator it = post_task_queue.begin();
+                it != post_task_queue.end(); /*nothing*/)
           {
-            if (it->wait_on == ready_events[idx])
+            bool found = false;
+            for (unsigned idx = 0; idx < num_ready; idx++)
             {
-              found = true;
-              break;
+              if (it->wait_on == ready_events[idx])
+              {
+                found = true;
+                break;
+              }
             }
+            if (found)
+            {
+              to_perform.push_back(*it);
+              it = post_task_queue.erase(it);
+              // Check to see if we're done early
+              if (to_perform.size() == num_ready)
+                break;
+            }
+            else
+              it++;
           }
-          if (found)
-          {
-            to_perform.push_back(*it);
-            it = post_task_queue.erase(it);
-            // Check to see if we're done early
-            if (to_perform.size() == num_ready)
-              break;
-          }
-          else
-            it++;
         }
         if (!post_task_queue.empty())
         {
@@ -11594,6 +11601,7 @@ namespace Legion {
       attach_reduce_barrier = manager->get_attach_reduce_barrier();
       dependent_partition_barrier = manager->get_dependent_partition_barrier();
       semantic_attach_barrier = manager->get_semantic_attach_barrier();
+      future_map_wait_barrier = manager->get_future_map_wait_barrier();
       inorder_barrier = manager->get_inorder_barrier();
 #ifdef DEBUG_LEGION_COLLECTIVES
       collective_check_barrier = manager->get_collective_check_barrier();
@@ -14510,8 +14518,8 @@ namespace Legion {
       const DistributedID did = runtime->get_available_distributed_id();
       IndexSpaceNode *color_node = runtime->forest->get_node(color_space); 
       FutureMap future_map(new FutureMapImpl(this, runtime, color_node, did,
-                              total_children_count++, runtime->address_space,
-                              RtEvent::NO_RT_EVENT, true/*reg now*/));
+            total_children_count++, runtime->address_space, 
+            ApEvent::NO_AP_EVENT, true/*reg now*/));
       // Prune out every N-th one for this shard and then pass through
       // the subset to the normal InnerContext variation of this
       ShardID shard = 0;
@@ -17440,10 +17448,9 @@ namespace Legion {
       FutureMap result;
       if (collective)
       {
-        ReplFutureMapImpl *repl_impl =
-          new ReplFutureMapImpl(this, runtime, domain_node, domain_node,
-              runtime->get_available_distributed_id(), total_children_count++,
-              runtime->address_space, RtEvent::NO_RT_EVENT);
+        ReplFutureMapImpl *repl_impl = new ReplFutureMapImpl(this, runtime,
+          domain_node, domain_node, runtime->get_available_distributed_id(),
+          total_children_count++, runtime->address_space, ApEvent::NO_AP_EVENT);
         result = FutureMap(repl_impl);
         ShardingFunction *function = NULL;
         if (implicit)
@@ -17479,9 +17486,8 @@ namespace Legion {
             "in task %s (UID %lld)", data.size(), domain_node->get_volume(),
             get_task_name(), get_unique_id())
         const DistributedID did = runtime->get_available_distributed_id();
-        result = FutureMap(
-            new FutureMapImpl(this, runtime, domain_node, did,
-         total_children_count++, runtime->address_space, RtEvent::NO_RT_EVENT));
+        result = FutureMap(new FutureMapImpl(this, runtime, domain_node, did,
+         total_children_count++, runtime->address_space, ApEvent::NO_AP_EVENT));
       }
       LocalReferenceMutator mutator;
       for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
@@ -17544,9 +17550,8 @@ namespace Legion {
       {
         // Make one future map for all the shards
         ReplFutureMapImpl *repl_impl = new ReplFutureMapImpl(this, creation_op,
-                            RtEvent::NO_RT_EVENT, domain_node, domain_node,
-                            runtime, runtime->get_available_distributed_id(),
-                            runtime->address_space);
+            domain_node, domain_node, runtime,
+            runtime->get_available_distributed_id(), runtime->address_space);
         result = FutureMap(repl_impl);
         ShardingFunction *function = NULL;
         if (implicit)
@@ -17584,9 +17589,8 @@ namespace Legion {
             "in task %s (UID %lld)", futures.size(), domain_node->get_volume(),
             get_task_name(), get_unique_id())
         const DistributedID did = runtime->get_available_distributed_id();
-        result = FutureMap(
-            new FutureMapImpl(this, creation_op, RtEvent::NO_RT_EVENT,
-                      domain_node, runtime, did, runtime->address_space));
+        result = FutureMap(new FutureMapImpl(this, creation_op, domain_node,
+                                      runtime, did, runtime->address_space));
       }
       add_to_dependence_queue(creation_op);
       result.impl->set_all_futures(futures);
@@ -20775,6 +20779,15 @@ namespace Legion {
     {
       const RtBarrier result = detach_resource_barrier;
       advance_logical_barrier(detach_resource_barrier, total_shards);
+      return result;
+    }
+
+    //--------------------------------------------------------------------------
+    ApBarrier ReplicateContext::get_next_future_map_wait_barrier(void)
+    //--------------------------------------------------------------------------
+    {
+      const ApBarrier result = future_map_wait_barrier;
+      advance_replicate_barrier(future_map_wait_barrier, total_shards);
       return result;
     }
 
