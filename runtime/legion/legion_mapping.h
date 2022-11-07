@@ -527,7 +527,9 @@ namespace Legion {
        * field. This will allow the task to be re-ordered ahead of lower
        * priority tasks and behind higher priority tasks by the runtime
        * as it's being dynamically scheduled. Negative priorities are lower
-       * and positive priorities are higher.
+       * and positive priorities are higher. The 'copy_fill_priority' field
+       * can control the probabilities of any copies and fills performed on 
+       * behalf of the task. 
        *
        * The mapper can request profiling information about this
        * task as part of its execution. The mapper can specify a task
@@ -558,7 +560,8 @@ namespace Legion {
         std::vector<Processor>                      target_procs;
         VariantID                                   chosen_variant; // = 0 
         TaskPriority                                task_priority;  // = 0
-        TaskPriority                                profiling_priority;
+        RealmPriority                               copy_fill_priority;
+        RealmPriority                               profiling_priority;
         ProfilingRequest                            task_prof_requests;
         ProfilingRequest                            copy_prof_requests;
         bool                                        postmap_task; // = false
@@ -810,7 +813,8 @@ namespace Legion {
        * in the vector that has space for each field. If this is a read-only 
        * inline mapping, the mapper can request that the runtime not track the 
        * validity of the instance(s) used for the inline mapping by setting 
-       * 'track_valid_region' to 'false'. 
+       * 'track_valid_region' to 'false'. The 'copy_fill_priority' field will
+       * control the priorities of any copies or fills needed for the mapping.
        *
        * The mapper can also request profiling information for any copies 
        * issued by filling in the 'profiling_requests' set. The mapper can 
@@ -823,8 +827,9 @@ namespace Legion {
       struct MapInlineOutput {
         std::vector<PhysicalInstance>           chosen_instances;
         std::vector<PhysicalInstance>           source_instances;
+        RealmPriority                           copy_fill_priority;
         ProfilingRequest                        profiling_requests;
-        TaskPriority                            profiling_priority;
+        RealmPriority                           profiling_priority;
         bool                                    track_valid_region; /*=true*/
       };
       //------------------------------------------------------------------------
@@ -915,7 +920,9 @@ namespace Legion {
        * can optionally select to use a virtual mapping if the copy is not
        * a reduction copy. If the copy is a gather or a scatter copy then 
        * the mapper must also create instances for the source and/or destination
-       * indirection region requirements as well.
+       * indirection region requirements as well. The mapper can specify the
+       * priority of any copies or fills required for executing this copy
+       * operation using the 'copy_fill_priority' field.
        *
        * The mapper can optionally choose not to have the runtime track any
        * of the instances made for the copy as valid for the source or 
@@ -956,7 +963,8 @@ namespace Legion {
         std::set<unsigned>                            untracked_valid_ind_srcs;
         std::set<unsigned>                            untracked_valid_ind_dsts;
         ProfilingRequest                              profiling_requests;
-        TaskPriority                                  profiling_priority;
+        RealmPriority                                 profiling_priority;
+        RealmPriority                                 copy_fill_priority;
         bool                                          compute_preimages;
       };
       //------------------------------------------------------------------------
@@ -1087,7 +1095,7 @@ namespace Legion {
       struct MapCloseOutput {
         std::vector<PhysicalInstance>               chosen_instances;
         ProfilingRequest                            profiling_requests;
-        TaskPriority                                profiling_priority;
+        RealmPriority                               profiling_priority;
       };
 
       /**
@@ -1187,7 +1195,8 @@ namespace Legion {
       };
       struct MapAcquireOutput {
         ProfilingRequest                            profiling_requests;
-        TaskPriority                                profiling_priority;
+        RealmPriority                               profiling_priority;
+        RealmPriority                               copy_fill_priority;
       };
       //------------------------------------------------------------------------
       virtual void map_acquire(const MapperContext         ctx,
@@ -1264,7 +1273,9 @@ namespace Legion {
        * they are explicitly associated with a physical instance when they
        * are launched by the application. Thereforefore the only output
        * currently neecessary is whether the mapper would like profiling
-       * information for this release operation.
+       * information for this release operation. The mapper can control
+       * the priority of any copies or fills needed for flushing data back
+       * to the restricted instances using the 'copy_fill_priority' field.
        */
       struct MapReleaseInput {
         // Nothing
@@ -1272,7 +1283,8 @@ namespace Legion {
       struct MapReleaseOutput {
         std::vector<PhysicalInstance>               source_instances;
         ProfilingRequest                            profiling_requests;
-        TaskPriority                                profiling_priority;
+        RealmPriority                               profiling_priority;
+        RealmPriority                               copy_fill_priority;
       };
       //------------------------------------------------------------------------
       virtual void map_release(const MapperContext         ctx,
@@ -1427,7 +1439,9 @@ namespace Legion {
        * partitioning operations have read-only privileges on their input
        * regions, the mapper can request that the runtime not track the 
        * validity of the instance(s) used for the dependent parititoning
-       * operation by setting 'track_valid_region' to 'false'. 
+       * operation by setting 'track_valid_region' to 'false'. The 
+       * 'copy_fill_priority' field specifies the priorities of any copy
+       * or fills needed to bring the 'chosen_instances' up to date.
        *
        * The mapper can also request profiling information for any copies 
        * issued by filling in the 'profiling_requests' set. The mapper can 
@@ -1441,7 +1455,8 @@ namespace Legion {
         std::vector<PhysicalInstance>           chosen_instances;
         std::vector<PhysicalInstance>           source_instances;
         ProfilingRequest                        profiling_requests;
-        TaskPriority                            profiling_priority;
+        RealmPriority                           profiling_priority;
+        RealmPriority                           copy_fill_priority;
         bool                                    track_valid_region; /*=true*/
       };
       //------------------------------------------------------------------------
@@ -2238,46 +2253,58 @@ namespace Legion {
       //------------------------------------------------------------------------
       IndexSpace create_index_space(MapperContext ctx, 
                                     const Domain &bounds,
-                                    TypeTag type_tag = 0) const;
+                                    TypeTag type_tag = 0,
+                                    const char *provenance = NULL) const;
       // Template version
       template<int DIM, typename COORD_T>
       IndexSpaceT<DIM,COORD_T> create_index_space(MapperContext ctx,
-                                            Rect<DIM,COORD_T> bounds) const;
+                                           Rect<DIM,COORD_T> bounds,
+                                           const char *provenance = NULL) const;
 
       IndexSpace create_index_space(MapperContext ctx, 
-                                  const std::vector<DomainPoint> &points) const;
+                                    const std::vector<DomainPoint> &points,
+                                    const char *provenance = NULL) const;
       // Template version
       template<int DIM, typename COORD_T>
       IndexSpaceT<DIM,COORD_T> create_index_space(MapperContext ctx,
-                    const std::vector<Point<DIM,COORD_T> > &points) const;
+                    const std::vector<Point<DIM,COORD_T> > &points,
+                    const char *provenance = NULL) const;
 
       IndexSpace create_index_space(MapperContext ctx,
-                                    const std::vector<Domain> &rects) const;
+                                    const std::vector<Domain> &rects,
+                                    const char *provenance = NULL) const;
       // Template version
       template<int DIM, typename COORD_T>
       IndexSpaceT<DIM,COORD_T> create_index_space(MapperContext ctx,
-                      const std::vector<Rect<DIM,COORD_T> > &rects) const;
+                      const std::vector<Rect<DIM,COORD_T> > &rects,
+                      const char *provenance = NULL) const;
 
       IndexSpace union_index_spaces(MapperContext ctx,
-                      const std::vector<IndexSpace> &sources) const;
+                      const std::vector<IndexSpace> &sources,
+                      const char *provenance = NULL) const;
       // Template version
       template<int DIM, typename COORD_T>
       IndexSpaceT<DIM,COORD_T> union_index_spaces(MapperContext ctx,
-                const std::vector<IndexSpaceT<DIM,COORD_T> > &sources) const;
+                const std::vector<IndexSpaceT<DIM,COORD_T> > &sources,
+                const char *provenance = NULL) const;
 
       IndexSpace intersect_index_spaces(MapperContext ctx,
-                      const std::vector<IndexSpace> &sources) const;
+                      const std::vector<IndexSpace> &sources,
+                      const char *provenance = NULL) const;
       // Template version
       template<int DIM, typename COORD_T>
       IndexSpaceT<DIM,COORD_T> intersect_index_spaces(MapperContext ctx,
-                const std::vector<IndexSpaceT<DIM,COORD_T> > &sources) const;
+                const std::vector<IndexSpaceT<DIM,COORD_T> > &sources,
+                const char *provenance = NULL) const;
 
       IndexSpace subtract_index_spaces(MapperContext ctx,
-                        IndexSpace left, IndexSpace right) const;
+                        IndexSpace left, IndexSpace right,
+                        const char *provenance = NULL) const;
       // Template version
       template<int DIM, typename COORD_T>
       IndexSpaceT<DIM,COORD_T> subtract_index_spaces(MapperContext ctx,
-          IndexSpaceT<DIM,COORD_T> left, IndexSpaceT<DIM,COORD_T> right) const;
+          IndexSpaceT<DIM,COORD_T> left, IndexSpaceT<DIM,COORD_T> right,
+          const char *provenance = NULL) const;
     public:
       //------------------------------------------------------------------------
       // Convenience methods for introspecting index spaces
@@ -2495,6 +2522,28 @@ namespace Legion {
         output.size = sizeof(T);
       }
     }; 
+
+    /**
+     * \class AutoLock
+     * This class allows mappers to use their own fast reservation
+     * synchronization primitives instead of relying on the mapper
+     * synchronization model to perform all the synchronization.
+     * (This is still an experimental feature and subject to change)
+     */
+    class AutoLock : public Internal::AutoLock {
+    public:
+      AutoLock(MapperContext ctx, LocalLock &r, int mode = 0, bool excl = true);
+      AutoLock(AutoLock &&rhs) = delete;
+      AutoLock(const AutoLock &rhs) = delete;
+      ~AutoLock(void) { };
+    public:
+      AutoLock& operator=(AutoLock &&rhs) = delete;
+      AutoLock& operator=(const AutoLock &rhs) = delete;
+    public:
+      void reacquire(void);
+    protected:
+      const MapperContext ctx;
+    };
 
   }; // namespace Mapping
 }; // namespace Legion

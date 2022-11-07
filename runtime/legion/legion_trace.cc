@@ -66,15 +66,18 @@ namespace Legion {
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
-    LegionTrace::LegionTrace(InnerContext *c, TraceID t, bool logical_only)
-      : ctx(c), tid(t), last_memoized(0),
-        physical_op_count(0), blocking_call_observed(false), 
+    LegionTrace::LegionTrace(InnerContext *c, TraceID t, 
+                             bool logical_only, Provenance *p)
+      : ctx(c), tid(t), begin_provenance(p), end_provenance(NULL),
+        last_memoized(0), physical_op_count(0), blocking_call_observed(false), 
         has_intermediate_ops(false), fixed(false)
     //--------------------------------------------------------------------------
     {
       state.store(LOGICAL_ONLY);
       physical_trace = logical_only ? NULL : 
         new PhysicalTrace(c->owner_task->runtime, this);
+      if (begin_provenance != NULL)
+        begin_provenance->add_reference();
     }
 
     //--------------------------------------------------------------------------
@@ -83,16 +86,24 @@ namespace Legion {
     {
       if (physical_trace != NULL)
         delete physical_trace;
+      if ((begin_provenance != NULL) && begin_provenance->remove_reference())
+        delete begin_provenance;
+      if ((end_provenance != NULL) && end_provenance->remove_reference())
+        delete end_provenance;
     }
 
     //--------------------------------------------------------------------------
-    void LegionTrace::fix_trace(void)
+    void LegionTrace::fix_trace(Provenance *provenance)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(!fixed);
+      assert(end_provenance == NULL);
 #endif
       fixed = true;
+      end_provenance = provenance;
+      if (end_provenance != NULL)
+        end_provenance->add_reference();
     }
 
     //--------------------------------------------------------------------------
@@ -229,7 +240,8 @@ namespace Legion {
         else
         {
           physical_trace->clear_cached_template();
-          current_template->issue_summary_operations(ctx, invalidator);
+          current_template->issue_summary_operations(ctx, invalidator, 
+                                                     end_provenance);
           has_intermediate_ops = false;
         }
       }
@@ -243,8 +255,8 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     StaticTrace::StaticTrace(TraceID t, InnerContext *c, bool logical_only,
-                             const std::set<RegionTreeID> *trees)
-      : LegionTrace(c, t, logical_only)
+                             Provenance *p, const std::set<RegionTreeID> *trees)
+      : LegionTrace(c, t, logical_only, p)
     //--------------------------------------------------------------------------
     {
       if (trees != NULL)
@@ -253,7 +265,7 @@ namespace Legion {
     
     //--------------------------------------------------------------------------
     StaticTrace::StaticTrace(const StaticTrace &rhs)
-      : LegionTrace(NULL, 0, true)
+      : LegionTrace(NULL, 0, true, NULL)
     //--------------------------------------------------------------------------
     {
       // should never be called
@@ -564,15 +576,16 @@ namespace Legion {
     /////////////////////////////////////////////////////////////
 
     //--------------------------------------------------------------------------
-    DynamicTrace::DynamicTrace(TraceID t, InnerContext *c, bool logical_only)
-      : LegionTrace(c, t, logical_only), tracing(true)
+    DynamicTrace::DynamicTrace(TraceID t, InnerContext *c, bool logical_only,
+                               Provenance *p)
+      : LegionTrace(c, t, logical_only, p), tracing(true)
     //--------------------------------------------------------------------------
     {
     }
 
     //--------------------------------------------------------------------------
     DynamicTrace::DynamicTrace(const DynamicTrace &rhs)
-      : LegionTrace(NULL, 0, true)
+      : LegionTrace(NULL, 0, true, NULL)
     //--------------------------------------------------------------------------
     {
       // should never be called
@@ -1213,10 +1226,10 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void TraceCaptureOp::initialize_capture(InnerContext *ctx, bool has_block,
-                                            bool remove_trace_ref)
+                                  bool remove_trace_ref, Provenance *provenance)
     //--------------------------------------------------------------------------
     {
-      initialize(ctx, EXECUTION_FENCE, false/*need future*/);
+      initialize(ctx, EXECUTION_FENCE, false/*need future*/, provenance);
 #ifdef DEBUG_LEGION
       assert(trace != NULL);
 #endif
@@ -1362,10 +1375,11 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void TraceCompleteOp::initialize_complete(InnerContext *ctx, bool has_block)
+    void TraceCompleteOp::initialize_complete(InnerContext *ctx, bool has_block,
+                                              Provenance *provenance)
     //--------------------------------------------------------------------------
     {
-      initialize(ctx, EXECUTION_FENCE, false/*need future*/);
+      initialize(ctx, EXECUTION_FENCE, false/*need future*/, provenance);
 #ifdef DEBUG_LEGION
       assert(trace != NULL);
 #endif
@@ -1580,10 +1594,11 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void TraceReplayOp::initialize_replay(InnerContext *ctx, LegionTrace *trace)
+    void TraceReplayOp::initialize_replay(InnerContext *ctx, LegionTrace *trace,
+                                          Provenance *provenance)
     //--------------------------------------------------------------------------
     {
-      initialize(ctx, EXECUTION_FENCE, false/*need future*/);
+      initialize(ctx, EXECUTION_FENCE, false/*need future*/, provenance);
 #ifdef DEBUG_LEGION
       assert(trace != NULL);
 #endif
@@ -1747,10 +1762,11 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void TraceBeginOp::initialize_begin(InnerContext *ctx, LegionTrace *trace)
+    void TraceBeginOp::initialize_begin(InnerContext *ctx, LegionTrace *trace,
+                                        Provenance *provenance)
     //--------------------------------------------------------------------------
     {
-      initialize(ctx, MAPPING_FENCE, false/*need future*/);
+      initialize(ctx, MAPPING_FENCE, false/*need future*/, provenance);
 #ifdef DEBUG_LEGION
       assert(trace != NULL);
 #endif
@@ -1826,10 +1842,11 @@ namespace Legion {
     //--------------------------------------------------------------------------
     void TraceSummaryOp::initialize_summary(InnerContext *ctx,
                                             PhysicalTemplate *tpl,
-                                            Operation *invalidator)
+                                            Operation *invalidator,
+                                            Provenance *provenance)
     //--------------------------------------------------------------------------
     {
-      initialize_operation(ctx, false/*track*/);
+      initialize_operation(ctx, false/*track*/, 0/*regions*/, provenance);
       fence_kind = MAPPING_FENCE;
       if (runtime->legion_spy_enabled)
         LegionSpy::log_fence_operation(parent_ctx->get_unique_id(),
@@ -3340,26 +3357,27 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void TraceConditionSet::remove_equivalence_sets(const FieldMask &mask,
-                                  const FieldMaskSet<EquivalenceSet> &to_filter)
+    void TraceConditionSet::invalidate_equivalence_sets(const FieldMask &mask)
     //--------------------------------------------------------------------------
     {
       AutoLock s_lock(set_lock);
+      if (!(mask - invalid_mask))
+        return;
       invalid_mask |= mask;
-      for (FieldMaskSet<EquivalenceSet>::const_iterator it =
-            to_filter.begin(); it != to_filter.end(); it++)
+      std::vector<EquivalenceSet*> to_delete;
+      for (FieldMaskSet<EquivalenceSet>::iterator it =
+            current_sets.begin(); it != current_sets.end(); it++)
       {
-        FieldMaskSet<EquivalenceSet>::iterator finder = 
-          current_sets.find(it->first);
-        if (finder == current_sets.end())
-          continue;
-        finder.filter(it->second);
-        if (!finder->second)
-        {
-          current_sets.erase(finder);
-          if (it->first->remove_base_resource_ref(TRACE_REF))
-            assert(false); // should never end up deleting this here
-        }
+        it.filter(mask);
+        if (!it->second)
+          to_delete.push_back(it->first);
+      }
+      for (std::vector<EquivalenceSet*>::const_iterator it =
+            to_delete.begin(); it != to_delete.end(); it++)
+      {
+        current_sets.erase(*it);
+        if ((*it)->remove_base_resource_ref(TRACE_REF))
+          assert(false); // should never end up deleting this here
       }
       current_sets.tighten_valid_mask();
     }
@@ -3529,8 +3547,6 @@ namespace Legion {
     void TraceConditionSet::dump_preconditions(void) const
     //--------------------------------------------------------------------------
     {
-      if (precondition_views == NULL)
-        return;
       TraceViewSet dump_view_set(forest, 0/*owner did*/,
           forest->get_tree(region->handle.get_tree_id()));
       LocalReferenceMutator mutator;
@@ -3546,8 +3562,6 @@ namespace Legion {
     void TraceConditionSet::dump_anticonditions(void) const
     //--------------------------------------------------------------------------
     {
-      if (anticondition_views == NULL)
-        return;
       TraceViewSet dump_view_set(forest, 0/*owner did*/,
           forest->get_tree(region->handle.get_tree_id()));
       LocalReferenceMutator mutator;
@@ -3563,8 +3577,6 @@ namespace Legion {
     void TraceConditionSet::dump_postconditions(void) const
     //--------------------------------------------------------------------------
     {
-      if (postcondition_views == NULL)
-        return;
       TraceViewSet dump_view_set(forest, 0/*owner did*/,
           forest->get_tree(region->handle.get_tree_id()));
       LocalReferenceMutator mutator;
@@ -4160,11 +4172,11 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void PhysicalTemplate::issue_summary_operations(
-                                  InnerContext* context, Operation *invalidator)
+          InnerContext* context, Operation *invalidator, Provenance *provenance)
     //--------------------------------------------------------------------------
     {
       TraceSummaryOp *op = trace->runtime->get_available_summary_op();
-      op->initialize_summary(context, this, invalidator);
+      op->initialize_summary(context, this, invalidator, provenance);
 #ifdef LEGION_SPY
       LegionSpy::log_summary_op_creator(op->get_unique_op_id(),
                                         invalidator->get_unique_op_id());
@@ -6248,7 +6260,10 @@ namespace Legion {
                                              RegionTreeID dst_tree_id,
 #endif
                                              ApEvent precondition,
-                                             PredEvent pred_guard)
+                                             PredEvent pred_guard,
+                                             LgEvent src_unique,
+                                             LgEvent dst_unique,
+                                             int priority)
     //--------------------------------------------------------------------------
     {
       if (!lhs.exists())
@@ -6271,7 +6286,7 @@ namespace Legion {
 #ifdef LEGION_SPY
             src_tree_id, dst_tree_id,
 #endif
-            rhs_)); 
+            rhs_, src_unique, dst_unique, priority)); 
     }
 
     //--------------------------------------------------------------------------
@@ -6287,7 +6302,9 @@ namespace Legion {
                                              RegionTreeID tree_id,
 #endif
                                              ApEvent precondition,
-                                             PredEvent pred_guard)
+                                             PredEvent pred_guard,
+                                             LgEvent unique_event,
+                                             int priority)
     //--------------------------------------------------------------------------
     {
       if (!lhs.exists())
@@ -6309,7 +6326,7 @@ namespace Legion {
 #ifdef LEGION_SPY
                                        fill_uid, handle, tree_id,
 #endif
-                                       rhs_));
+                                       rhs_, unique_event, priority));
     }
 
     //--------------------------------------------------------------------------
@@ -7281,7 +7298,9 @@ namespace Legion {
                                  RegionTreeID src_tree_id,
                                  RegionTreeID dst_tree_id,
 #endif
-                                 ApEvent precondition, PredEvent pred_guard)
+                                 ApEvent precondition, PredEvent pred_guard,
+                                 LgEvent src_unique, LgEvent dst_unique, 
+                                 int priority)
     //--------------------------------------------------------------------------
     {
       // Make sure the lhs event is local to our shard
@@ -7301,7 +7320,8 @@ namespace Legion {
 #ifdef LEGION_SPY
                                           src_tree_id, dst_tree_id,
 #endif
-                                          precondition, pred_guard); 
+                                          precondition, pred_guard,
+                                          src_unique, dst_unique, priority); 
     } 
     
     //--------------------------------------------------------------------------
@@ -7313,7 +7333,8 @@ namespace Legion {
                                  UniqueID fill_uid, FieldSpace handle,
                                  RegionTreeID tree_id,
 #endif
-                                 ApEvent precondition, PredEvent pred_guard)
+                                 ApEvent precondition, PredEvent pred_guard,
+                                 LgEvent unique_event, int priority)
     //--------------------------------------------------------------------------
     {
       // Make sure the lhs event is local to our shard
@@ -7333,7 +7354,8 @@ namespace Legion {
 #ifdef LEGION_SPY
                                           fill_uid, handle, tree_id,
 #endif
-                                          precondition, pred_guard);
+                                          precondition, pred_guard, 
+                                          unique_event, priority);
     }
 
     //--------------------------------------------------------------------------
@@ -8349,7 +8371,7 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void ShardedPhysicalTemplate::issue_summary_operations(
-                                  InnerContext *context, Operation *invalidator)
+          InnerContext *context, Operation *invalidator, Provenance *provenance)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -8359,7 +8381,7 @@ namespace Legion {
       ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(context); 
 #endif
       ReplTraceSummaryOp *op = trace->runtime->get_available_repl_summary_op();
-      op->initialize_summary(repl_ctx, this, invalidator);
+      op->initialize_summary(repl_ctx, this, invalidator, provenance);
 #ifdef LEGION_SPY
       LegionSpy::log_summary_op_creator(op->get_unique_op_id(),
                                         invalidator->get_unique_op_id());
@@ -8877,13 +8899,15 @@ namespace Legion {
 #ifdef LEGION_SPY
                          RegionTreeID src_tid, RegionTreeID dst_tid,
 #endif
-                         unsigned pi)
+                         unsigned pi, LgEvent src_uni, LgEvent dst_uni,
+                         int pr)
       : Instruction(tpl, key), lhs(l), expr(e), src_fields(s), dst_fields(d), 
         reservations(r),
 #ifdef LEGION_SPY
         src_tree_id(src_tid), dst_tree_id(dst_tid),
 #endif
-        precondition_idx(pi)
+        precondition_idx(pi), src_unique(src_uni),
+        dst_unique(dst_uni), priority(pr)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -8924,7 +8948,9 @@ namespace Legion {
 #ifdef LEGION_SPY
                                      src_tree_id, dst_tree_id,
 #endif
-                                     precondition, PredEvent::NO_PRED_EVENT);
+                                     precondition, PredEvent::NO_PRED_EVENT,
+                                     src_unique, dst_unique,
+                                     priority, true/*replay*/);
     }
 
     //--------------------------------------------------------------------------
@@ -9008,7 +9034,7 @@ namespace Legion {
       events[lhs] = executor->execute(op, PredEvent::NO_PRED_EVENT,
                                       copy_pre, src_indirect_pre,
                                       dst_indirect_pre, trace_info,
-                                      recurrent_replay);
+                                      true/*replay*/, recurrent_replay);
     }
 
     //--------------------------------------------------------------------------
@@ -9039,12 +9065,12 @@ namespace Legion {
 #ifdef LEGION_SPY
                          UniqueID uid, FieldSpace h, RegionTreeID tid,
 #endif
-                         unsigned pi)
+                         unsigned pi, LgEvent unique, int pr)
       : Instruction(tpl, key), lhs(l), expr(e), fields(f), fill_size(size),
 #ifdef LEGION_SPY
         fill_uid(uid), handle(h), tree_id(tid),
 #endif
-        precondition_idx(pi)
+        precondition_idx(pi), unique_event(unique), priority(pr)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -9086,7 +9112,8 @@ namespace Legion {
 #ifdef LEGION_SPY
                                      fill_uid, handle, tree_id,
 #endif
-                                     precondition, PredEvent::NO_PRED_EVENT);
+                                     precondition, PredEvent::NO_PRED_EVENT,
+                                     unique_event, priority, true/*replay*/);
     }
 
     //--------------------------------------------------------------------------

@@ -26,7 +26,7 @@
 #include "legion/legion_allocation.h"
 
 namespace Legion {
-  namespace Internal { 
+  namespace Internal {
 
     /**
      * \class ExternalTask
@@ -129,6 +129,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual bool has_parent_task(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
       virtual const char* get_task_name(void) const;
       virtual bool is_reducing_future(void) const;
       virtual void pack_remote_operation(Serializer &rez, AddressSpaceID target,
@@ -163,7 +164,8 @@ namespace Legion {
       void mark_stolen(void);
       void initialize_base_task(InnerContext *ctx, bool track,
             const std::vector<StaticDependence> *dependences,
-            const Predicate &p, Processor::TaskFuncID tid);
+            const Predicate &p, Processor::TaskFuncID tid,
+            Provenance *provenance);
       void check_empty_field_requirements(void);
     public:
       bool select_task_options(bool prioritize);
@@ -329,6 +331,7 @@ namespace Legion {
       virtual int get_depth(void) const;
       virtual bool has_parent_task(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
       virtual const char* get_task_name(void) const;
       virtual Domain get_slice_domain(void) const;
       virtual ShardID get_shard_id(void) const;
@@ -438,7 +441,7 @@ namespace Legion {
       RtEvent map_all_regions(MustEpochOp *must_epoch_owner,
                               const DeferMappingArgs *defer_args);
       void perform_post_mapping(const TraceInfo &trace_info);
-      void replicate_task(void);
+      void check_future_return_bounds(FutureInstance *instance) const;
     protected:
       void pack_single_task(Serializer &rez, AddressSpaceID target);
       void unpack_single_task(Deserializer &derez,
@@ -447,7 +450,7 @@ namespace Legion {
     public:
       virtual void pack_profiling_requests(Serializer &rez,
                                            std::set<RtEvent> &applied) const;
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
@@ -510,6 +513,7 @@ namespace Legion {
       void handle_remote_profiling_response(Deserializer &derez);
       static void process_remote_profiling_response(Deserializer &derez);
     public:
+      void perform_concurrent_analysis(Processor target, RtEvent precondition);
       void trigger_children_complete(ApEvent all_children_complete);
     protected:
       virtual InnerContext* initialize_inner_execution_context(VariantImpl *v,
@@ -545,6 +549,8 @@ namespace Legion {
       // It does NOT encapsulate the 'effects_complete' of this task
       // Only the actual operation completion event captures that
       ApUserEvent                           single_task_termination;
+      // An event describing the fence event for concurrent execution
+      ApEvent                               concurrent_fence_event;
       // Event recording when all "effects" are complete
       // The effects of the task include the following:
       // 1. the execution of the task
@@ -576,6 +582,7 @@ namespace Legion {
       std::vector<SingleProfilingInfo>                  profiling_info;
       RtUserEvent                                   profiling_reported;
       int                                           profiling_priority;
+      int                                           copy_fill_priority;
       std::atomic<int>                  outstanding_profiling_requests;
       std::atomic<int>                  outstanding_profiling_reported;
 #ifdef DEBUG_LEGION
@@ -619,7 +626,7 @@ namespace Legion {
       void slice_index_space(void);
       void trigger_slices(void);
       void clone_multi_from(MultiTask *task, IndexSpace is, Processor p,
-                            bool recurse, bool stealable);
+                            bool recurse, bool stealable); 
     public:
       virtual void activate(void) = 0;
       virtual void deactivate(void) = 0;
@@ -667,6 +674,10 @@ namespace Legion {
                                                  const DomainPoint &next,
                                                  RtEvent point_mapped) = 0;
     public:
+      // Support for concurrent execution of index tasks
+      inline RtEvent get_concurrent_precondition(void) const
+        { return concurrent_precondition; }
+    public:
       void pack_multi_task(Serializer &rez, AddressSpaceID target);
       void unpack_multi_task(Deserializer &derez,
                              std::set<RtEvent> &ready_events);
@@ -704,6 +715,11 @@ namespace Legion {
       // used for detecting cases where we've already mapped a mutli task
       // on the same node but moved it to a different processor
       bool first_mapping;
+    protected:
+      // Precondition for performing concurrent analyses across the points
+      RtEvent concurrent_precondition;
+      RtUserEvent concurrent_verified;
+      std::map<DomainPoint,Processor> concurrent_processors;
     protected:
       bool children_complete_invoked;
       bool children_commit_invoked;
@@ -746,6 +762,7 @@ namespace Legion {
     public:
       Future initialize_task(InnerContext *ctx,
                              const TaskLauncher &launcher,
+                             Provenance *provenance,
                              bool track = true, bool top_level=false,
                              bool implicit_top_level = false,
                              std::vector<OutputRequirement> *outputs = NULL);
@@ -868,6 +885,7 @@ namespace Legion {
       virtual bool is_reducing_future(void) const;
     public:
       virtual void trigger_dependence_analysis(void);
+      virtual void trigger_replay(void);
       virtual void report_interfering_requirements(unsigned idx1,unsigned idx2);
     public:
       virtual void resolve_false(bool speculated, bool launched);
@@ -1108,11 +1126,13 @@ namespace Legion {
       FutureMap initialize_task(InnerContext *ctx,
                                 const IndexTaskLauncher &launcher,
                                 IndexSpace launch_space,
+                                Provenance *provenance,
                                 bool track = true,
                                 std::vector<OutputRequirement> *outputs = NULL);
       Future initialize_task(InnerContext *ctx,
                              const IndexTaskLauncher &launcher,
                              IndexSpace launch_space,
+                             Provenance *provenance,
                              ReductionOpID redop,
                              bool deterministic,
                              bool track = true,
@@ -1178,7 +1198,7 @@ namespace Legion {
     public:
       virtual void pack_profiling_requests(Serializer &rez,
                                            std::set<RtEvent> &applied) const;
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
@@ -1192,6 +1212,10 @@ namespace Legion {
       // create a different type of future map for the task
       virtual FutureMapImpl* create_future_map(TaskContext *ctx,
                     IndexSpace launch_space, IndexSpace shard_space);
+      // Also virtual for control replication override
+      virtual void initialize_concurrent_analysis(void);
+      virtual RtEvent verify_concurrent_execution(const DomainPoint &point,
+                                                  Processor target);
     public:
       // Methods for supporting intra-index-space mapping dependences
       virtual RtEvent find_intra_space_dependence(const DomainPoint &point);
@@ -1267,16 +1291,16 @@ namespace Legion {
       std::vector<IndexProfilingInfo>                   profiling_info;
       RtUserEvent                                   profiling_reported;
       int                                           profiling_priority;
+      int                                           copy_fill_priority;
       std::atomic<int>                  outstanding_profiling_requests;
       std::atomic<int>                  outstanding_profiling_reported;
     protected:
       // Whether we have to do intra-task alias analysis
       bool need_intra_task_alias_analysis;
-#ifdef DEBUG_LEGION
-    protected:
       // For checking aliasing of points in debug mode only
       std::set<std::pair<unsigned,unsigned> > interfering_requirements;
       std::map<DomainPoint,std::vector<LogicalRegion> > point_requirements;
+#ifdef DEBUG_LEGION
     public:
       void check_point_requirements(
           const std::map<DomainPoint,std::vector<LogicalRegion> > &point_reqs);
@@ -1378,6 +1402,8 @@ namespace Legion {
                               std::set<RtEvent> &applied_conditions);
       void record_output_sizes(const DomainPoint &point,
                                const std::vector<OutputRegion> &output_regions);
+      RtEvent verify_concurrent_execution(const DomainPoint &point,
+                                          Processor target);
     protected:
       void trigger_slice_mapped(void);
       void trigger_slice_complete(void);
@@ -1392,16 +1418,16 @@ namespace Legion {
     public: // Privilege tracker methods
       virtual void receive_resources(size_t return_index,
               std::map<LogicalRegion,unsigned> &created_regions,
-              std::vector<LogicalRegion> &deleted_regions,
+              std::vector<DeletedRegion> &deleted_regions,
               std::set<std::pair<FieldSpace,FieldID> > &created_fields,
-              std::vector<std::pair<FieldSpace,FieldID> > &deleted_fields,
+              std::vector<DeletedField> &deleted_fields,
               std::map<FieldSpace,unsigned> &created_field_spaces,
               std::map<FieldSpace,std::set<LogicalRegion> > &latent_spaces,
-              std::vector<FieldSpace> &deleted_field_spaces,
+              std::vector<DeletedFieldSpace> &deleted_field_spaces,
               std::map<IndexSpace,unsigned> &created_index_spaces,
-              std::vector<std::pair<IndexSpace,bool> > &deleted_index_spaces,
+              std::vector<DeletedIndexSpace> &deleted_index_spaces,
               std::map<IndexPartition,unsigned> &created_partitions,
-              std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
+              std::vector<DeletedPartition> &deleted_partitions,
               std::set<RtEvent> &preconditions);
     public:
       // From MemoizableOp
@@ -1431,6 +1457,7 @@ namespace Legion {
                                        AddressSpaceID source, Runtime *rutime);
       static void handle_collective_instance_response(Deserializer &derez,
                                                       Runtime *runtime);
+      static void handle_verify_concurrent_execution(Deserializer &derez);
     protected:
       friend class IndexTask;
       friend class PointTask;

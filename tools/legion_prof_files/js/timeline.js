@@ -407,14 +407,42 @@ function getMouseOver() {
     total = parseFloat(total.toFixed(3))
     delay = parseFloat(delay.toFixed(3))
     var initiation = "";
+    var provenance = "";
     // Insert texts in reverse order
+    if (d.op_id != -1) {
+        provenance = state.operations[d.op_id].provenance;
+    }
+    if ((provenance == "") && (d.initiation != undefined) && (d.initiation != "")) {
+        provenance = state.operations[d.initiation].provenance;
+    }
+
+    if (provenance != "") {
+        // provenance strings are in this form:
+        // "(human readable string)$(key1),(value1)|(key2),(value2)|..."
+        var tokens = provenance.split("\$");
+
+        // If the provenance string doesn't match the format,
+        // we render it verbatim.
+        if (tokens.length != 2) descTexts.push("Provenance: " + provenance);
+        else {
+            var to_parse = tokens[1];
+            var pairs = to_parse.split("|");
+            pairs.forEach(pair => {
+                var tokens = pair.split(",");
+                descTexts.push(tokens[0] + ": " + tokens[1]);
+            });
+        }
+    }
+    // Add a line break to separate provenance info from the rest
+    descTexts.push(" ");
+
     if ((d.ready != undefined) && (d.ready != "") && (delay != 0)) {
-	descTexts.push("Ready State: " + get_time_str(delay,false));
+      descTexts.push("Ready State: " + get_time_str(delay,false));
     }
     descTexts.push("End:   " + get_time_str(d.end, false));
     descTexts.push("Start: " + get_time_str(d.start, false));
     descTexts.push("Total: " + get_time_str(total, true));
-    if ((d.initiation != undefined) && d.initiation != "") {
+    if ((d.initiation != undefined) && d.initiation != "" && d.initiation != 0) {
       descTexts.push("Initiator: " + state.operations[d.initiation].desc);
     } 
 
@@ -2302,6 +2330,8 @@ function load_proc_timeline(proc) {
         var out = d.out === "" ? [] : JSON.parse(d.out)
         var children = d.children === "" ? [] : JSON.parse(d.children)
         var parents = d.parents === "" ? [] : JSON.parse(d.parents)
+        // if op_id is empty, then we set it to -1
+        var op_id = d.op_id == "" ? -1 : parseInt(d.op_id)
         if (total > state.resolution) {
             return {
                 id: i,
@@ -2319,6 +2349,7 @@ function load_proc_timeline(proc) {
                 children: children,
                 parents: parents,
                 prof_uid: d.prof_uid,
+                op_id: op_id,
                 proc: proc
             };
         }

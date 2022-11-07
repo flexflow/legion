@@ -335,32 +335,6 @@ namespace Legion {
     };
 
     /**
-     * \class BarrierExchangeCollective
-     * A class for exchanging sets of barriers between shards
-     */
-    template<typename BAR>
-    class BarrierExchangeCollective : public AllGatherCollective<false> {
-    public:
-      BarrierExchangeCollective(ReplicateContext *ctx, size_t window_size, 
-                                typename std::vector<BAR> &barriers,
-                                CollectiveIndexLocation loc);
-      BarrierExchangeCollective(const BarrierExchangeCollective &rhs);
-      virtual ~BarrierExchangeCollective(void);
-    public:
-      BarrierExchangeCollective& operator=(const BarrierExchangeCollective &rs);
-    public:
-      void exchange_barriers_async(void);
-      void wait_for_barrier_exchange(void);
-    public:
-      virtual void pack_collective_stage(Serializer &rez, int stage);
-      virtual void unpack_collective_stage(Deserializer &derez, int stage);
-    protected:
-      const size_t window_size;
-      std::vector<BAR> &barriers;
-      std::map<unsigned,BAR> local_barriers;
-    };
-
-    /**
      * \class ValueBroadcast
      * This will broadcast a value of any type that can be 
      * trivially serialized to all the shards.
@@ -1121,7 +1095,7 @@ namespace Legion {
       virtual void unpack_collective_stage(Deserializer &derez, int stage);
     public:
       void exchange_counts(size_t count);
-      IndexSpaceNode* get_launch_space(void);
+      IndexSpaceNode* get_launch_space(Provenance *provenance);
     protected:
       std::vector<size_t> sizes;
       unsigned nonzeros;
@@ -1262,6 +1236,50 @@ namespace Legion {
     };
 
     /**
+     * \class ConcurrentExecutionValidator
+     * This collective helps to validate the safety of the execution of
+     * concurrent index space task launches to ensure that all the point
+     * tasks have been mapped to different processors.
+     */
+    class ConcurrentExecutionValidator : public GatherCollective {
+    public:
+      ConcurrentExecutionValidator(ReplIndexTask *owner,
+          CollectiveIndexLocation loc, ReplicateContext *ctx, ShardID target);
+      virtual ~ConcurrentExecutionValidator(void) { }
+    public:
+      virtual void pack_collective(Serializer &rez) const;
+      virtual void unpack_collective(Deserializer &derez);
+      virtual RtEvent post_gather(void);
+    public:
+      void perform_validation(std::map<DomainPoint,Processor> &processors);
+    public:
+      ReplIndexTask *const owner;
+    protected:
+      std::map<DomainPoint,Processor> concurrent_processors;
+    };
+
+    /**
+     * \class ElideCloseExchange
+     * This class supports an exchange of symbolic projection trees to
+     * determine if it is safe to elide a close operation in the logical
+     * dependence analysis.
+     */
+    class ElideCloseExchange : public AllGatherCollective<false> {
+    public:
+      ElideCloseExchange(ReplicateContext *ctx, CollectiveIndexLocation loc,
+                         ProjectionTree *t)
+        : AllGatherCollective<false>(ctx, 
+            ctx->get_next_collective_index(loc, true/*logical*/)), tree(t) { }
+    public:
+      virtual void pack_collective_stage(Serializer &rez, int stage) 
+        { tree->serialize(rez); }
+      virtual void unpack_collective_stage(Deserializer &derez, int stage)
+        { tree->deserialize(derez); }
+    public:
+      ProjectionTree *const tree;
+    };
+
+    /**
      * \class SlowBarrier
      * This class creates a collective that behaves like a barrier, but is
      * probably slower than Realm phase barriers. It's useful for cases
@@ -1299,13 +1317,12 @@ namespace Legion {
       virtual void deactivate(void);
     public:
       virtual void trigger_prepipeline_stage(void);
+      virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
       virtual void trigger_replay(void);
       virtual void resolve_false(bool speculated, bool launched);
       virtual void shard_off(RtEvent mapped_precondition);
       virtual void prepare_map_must_epoch(void);
-      virtual void handle_future_size(size_t return_type_size,
-          bool has_return_type_size, std::set<RtEvent> &applied_events);
     public:
       // Override these so we can broadcast the future result
       virtual void trigger_task_complete(void);
@@ -1314,11 +1331,10 @@ namespace Legion {
       void set_sharding_function(ShardingID functor,ShardingFunction *function);
     protected:
       ShardID owner_shard;
+      IndexSpaceNode *launch_space;
       ShardingID sharding_functor;
       ShardingFunction *sharding_function;
-      CollectiveID mapped_collective_id; // id for mapped event broadcast
       CollectiveID future_collective_id; // id for the future broadcast 
-      SingleTaskTree *mapped_collective;
       FutureBroadcast *future_collective;
 #ifdef DEBUG_LEGION
     public:
@@ -1363,6 +1379,9 @@ namespace Legion {
       void set_sharding_function(ShardingID functor,ShardingFunction *function);
       virtual FutureMapImpl* create_future_map(TaskContext *ctx,
                     IndexSpace launch_space, IndexSpace shard_space);
+      virtual void initialize_concurrent_analysis(void);
+      virtual RtEvent verify_concurrent_execution(const DomainPoint &point,
+                                                  Processor target);
       void select_sharding_function(ReplicateContext *repl_ctx);
     public:
       // Methods for supporting intra-index-space mapping dependences
@@ -1383,6 +1402,10 @@ namespace Legion {
       std::map<unsigned,SizeMap> local_output_sizes;
     protected:
       std::set<std::pair<DomainPoint,ShardID> > unique_intra_space_deps;
+    protected:
+      // For setting up concurrent execution
+      RtBarrier concurrent_prebar, concurrent_postbar;
+      ConcurrentExecutionValidator *concurrent_validator;
 #ifdef DEBUG_LEGION
     public:
       inline void set_sharding_collective(ShardingGatherCollective *collective)
@@ -1485,16 +1508,15 @@ namespace Legion {
       virtual void deactivate(void);
     public:
       virtual void trigger_prepipeline_stage(void);
+      virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
       virtual void trigger_replay(void);
       virtual void resolve_false(bool speculated, bool launched);
     protected:
+      IndexSpaceNode *launch_space;
       ShardingID sharding_functor;
       ShardingFunction *sharding_function;
       MapperManager *mapper;
-    public:
-      CollectiveID mapped_collective_id;
-      ShardEventTree *mapped_collective;
 #ifdef DEBUG_LEGION
     public:
       inline void set_sharding_collective(ShardingGatherCollective *collective)
@@ -1559,15 +1581,14 @@ namespace Legion {
       virtual void deactivate(void);
     public:
       virtual void trigger_prepipeline_stage(void);
+      virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
       virtual void trigger_replay(void);
       virtual void resolve_false(bool speculated, bool launched);
     protected:
+      IndexSpaceNode *launch_space;
       ShardingID sharding_functor;
       ShardingFunction *sharding_function;
-    public:
-      CollectiveID mapped_collective_id;
-      ShardEventTree *mapped_collective; 
 #ifdef DEBUG_LEGION
     public:
       inline void set_sharding_collective(ShardingGatherCollective *collective)
@@ -1612,9 +1633,7 @@ namespace Legion {
                                                  const DomainPoint &next,
                                                  RtEvent point_mapped);
     public:
-      void initialize_replication(ReplicateContext *ctx,
-                                  std::vector<ApBarrier> &indirection_bars,
-                                  unsigned &next_indirection_index);
+      void initialize_replication(ReplicateContext *ctx);
     protected:
       ShardingID sharding_functor;
       ShardingFunction *sharding_function;
@@ -1803,7 +1822,7 @@ namespace Legion {
                                IndexSpace color_space, FieldID fid, 
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
-                               RtBarrier &dependent_partition_bar);
+                               Provenance *provenance);
       void initialize_by_image(ReplicateContext *ctx,
 #ifndef SHARD_BY_IMAGE
                                ShardID target,
@@ -1814,7 +1833,7 @@ namespace Legion {
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
                                ShardID shard, size_t total_shards,
-                               RtBarrier &dependent_partition_bar);
+                               Provenance *provenance);
       void initialize_by_image_range(ReplicateContext *ctx,
 #ifndef SHARD_BY_IMAGE
                                ShardID target,
@@ -1825,26 +1844,26 @@ namespace Legion {
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
                                ShardID shard, size_t total_shards,
-                               RtBarrier &dependent_partition_bar);
+                               Provenance *provenance);
       void initialize_by_preimage(ReplicateContext *ctx, ShardID target,
                                ApEvent ready_event, IndexPartition pid,
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
-                               RtBarrier &dependent_partition_bar);
+                               Provenance *provenance);
       void initialize_by_preimage_range(ReplicateContext *ctx, ShardID target, 
                                ApEvent ready_event, IndexPartition pid,
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
-                               RtBarrier &dependent_partition_bar);
+                               Provenance *provenance);
       void initialize_by_association(ReplicateContext *ctx,LogicalRegion domain,
                                LogicalRegion domain_parent, FieldID fid,
                                IndexSpace range, MapperID id, MappingTagID tag,
                                const UntypedBuffer &marg,
-                               RtBarrier &dependent_partition_bar);
+                               Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -1885,6 +1904,7 @@ namespace Legion {
       virtual void deactivate(void);
       virtual FutureMapImpl* create_future_map(TaskContext *ctx,
                       IndexSpace domain, IndexSpace shard_space);
+      virtual RtEvent get_concurrent_analysis_precondition(void);
       virtual void instantiate_tasks(InnerContext *ctx,
                                      const MustEpochLauncher &launcher);
       virtual MapperManager* invoke_mapper(void);
@@ -1895,16 +1915,16 @@ namespace Legion {
       virtual void trigger_commit(void);
       virtual void receive_resources(size_t return_index,
               std::map<LogicalRegion,unsigned> &created_regions,
-              std::vector<LogicalRegion> &deleted_regions,
+              std::vector<DeletedRegion> &deleted_regions,
               std::set<std::pair<FieldSpace,FieldID> > &created_fields,
-              std::vector<std::pair<FieldSpace,FieldID> > &deleted_fields,
+              std::vector<DeletedField> &deleted_fields,
               std::map<FieldSpace,unsigned> &created_field_spaces,
               std::map<FieldSpace,std::set<LogicalRegion> > &latent_spaces,
-              std::vector<FieldSpace> &deleted_field_spaces,
+              std::vector<DeletedFieldSpace> &deleted_field_spaces,
               std::map<IndexSpace,unsigned> &created_index_spaces,
-              std::vector<std::pair<IndexSpace,bool> > &deleted_index_spaces,
+              std::vector<DeletedIndexSpace> &deleted_index_spaces,
               std::map<IndexPartition,unsigned> &created_partitions,
-              std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
+              std::vector<DeletedPartition> &deleted_partitions,
               std::set<RtEvent> &preconditions);
     public:
       void map_replicate_tasks(void) const;
@@ -1923,6 +1943,7 @@ namespace Legion {
       MustEpochCompletionExchange *completion_exchange;
       std::set<SingleTask*> shard_single_tasks;
       RtBarrier resource_return_barrier;
+      RtBarrier concurrent_prebar, concurrent_postbar;
 #ifdef DEBUG_LEGION
     public:
       inline void set_sharding_collective(ShardingGatherCollective *collective)
@@ -2052,7 +2073,7 @@ namespace Legion {
     public:
       ReplMapOp& operator=(const ReplMapOp &rhs);
     public:
-      void initialize_replication(ReplicateContext *ctx, RtBarrier &inline_bar);
+      void initialize_replication(ReplicateContext *ctx);
       RtEvent complete_inline_mapping(RtEvent mapping_applied);
     public:
       virtual void activate(void);
@@ -2079,10 +2100,7 @@ namespace Legion {
     public:
       ReplAttachOp& operator=(const ReplAttachOp &rhs);
     public:
-      void initialize_replication(ReplicateContext *ctx,
-                                  RtBarrier &resource_bar,
-                                  ApBarrier &broadcast_bar,
-                                  ApBarrier &reduce_bar);
+      void initialize_replication(ReplicateContext *ctx);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2119,6 +2137,7 @@ namespace Legion {
       virtual void deactivate(void);
       virtual void trigger_prepipeline_stage(void);
       virtual void trigger_dependence_analysis(void);
+      virtual void trigger_ready(void);
       virtual void check_point_requirements(
                     const std::vector<IndexSpace> &spaces);
       virtual bool are_all_direct_children(bool local);
@@ -2216,7 +2235,7 @@ namespace Legion {
     public:
       ReplTraceCaptureOp& operator=(const ReplTraceCaptureOp &rhs);
     public:
-      void initialize_capture(ReplicateContext *ctx, 
+      void initialize_capture(ReplicateContext *ctx, Provenance *provenance,
           bool has_blocking_call, bool remove_trace_reference);
     public:
       virtual void activate(void);
@@ -2254,7 +2273,8 @@ namespace Legion {
     public:
       ReplTraceCompleteOp& operator=(const ReplTraceCompleteOp &rhs);
     public:
-      void initialize_complete(ReplicateContext *ctx, bool has_blocking_call);
+      void initialize_complete(ReplicateContext *ctx, Provenance *provenance,
+                               bool has_blocking_call);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2292,7 +2312,8 @@ namespace Legion {
     public:
       ReplTraceReplayOp& operator=(const ReplTraceReplayOp &rhs);
     public:
-      void initialize_replay(ReplicateContext *ctx, LegionTrace *trace);
+      void initialize_replay(ReplicateContext *ctx, LegionTrace *trace,
+                             Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2327,7 +2348,8 @@ namespace Legion {
     public:
       ReplTraceBeginOp& operator=(const ReplTraceBeginOp &rhs);
     public:
-      void initialize_begin(ReplicateContext *ctx, LegionTrace *trace);
+      void initialize_begin(ReplicateContext *ctx, LegionTrace *trace,
+                            Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2351,7 +2373,8 @@ namespace Legion {
     public:
       void initialize_summary(ReplicateContext *ctx,
                               ShardedPhysicalTemplate *tpl,
-                              Operation *invalidator);
+                              Operation *invalidator,
+                              Provenance *provenance);
       void perform_logging(void);
     public:
       virtual void activate(void);
@@ -2489,57 +2512,6 @@ namespace Legion {
     public:
       inline RtBarrier get_shard_task_barrier(void) const
         { return shard_task_barrier; }
-      inline ApBarrier get_pending_partition_barrier(void) const
-        { return pending_partition_barrier; }
-      inline RtBarrier get_creation_barrier(void) const
-        { return creation_barrier; }
-      inline RtBarrier get_deletion_ready_barrier(void) const
-        { return deletion_ready_barrier; }
-      inline RtBarrier get_deletion_mapping_barrier(void) const
-        { return deletion_mapping_barrier; }
-      inline RtBarrier get_deletion_execution_barrier(void) const
-        { return deletion_mapping_barrier; }
-      inline RtBarrier get_inline_mapping_barrier(void) const
-        { return inline_mapping_barrier; }
-      inline RtBarrier get_attach_resource_barrier(void) const
-        { return attach_resource_barrier; }
-      inline RtBarrier get_detach_resource_barrier(void) const
-        { return detach_resource_barrier; }
-      inline RtBarrier get_mapping_fence_barrier(void) const
-        { return mapping_fence_barrier; }
-      inline RtBarrier get_resource_return_barrier(void) const
-        { return resource_return_barrier; }
-      inline RtBarrier get_trace_recording_barrier(void) const
-        { return trace_recording_barrier; }
-      inline RtBarrier get_summary_fence_barrier(void) const
-        { return summary_fence_barrier; }
-      inline ApBarrier get_execution_fence_barrier(void) const
-        { return execution_fence_barrier; }
-      inline ApBarrier get_attach_broadcast_barrier(void) const
-        { return attach_broadcast_barrier; }
-      inline ApBarrier get_attach_reduce_barrier(void) const
-        { return attach_reduce_barrier; }
-      inline RtBarrier get_dependent_partition_barrier(void) const
-        { return dependent_partition_barrier; }
-      inline RtBarrier get_semantic_attach_barrier(void) const
-        { return semantic_attach_barrier; }
-      inline ApBarrier get_future_map_wait_barrier(void) const
-        { return future_map_wait_barrier; }
-      inline ApBarrier get_inorder_barrier(void) const
-        { return inorder_barrier; }
-      inline RtBarrier get_callback_barrier(void) const
-        { return callback_barrier; }
-#ifdef DEBUG_LEGION_COLLECTIVES
-      inline RtBarrier get_collective_check_barrier(void) const
-        { return collective_check_barrier; }
-      inline RtBarrier get_logical_check_barrier(void) const
-        { return logical_check_barrier; }
-      inline RtBarrier get_close_check_barrier(void) const
-        { return close_check_barrier; }
-      inline RtBarrier get_refinement_check_barrier(void) const
-        { return refinement_check_barrier; }
-#endif
-    public:
       inline ShardMapping& get_mapping(void) const
         { return *address_spaces; }
       inline CollectiveMapping& get_collective_mapping(void) const
@@ -2645,7 +2617,8 @@ namespace Legion {
                                       AddressSpaceID source);
       static void handle_barrier_refresh(Deserializer &derez, Runtime *rt);
     public:
-      ShardingFunction* find_sharding_function(ShardingID sid);
+      ShardingFunction* find_sharding_function(ShardingID sid, 
+                                               bool skip_check = false);
     public:
 #ifdef LEGION_USE_LIBDL
       void perform_global_registration_callbacks(
@@ -2695,32 +2668,7 @@ namespace Legion {
       std::set<RtEvent> mapping_preconditions;
     protected:
       RtBarrier shard_task_barrier;
-      ApBarrier pending_partition_barrier;
-      RtBarrier creation_barrier;
-      RtBarrier deletion_ready_barrier;
-      RtBarrier deletion_mapping_barrier;
-      RtBarrier deletion_execution_barrier;
-      RtBarrier inline_mapping_barrier;
-      RtBarrier attach_resource_barrier;
-      RtBarrier detach_resource_barrier;
-      RtBarrier mapping_fence_barrier;
-      RtBarrier resource_return_barrier;
-      RtBarrier trace_recording_barrier;
-      RtBarrier summary_fence_barrier;
-      ApBarrier execution_fence_barrier;
-      ApBarrier attach_broadcast_barrier;
-      ApBarrier attach_reduce_barrier;
-      RtBarrier dependent_partition_barrier;
-      RtBarrier semantic_attach_barrier;
-      ApBarrier future_map_wait_barrier;
-      ApBarrier inorder_barrier;
       RtBarrier callback_barrier;
-#ifdef DEBUG_LEGION_COLLECTIVES
-      RtBarrier collective_check_barrier;
-      RtBarrier logical_check_barrier;
-      RtBarrier close_check_barrier;
-      RtBarrier refinement_check_barrier;
-#endif
     protected:
       std::map<ShardingID,ShardingFunction*> sharding_functions;
     protected:

@@ -69,7 +69,9 @@ legion_cxx_tests = [
     ['examples/layout_constraints/transpose', []],
     ['examples/inline_tasks/inline_tasks', []],
     ['examples/local_function_tasks/local_function_tasks', []],
+    ['examples/provenance/provenance', []],
     ['examples/future_map_transforms/future_map_transforms', []],
+    ['examples/concurrent_tasks/concurrent', ['-ll:cpu', '4']],
     # Comment this test out until it works everywhere
     #['examples/implicit_top_task/implicit_top_task', []],
 
@@ -84,6 +86,10 @@ legion_cxx_tests = [
     ['test/output_requirements/output_requirements', ['-empty', '-replicate']],
     ['test/output_requirements/output_requirements', ['-empty', '-index']],
     ['test/output_requirements/output_requirements', ['-empty', '-index', '-replicate']],
+]
+
+legion_cxx_provenance_tests = [
+    ['examples/provenance/provenance', []],
 ]
 
 legion_fortran_tests = [
@@ -160,6 +166,10 @@ legion_python_cxx_tests = [
     ['bindings/python/legion_python', ['tests/pass/print_once.py', '-ll:py', '1', '-ll:cpu', '0']],
     ['bindings/python/legion_python', ['tests/pass/privileges.py', '-ll:py', '1', '-ll:cpu', '0']],
     ['bindings/python/legion_python', ['tests/pass/no_access.py', '-ll:py', '1', '-ll:cpu', '0']],
+
+    # Tests for Package Import
+    ['bindings/python/legion_python', ['-m', 'tests.pass.test_package1.a.b.c', '-ll:py', '1', '-ll:cpu', '0']],
+    ['bindings/python/legion_python', ['-m', 'tests.pass.test_package2.a.b.c', '-ll:py', '1', '-ll:cpu', '0']],
 
     # Examples
     ['examples/python_interop/python_interop', ['-ll:py', '1']],
@@ -347,6 +357,17 @@ def run_test_legion_jupyter_cxx(launcher, root_dir, tmp_dir, bin_dir, env, threa
     jupyter_test_cmd = ['jupyter', 'run', '--kernel', 'legion_kernel_nocr', jupyter_test_file]
     cmd(jupyter_test_cmd, env=env)
     cmd([make_exe, '-C', python_dir, 'clean'], env=env)
+
+def run_test_legion_provenance_cxx(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, timelimit):
+    flags = ['-lg:prof','1', '-lg:prof_logfile', 'prof_%.gz']
+    run_cxx(legion_cxx_provenance_tests, flags, launcher, root_dir, bin_dir, env, thread_count, timelimit)
+    provenance_test_dir = os.path.join(root_dir, 'examples', 'provenance')
+    test_cmd = [sys.executable, 'test.py']
+    env = dict(list(env.items()) + [
+        ('LEGION_DIR', root_dir),
+        ('TMP_DIR', tmp_dir),
+    ])
+    cmd(test_cmd, env=env, cwd=provenance_test_dir)
 
 def run_test_legion_hdf_cxx(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, timelimit):
     flags = ['-logfile', 'out_%.log']
@@ -541,6 +562,20 @@ def run_test_ctest(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, time
     cmd(args,
         env=env,
         cwd=build_dir)
+
+def run_test_legion_prof_mypy(root_dir):
+    mypy_cmd = [
+        "mypy",
+        "--disallow-any-unimported",
+        "--disallow-any-explicit",
+        "--disallow-untyped-defs",
+        "--disallow-incomplete-defs",
+        "--warn-redundant-casts",
+        "--warn-unused-ignores",
+        os.path.join(root_dir, 'tools', 'legion_prof.py'),
+    ]
+    print('Running mypy test:', cmd)
+    cmd(mypy_cmd)
 
 def hostname():
     return subprocess.check_output(['hostname']).strip()
@@ -793,11 +828,14 @@ def build_cmake(root_dir, tmp_dir, env, thread_count,
     return os.path.join(build_dir, 'bin')
 
 def build_legion_prof_rs(root_dir, tmp_dir, env):
+    legion_prof_dir = os.path.join(root_dir, 'tools', 'legion_prof_rs')
     cmd(['cargo', 'install',
          '--locked',
-         '--path', os.path.join(root_dir, 'tools', 'legion_prof_rs'),
+         '--path', legion_prof_dir,
          '--root', tmp_dir],
         env=env)
+    cmd(['cargo', 'test'], env=env, cwd=legion_prof_dir)
+    cmd(['cargo', 'fmt', '--all', '--', '--check'], env=env, cwd=legion_prof_dir)
 
 def build_regent(root_dir, env):
     cmd([os.path.join(root_dir, 'language/travis.py'), '--install-only'], env=env)
@@ -1067,8 +1105,10 @@ def run_tests(test_modules=None,
     try:
         # Build tests.
         with Stage('build'):
-            if use_prof:
+            if use_prof or use_spy:
                 build_legion_prof_rs(root_dir, tmp_dir, env)
+            if use_prof:
+                run_test_legion_prof_mypy(root_dir)
             if use_cmake:
                 bin_dir = build_cmake(
                     root_dir, tmp_dir, env, thread_count,
@@ -1090,6 +1130,8 @@ def run_tests(test_modules=None,
         if test_legion_cxx:
             with Stage('legion_cxx'):
                 run_test_legion_cxx(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, timelimit)
+                if use_prof:
+                    run_test_legion_provenance_cxx(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, timelimit)
                 if networks:
                     run_test_legion_network_cxx(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, timelimit)
                 if use_openmp:

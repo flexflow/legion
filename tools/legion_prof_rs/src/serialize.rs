@@ -103,7 +103,7 @@ pub enum Record {
     PhysicalInstDimOrderDesc { op_id: OpID, inst_id: InstID, dim: u32, dim_kind: u32 },
     TaskKind { task_id: TaskID, name: String, overwrite: bool },
     TaskVariant { task_id: TaskID, variant_id: VariantID, name: String },
-    OperationInstance { op_id: OpID, kind: u32 },
+    OperationInstance { op_id: OpID, parent_id: OpID, kind: u32, provenance: String },
     MultiTask { op_id: OpID, task_id: TaskID },
     SliceOwner { parent_id: UniqueID, op_id: OpID },
     TaskWaitInfo { op_id: OpID, task_id: TaskID, variant_id: VariantID, wait_start: Timestamp, wait_ready: Timestamp, wait_end: Timestamp },
@@ -116,7 +116,7 @@ pub enum Record {
     FillInfo { op_id: OpID, dst: MemID, create: Timestamp, ready: Timestamp, start: Timestamp, stop: Timestamp },
     InstCreateInfo { op_id: OpID, inst_id: InstID, create: Timestamp },
     InstUsageInfo { op_id: OpID, inst_id: InstID, mem_id: MemID, size: u64 },
-    InstTimelineInfo { op_id: OpID, inst_id: InstID, create: Timestamp, destroy: Timestamp },
+    InstTimelineInfo { op_id: OpID, inst_id: InstID, create: Timestamp, ready: Timestamp, destroy: Timestamp },
     PartitionInfo { op_id: OpID, part_op: DepPartOpKind, create: Timestamp, ready: Timestamp, start: Timestamp, stop: Timestamp },
     MapperCallInfo { kind: MapperCallKindID, op_id: OpID, start: Timestamp, stop: Timestamp, proc_id: ProcID },
     RuntimeCallInfo { kind: RuntimeCallKindID, start: Timestamp, stop: Timestamp, proc_id: ProcID },
@@ -394,7 +394,15 @@ fn parse_mem_proc_affinity_desc(input: &[u8], _max_dim: i32) -> IResult<&[u8], R
     let (input, mem_id) = parse_mem_id(input)?;
     let (input, bandwidth) = le_u32(input)?;
     let (input, latency) = le_u32(input)?;
-    Ok((input, Record::ProcMDesc { proc_id, mem_id, bandwidth, latency,}))
+    Ok((
+        input,
+        Record::ProcMDesc {
+            proc_id,
+            mem_id,
+            bandwidth,
+            latency,
+        },
+    ))
 }
 fn parse_index_space_point_desc(input: &[u8], max_dim: i32) -> IResult<&[u8], Record> {
     let (input, ispace_id) = parse_ispace_id(input)?;
@@ -593,8 +601,18 @@ fn parse_task_variant(input: &[u8], _max_dim: i32) -> IResult<&[u8], Record> {
 }
 fn parse_operation(input: &[u8], _max_dim: i32) -> IResult<&[u8], Record> {
     let (input, op_id) = parse_op_id(input)?;
+    let (input, parent_id) = parse_op_id(input)?;
     let (input, kind) = le_u32(input)?;
-    Ok((input, Record::OperationInstance { op_id, kind }))
+    let (input, provenance) = parse_string(input)?;
+    Ok((
+        input,
+        Record::OperationInstance {
+            op_id,
+            parent_id,
+            kind,
+            provenance,
+        },
+    ))
 }
 fn parse_multi_task(input: &[u8], _max_dim: i32) -> IResult<&[u8], Record> {
     let (input, op_id) = parse_op_id(input)?;
@@ -812,6 +830,7 @@ fn parse_inst_timeline(input: &[u8], _max_dim: i32) -> IResult<&[u8], Record> {
     let (input, op_id) = parse_op_id(input)?;
     let (input, inst_id) = parse_inst_id(input)?;
     let (input, create) = parse_timestamp(input)?;
+    let (input, ready) = parse_timestamp(input)?;
     let (input, destroy) = parse_timestamp(input)?;
     Ok((
         input,
@@ -819,6 +838,7 @@ fn parse_inst_timeline(input: &[u8], _max_dim: i32) -> IResult<&[u8], Record> {
             op_id,
             inst_id,
             create,
+            ready,
             destroy,
         },
     ))

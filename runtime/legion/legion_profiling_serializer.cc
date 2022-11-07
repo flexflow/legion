@@ -222,7 +222,9 @@ namespace Legion {
       ss << "OperationInstance {"
          << "id:" << OPERATION_INSTANCE_ID        << delim
          << "op_id:UniqueID:" << sizeof(UniqueID) << delim
-         << "kind:unsigned:"  << sizeof(unsigned)
+         << "parent_id:UniqueID:" << sizeof(UniqueID) << delim
+         << "kind:unsigned:"  << sizeof(unsigned) << delim
+         << "provenance:string:" << "-1"
          << "}" << std::endl;
 
       ss << "MultiTask {"
@@ -375,6 +377,7 @@ namespace Legion {
          << "op_id:UniqueID:"      << sizeof(UniqueID)    << delim
          << "inst_id:InstID:"      << sizeof(InstID)      << delim
          << "create:timestamp_t:"  << sizeof(timestamp_t) << delim
+         << "ready:timestamp_t:"  << sizeof(timestamp_t) << delim
          << "destroy:timestamp_t:" << sizeof(timestamp_t)
          << "}" << std::endl;
 
@@ -726,8 +729,15 @@ namespace Legion {
       lp_fwrite(f, (char*)&ID, sizeof(ID));
       lp_fwrite(f, (char*)&(operation_instance.op_id), 
                 sizeof(operation_instance.op_id));
+      lp_fwrite(f, (char*)&(operation_instance.parent_id),
+                sizeof(operation_instance.parent_id));
       lp_fwrite(f, (char*)&(operation_instance.kind),
                 sizeof(operation_instance.kind));
+      if (operation_instance.provenance != NULL)
+        lp_fwrite(f, operation_instance.provenance,
+            strlen(operation_instance.provenance) + 1);
+      else
+        lp_fwrite(f, "", 1);
     }
 
     //--------------------------------------------------------------------------
@@ -975,6 +985,8 @@ namespace Legion {
                 sizeof(inst_timeline_info.inst_id));
       lp_fwrite(f, (char*)&(inst_timeline_info.create),  
                 sizeof(inst_timeline_info.create));
+      lp_fwrite(f, (char*)&(inst_timeline_info.ready),  
+                sizeof(inst_timeline_info.ready));
       lp_fwrite(f, (char*)&(inst_timeline_info.destroy), 
                 sizeof(inst_timeline_info.destroy));
     }
@@ -1564,7 +1576,9 @@ namespace Legion {
                            const LegionProfInstance::OperationInstance& op_inst)
     //--------------------------------------------------------------------------
     {
-      log_prof.print("Prof Operation %llu %u", op_inst.op_id, op_inst.kind);
+      log_prof.print("Prof Operation %llu %llu %u %s", 
+          op_inst.op_id, op_inst.parent_id, op_inst.kind,
+          op_inst.provenance == NULL ? "" : op_inst.provenance);
     }
 
     //--------------------------------------------------------------------------
@@ -1762,9 +1776,10 @@ namespace Legion {
                  const LegionProfInstance::InstTimelineInfo& inst_timeline_info)
     //--------------------------------------------------------------------------
     {
-      log_prof.print("Prof Inst Timeline %llu " IDFMT " %llu %llu",
+      log_prof.print("Prof Inst Timeline %llu " IDFMT " %llu %llu %llu",
          inst_timeline_info.op_id, inst_timeline_info.inst_id,
-         inst_timeline_info.create, inst_timeline_info.destroy);
+         inst_timeline_info.create, inst_timeline_info.ready,
+         inst_timeline_info.destroy);
     }
 
     //--------------------------------------------------------------------------

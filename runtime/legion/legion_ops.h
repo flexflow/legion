@@ -34,6 +34,67 @@ namespace Legion {
     typedef PredicateImpl PredicateOp;  
 
     /**
+     * \class Provenance
+     */
+    class Provenance : public Collectable {
+    public:
+      Provenance(const char *prov);
+      Provenance(const void *buffer, size_t size);
+      Provenance(const std::string &prov);
+      Provenance(const Provenance &rhs) = delete;
+      ~Provenance(void) { }
+    public:
+      Provenance& operator=(const Provenance &rhs) = delete;
+    public:
+      void initialize(const char *prov, size_t size);
+      char* clone(void) const;
+      void serialize(Serializer &rez) const;
+      static void serialize_null(Serializer &rez);
+      static Provenance* deserialize(Deserializer &derez);
+    public:
+      inline const char* human_str(void) const { return human.c_str(); }
+      inline const char* machine_str(void) const { return machine.c_str(); }
+    public:
+      // Keep the human and machine parts of the provenance string
+      std::string human, machine;
+      // Useful for cases where interfaces want a string
+      static const std::string no_provenance;
+      // Delimiter for the machine readable part of the string
+      static constexpr char delimeter = '$';
+    };
+
+    /**
+     * \class AutoProvenance
+     * Make a provenance from a string if it exists
+     * Reclaim references on the provenance at the end
+     * of the scope so it will be cleaned up if needed
+     */
+    class AutoProvenance {
+    public:
+      AutoProvenance(const char *prov)
+        : provenance((prov == NULL) ? NULL : new Provenance(prov))
+        { if (provenance != NULL) provenance->add_reference(); }
+      AutoProvenance(const std::string &prov)
+        : provenance(prov.empty() ? NULL : new Provenance(prov))
+        { if (provenance != NULL) provenance->add_reference(); }
+      AutoProvenance(Provenance *prov)
+        : provenance(prov)
+        { if (provenance != NULL) provenance->add_reference(); }
+      AutoProvenance(AutoProvenance &&rhs) = delete;
+      AutoProvenance(const AutoProvenance &rhs) = delete;
+      ~AutoProvenance(void)
+        { if ((provenance != NULL) && provenance->remove_reference()) 
+            delete provenance; }
+    public:
+      AutoProvenance& operator=(AutoProvenance &&rhs) = delete;
+      AutoProvenance& operator=(const AutoProvenance &rhs) = delete;
+    public:
+      inline operator Provenance*(void) const { return provenance; }
+    private:
+      Provenance *const provenance;
+    };
+
+    /**
      * \class ResourceTracker
      * A helper class for tracking which privileges an
      * operation owns. This is inherited by multi-tasks
@@ -43,6 +104,97 @@ namespace Legion {
      * as part of the execution of the task.
      */
     class ResourceTracker {
+    public:
+      struct DeletedRegion {
+      public:
+        DeletedRegion(void);
+        DeletedRegion(LogicalRegion r, Provenance *provenance = NULL);
+        DeletedRegion(const DeletedRegion &rhs);
+        DeletedRegion(DeletedRegion &&rhs);
+        ~DeletedRegion(void);
+      public:
+        DeletedRegion& operator=(const DeletedRegion &rhs);
+        DeletedRegion& operator=(DeletedRegion &&rhs);
+      public:
+        void serialize(Serializer &rez) const;
+        void deserialize(Deserializer &derez);
+      public:
+        LogicalRegion region;
+        Provenance *provenance;
+      };
+      struct DeletedField {
+      public:
+        DeletedField(void);
+        DeletedField(FieldSpace sp, FieldID f, Provenance *provenance = NULL);
+        DeletedField(const DeletedField &rhs);
+        DeletedField(DeletedField &&rhs);
+        ~DeletedField(void);
+      public:
+        DeletedField& operator=(const DeletedField &rhs);
+        DeletedField& operator=(DeletedField &&rhs);
+      public:
+        void serialize(Serializer &rez) const;
+        void deserialize(Deserializer &derez);
+      public:
+        FieldSpace space;
+        FieldID fid;
+        Provenance *provenance;
+      };
+      struct DeletedFieldSpace {
+      public:
+        DeletedFieldSpace(void);
+        DeletedFieldSpace(FieldSpace sp, Provenance *provenance = NULL);
+        DeletedFieldSpace(const DeletedFieldSpace &rhs);
+        DeletedFieldSpace(DeletedFieldSpace &&rhs);
+        ~DeletedFieldSpace(void);
+      public:
+        DeletedFieldSpace& operator=(const DeletedFieldSpace &rhs);
+        DeletedFieldSpace& operator=(DeletedFieldSpace &&rhs);
+      public:
+        void serialize(Serializer &rez) const;
+        void deserialize(Deserializer &derez);
+      public:
+        FieldSpace space;
+        Provenance *provenance;
+      };
+      struct DeletedIndexSpace {
+      public:
+        DeletedIndexSpace(void);
+        DeletedIndexSpace(IndexSpace sp, bool recurse, 
+                          Provenance *provenance = NULL);
+        DeletedIndexSpace(const DeletedIndexSpace &rhs);
+        DeletedIndexSpace(DeletedIndexSpace &&rhs);
+        ~DeletedIndexSpace(void);
+      public:
+        DeletedIndexSpace& operator=(const DeletedIndexSpace &rhs);
+        DeletedIndexSpace& operator=(DeletedIndexSpace &&rhs);
+      public:
+        void serialize(Serializer &rez) const;
+        void deserialize(Deserializer &derez);
+      public:
+        IndexSpace space;
+        Provenance *provenance;
+        bool recurse;
+      };
+      struct DeletedPartition {
+      public:
+        DeletedPartition(void);
+        DeletedPartition(IndexPartition p, bool recurse,
+                         Provenance *provenance = NULL);
+        DeletedPartition(const DeletedPartition &rhs);
+        DeletedPartition(DeletedPartition &&rhs);
+        ~DeletedPartition(void);
+      public:
+        DeletedPartition& operator=(const DeletedPartition &rhs);
+        DeletedPartition& operator=(DeletedPartition &&rhs);
+      public:
+        void serialize(Serializer &rez) const;
+        void deserialize(Deserializer &derez);
+      public:
+        IndexPartition partition;
+        Provenance *provenance;
+        bool recurse;
+      };
     public:
       ResourceTracker(void);
       ResourceTracker(const ResourceTracker &rhs);
@@ -55,16 +207,16 @@ namespace Legion {
                             std::set<RtEvent> &preconditions);
       virtual void receive_resources(size_t return_index,
               std::map<LogicalRegion,unsigned> &created_regions,
-              std::vector<LogicalRegion> &deleted_regions,
+              std::vector<DeletedRegion> &deleted_regions,
               std::set<std::pair<FieldSpace,FieldID> > &created_fields,
-              std::vector<std::pair<FieldSpace,FieldID> > &deleted_fields,
+              std::vector<DeletedField> &deleted_fields,
               std::map<FieldSpace,unsigned> &created_field_spaces,
               std::map<FieldSpace,std::set<LogicalRegion> > &latent_spaces,
-              std::vector<FieldSpace> &deleted_field_spaces,
+              std::vector<DeletedFieldSpace> &deleted_field_spaces,
               std::map<IndexSpace,unsigned> &created_index_spaces,
-              std::vector<std::pair<IndexSpace,bool> > &deleted_index_spaces,
+              std::vector<DeletedIndexSpace> &deleted_index_spaces,
               std::map<IndexPartition,unsigned> &created_partitions,
-              std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
+              std::vector<DeletedPartition> &deleted_partitions,
               std::set<RtEvent> &preconditions) = 0;
       void pack_resources_return(Serializer &rez, size_t return_index);
       static RtEvent unpack_resources_return(Deserializer &derez,
@@ -72,16 +224,16 @@ namespace Legion {
     protected:
       void merge_received_resources(
               std::map<LogicalRegion,unsigned> &created_regions,
-              std::vector<LogicalRegion> &deleted_regions,
+              std::vector<DeletedRegion> &deleted_regions,
               std::set<std::pair<FieldSpace,FieldID> > &created_fields,
-              std::vector<std::pair<FieldSpace,FieldID> > &deleted_fields,
+              std::vector<DeletedField> &deleted_fields,
               std::map<FieldSpace,unsigned> &created_field_spaces,
               std::map<FieldSpace,std::set<LogicalRegion> > &latent_spaces,
-              std::vector<FieldSpace> &deleted_field_spaces,
+              std::vector<DeletedFieldSpace> &deleted_field_spaces,
               std::map<IndexSpace,unsigned> &created_index_spaces,
-              std::vector<std::pair<IndexSpace,bool> > &deleted_index_spaces,
+              std::vector<DeletedIndexSpace> &deleted_index_spaces,
               std::map<IndexPartition,unsigned> &created_partitions,
-              std::vector<std::pair<IndexPartition,bool> > &deleted_partitions);
+              std::vector<DeletedPartition> &deleted_partitions);
     protected:
       std::map<LogicalRegion,unsigned>                 created_regions;
       std::map<LogicalRegion,bool>                     local_regions;
@@ -91,12 +243,12 @@ namespace Legion {
       std::map<IndexSpace,unsigned>                    created_index_spaces;
       std::map<IndexPartition,unsigned>                created_index_partitions;
     protected:
-      std::vector<LogicalRegion>                       deleted_regions;
-      std::vector<std::pair<FieldSpace,FieldID> >      deleted_fields;
-      std::vector<FieldSpace>                          deleted_field_spaces;
+      std::vector<DeletedRegion>                       deleted_regions;
+      std::vector<DeletedField>                        deleted_fields;
+      std::vector<DeletedFieldSpace>                   deleted_field_spaces;
       std::map<FieldSpace,std::set<LogicalRegion> >    latent_field_spaces;
-      std::vector<std::pair<IndexSpace,bool> >         deleted_index_spaces;
-      std::vector<std::pair<IndexPartition,bool> >     deleted_index_partitions;
+      std::vector<DeletedIndexSpace>                   deleted_index_spaces;
+      std::vector<DeletedPartition>                    deleted_index_partitions;
     };
 
     /**
@@ -273,6 +425,8 @@ namespace Legion {
       inline LegionTrace* get_trace(void) const { return trace; }
       inline size_t get_ctx_index(void) const { return context_index; }
       inline MustEpochOp* get_must_epoch_op(void) const { return must_epoch; } 
+      inline Provenance* get_provenance(void) const 
+        { return provenance; }
     public:
       // Be careful using this call as it is only valid when the operation
       // actually has a parent task.  Right now the only place it is used
@@ -319,7 +473,9 @@ namespace Legion {
       // along with the number of regions this task has
       void initialize_operation(InnerContext *ctx, bool track,
                                 unsigned num_regions = 0,
+                                Provenance *provenance = NULL,
           const std::vector<StaticDependence> *dependences = NULL);
+      void set_provenance(Provenance *provenance);
     public:
       // Inherited from ReferenceMutator
       virtual void record_reference_mutation_effect(RtEvent event);
@@ -412,7 +568,7 @@ namespace Legion {
       static ApEvent merge_sync_preconditions(const TraceInfo &info,
                                 const std::vector<Grant> &grants,
                                 const std::vector<PhaseBarrier> &wait_barriers);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests, 
                                bool fill, unsigned count = 1);
       // Report a profiling result for this operation
@@ -684,6 +840,9 @@ namespace Legion {
       // is always cleaned up after each operation
       MappingDependenceTracker *mapping_tracker;
       CommitDependenceTracker  *commit_tracker;
+    private:
+      // Provenance information for this operation
+      Provenance *provenance;
     };
 
     /**
@@ -838,7 +997,8 @@ namespace Legion {
       void deactivate_speculative(void);
     public:
       void initialize_speculation(InnerContext *ctx,bool track,unsigned regions,
-          const std::vector<StaticDependence> *dependences, const Predicate &p);
+          const std::vector<StaticDependence> *dependences, const Predicate &p,
+          Provenance *provenance);
       void register_predicate_dependence(void);
       virtual bool is_predicated_op(void) const;
       // Wait until the predicate is valid and then return
@@ -1005,8 +1165,10 @@ namespace Legion {
       MapOp& operator=(const MapOp &rhs);
     public:
       PhysicalRegion initialize(InnerContext *ctx,
-                                const InlineLauncher &launcher);
-      void initialize(InnerContext *ctx, const PhysicalRegion &region);
+                                const InlineLauncher &launcher,
+                                Provenance *provenance);
+      void initialize(InnerContext *ctx, const PhysicalRegion &region,
+                      Provenance *provenance);
       inline const RegionRequirement& get_requirement(void) const
         { return requirement; }
     protected:
@@ -1042,12 +1204,13 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     protected:
       void check_privilege(void);
       void compute_parent_index(void);
       bool invoke_mapper(InstanceSet &mapped_instances,
                          std::vector<PhysicalManager*> &source_instances);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
@@ -1080,6 +1243,7 @@ namespace Legion {
       std::vector<MapProfilingInfo>                     profiling_info;
       RtUserEvent                                   profiling_reported;
       int                                           profiling_priority;
+      int                                           copy_fill_priority;
       std::atomic<int>                  outstanding_profiling_requests;
       std::atomic<int>                  outstanding_profiling_reported;
     };
@@ -1170,11 +1334,11 @@ namespace Legion {
       CopyOp& operator=(const CopyOp &rhs);
     public:
       void initialize(InnerContext *ctx,
-                      const CopyLauncher &launcher);
+                      const CopyLauncher &launcher, Provenance *provenance);
       void activate_copy(void);
       void deactivate_copy(void);
       void log_copy_requirements(void) const;
-      void perform_base_dependence_analysis(void);
+      void perform_base_dependence_analysis(bool permit_projection);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -1219,6 +1383,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     protected:
       void check_copy_privileges(const bool permit_projection) const;
       void check_copy_privilege(const RegionRequirement &req, unsigned idx,
@@ -1258,7 +1423,7 @@ namespace Legion {
       int perform_conversion(unsigned idx, const RegionRequirement &req,
                              std::vector<MappingInstance> &output,
                              InstanceSet &targets, bool is_reduce = false);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
@@ -1307,6 +1472,7 @@ namespace Legion {
       std::vector<CopyProfilingInfo>                  profiling_info;
       RtUserEvent                                 profiling_reported;
       int                                         profiling_priority;
+      int                                         copy_fill_priority;
       std::atomic<int>                outstanding_profiling_requests;
       std::atomic<int>                outstanding_profiling_reported;
     public:
@@ -1331,7 +1497,8 @@ namespace Legion {
     public:
       void initialize(InnerContext *ctx,
                       const IndexCopyLauncher &launcher,
-                      IndexSpace launch_space);
+                      IndexSpace launch_space,
+                      Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void); 
@@ -1486,8 +1653,8 @@ namespace Legion {
     public:
       FenceOp& operator=(const FenceOp &rhs);
     public:
-      Future initialize(InnerContext *ctx, FenceKind kind, 
-                        bool need_future, bool track=true);
+      Future initialize(InnerContext *ctx, FenceKind kind, bool need_future,
+                        Provenance *provenance, bool track = true);
       inline void add_mapping_applied_condition(RtEvent precondition)
         { map_applied_conditions.insert(precondition); }
       inline void record_execution_precondition(ApEvent precondition)
@@ -1538,7 +1705,7 @@ namespace Legion {
     public:
       FrameOp& operator=(const FrameOp &rhs);
     public:
-      void initialize(InnerContext *ctx);
+      void initialize(InnerContext *ctx, Provenance *provenance);
       void set_previous(ApEvent previous);
     public:
       virtual void activate(void);
@@ -1575,18 +1742,22 @@ namespace Legion {
     public:
       CreationOp& operator=(const CreationOp &rhs);
     public:
-      void initialize_fence(InnerContext *ctx, RtEvent precondition);
+      void initialize_fence(InnerContext *ctx, RtEvent precondition,
+                            Provenance *provenance);
       void initialize_index_space(InnerContext *ctx, IndexSpaceNode *node, 
-                            const Future &future, bool owner = true,
+                            const Future &future, Provenance *provenance,
+                            bool owner = true, 
                             const CollectiveMapping *mapping = NULL);
       void initialize_field(InnerContext *ctx, FieldSpaceNode *node,
                             FieldID fid, const Future &field_size,
-                            RtEvent precondition, bool owner = true);
+                            RtEvent precondition, Provenance *provenance,
+                            bool owner = true);
       void initialize_fields(InnerContext *ctx, FieldSpaceNode *node,
                              const std::vector<FieldID> &fids,
                              const std::vector<Future> &field_sizes,
-                             RtEvent precondition, bool owner = true);
-      void initialize_map(InnerContext *ctx,
+                             RtEvent precondition, Provenance *provenance,
+                             bool owner = true);
+      void initialize_map(InnerContext *ctx, Provenance *provenance,
                           const std::map<DomainPoint,Future> &futures);
     public:
       virtual void activate(void);
@@ -1640,26 +1811,30 @@ namespace Legion {
     public:
       void initialize_index_space_deletion(InnerContext *ctx, IndexSpace handle,
                                    std::vector<IndexPartition> &sub_partitions,
-                                   const bool unordered);
+                                   const bool unordered,Provenance *provenance);
       void initialize_index_part_deletion(InnerContext *ctx,IndexPartition part,
                                    std::vector<IndexPartition> &sub_partitions,
-                                   const bool unordered);
+                                   const bool unordered,Provenance *provenance);
       void initialize_field_space_deletion(InnerContext *ctx,
                                            FieldSpace handle,
-                                           const bool unordered);
+                                           const bool unordered,
+                                           Provenance *provenance);
       void initialize_field_deletion(InnerContext *ctx, FieldSpace handle,
                                      FieldID fid, const bool unordered,
                                      FieldAllocatorImpl *allocator,
+                                     Provenance *provenance,
                                      const bool non_owner_shard);
       void initialize_field_deletions(InnerContext *ctx, FieldSpace handle,
                                       const std::set<FieldID> &to_free,
                                       const bool unordered,
                                       FieldAllocatorImpl *allocator,
+                                      Provenance *provenance,
                                       const bool non_owner_shard,
                                       const bool skip_dep_analysis = false);
       void initialize_logical_region_deletion(InnerContext *ctx, 
                                       LogicalRegion handle, 
                                       const bool unordered,
+                                      Provenance *provenance,
                                       const bool skip_dep_analysis = false);
     public:
       virtual void activate(void);
@@ -1782,6 +1957,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
       virtual Mappable* get_mappable(void);
     public:
       void activate_close(void);
@@ -1888,7 +2064,7 @@ namespace Legion {
                    get_acquired_instances_ref(void);
       virtual void record_reference_mutation_effect(RtEvent event);
     protected:
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
@@ -2103,7 +2279,8 @@ namespace Legion {
     public:
       AcquireOp& operator=(const AcquireOp &rhs);
     public:
-      void initialize(InnerContext *ctx, const AcquireLauncher &launcher);
+      void initialize(InnerContext *ctx, const AcquireLauncher &launcher,
+                      Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2133,6 +2310,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       const RegionRequirement& get_requirement(void) const;
     public:
@@ -2149,7 +2327,7 @@ namespace Legion {
       void compute_parent_index(void);
       void invoke_mapper(void);
       void log_acquire_requirement(void);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
@@ -2178,6 +2356,7 @@ namespace Legion {
       std::vector<AcquireProfilingInfo>                  profiling_info;
       RtUserEvent                                    profiling_reported;
       int                                            profiling_priority;
+      int                                            copy_fill_priority;
       std::atomic<int>                   outstanding_profiling_requests;
       std::atomic<int>                   outstanding_profiling_reported;
     };
@@ -2214,7 +2393,8 @@ namespace Legion {
     public:
       ReleaseOp& operator=(const ReleaseOp &rhs);
     public:
-      void initialize(InnerContext *ctx, const ReleaseLauncher &launcher);
+      void initialize(InnerContext *ctx, const ReleaseLauncher &launcher,
+                      Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2248,6 +2428,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       const RegionRequirement& get_requirement(void) const;
     public:
@@ -2264,7 +2445,7 @@ namespace Legion {
       void compute_parent_index(void);
       void invoke_mapper(std::vector<PhysicalManager*> &source_instances);
       void log_release_requirement(void);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void handle_profiling_response(const ProfilingResponseBase *base,
@@ -2294,6 +2475,7 @@ namespace Legion {
       std::vector<ReleaseProfilingInfo>                  profiling_info;
       RtUserEvent                                    profiling_reported;
       int                                            profiling_priority;
+      int                                            copy_fill_priority;
       std::atomic<int>                   outstanding_profiling_requests;
       std::atomic<int>                   outstanding_profiling_reported;
     };
@@ -2316,7 +2498,8 @@ namespace Legion {
     public:
       DynamicCollectiveOp& operator=(const DynamicCollectiveOp &rhs);
     public:
-      Future initialize(InnerContext *ctx, const DynamicCollective &dc);
+      Future initialize(InnerContext *ctx, const DynamicCollective &dc,
+                        Provenance *provenance);
     public:
       virtual const VersionInfo& get_version_info(unsigned idx) const
         { assert(false); return *(new VersionInfo()); }
@@ -2355,7 +2538,7 @@ namespace Legion {
     public:
       FuturePredOp& operator=(const FuturePredOp &rhs);
     public:
-      void initialize(InnerContext *ctx, Future f);
+      void initialize(InnerContext *ctx, Future f, Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2384,7 +2567,8 @@ namespace Legion {
     public:
       NotPredOp& operator=(const NotPredOp &rhs);
     public:
-      void initialize(InnerContext *task, const Predicate &p);
+      void initialize(InnerContext *task, const Predicate &p,
+                      Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2414,7 +2598,8 @@ namespace Legion {
       AndPredOp& operator=(const AndPredOp &rhs);
     public:
       void initialize(InnerContext *task, 
-                      const std::vector<Predicate> &predicates);
+                      const std::vector<Predicate> &predicates,
+                      Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2446,7 +2631,8 @@ namespace Legion {
       OrPredOp& operator=(const OrPredOp &rhs);
     public:
       void initialize(InnerContext *task, 
-                      const std::vector<Predicate> &predicates);
+                      const std::vector<Predicate> &predicates,
+                      Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -2554,8 +2740,10 @@ namespace Legion {
       virtual size_t get_context_index(void) const;
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
-      FutureMap initialize(InnerContext *ctx,const MustEpochLauncher &launcher);
+      FutureMap initialize(InnerContext *ctx,const MustEpochLauncher &launcher,
+                           Provenance *provenance);
       // Make this a virtual method so it can be overridden for
       // control replicated version of must epoch op
       virtual FutureMapImpl* create_future_map(TaskContext *ctx,
@@ -2563,6 +2751,8 @@ namespace Legion {
       // Another virtual method to override for control replication
       virtual void instantiate_tasks(InnerContext *ctx,
                                      const MustEpochLauncher &launcher);
+      // Also virtual for control replication override
+      virtual RtEvent get_concurrent_analysis_precondition(void);
       void find_conflicted_regions(
           std::vector<PhysicalRegion> &unmapped); 
     public:
@@ -2604,16 +2794,16 @@ namespace Legion {
       // From ResourceTracker
       virtual void receive_resources(size_t return_index,
               std::map<LogicalRegion,unsigned> &created_regions,
-              std::vector<LogicalRegion> &deleted_regions,
+              std::vector<DeletedRegion> &deleted_regions,
               std::set<std::pair<FieldSpace,FieldID> > &created_fields,
-              std::vector<std::pair<FieldSpace,FieldID> > &deleted_fields,
+              std::vector<DeletedField> &deleted_fields,
               std::map<FieldSpace,unsigned> &created_field_spaces,
               std::map<FieldSpace,std::set<LogicalRegion> > &latent_spaces,
-              std::vector<FieldSpace> &deleted_field_spaces,
+              std::vector<DeletedFieldSpace> &deleted_field_spaces,
               std::map<IndexSpace,unsigned> &created_index_spaces,
-              std::vector<std::pair<IndexSpace,bool> > &deleted_index_spaces,
+              std::vector<DeletedIndexSpace> &deleted_index_spaces,
               std::map<IndexPartition,unsigned> &created_partitions,
-              std::vector<std::pair<IndexPartition,bool> > &deleted_partitions,
+              std::vector<DeletedPartition> &deleted_partitions,
               std::set<RtEvent> &preconditions);
     public:
       void add_mapping_dependence(RtEvent precondition);
@@ -2988,51 +3178,64 @@ namespace Legion {
     public:
       PendingPartitionOp& operator=(const PendingPartitionOp &rhs);
     public:
-      void initialize_equal_partition(InnerContext *ctx,
-                                      IndexPartition pid, size_t granularity);
+      void initialize_equal_partition(InnerContext *ctx, IndexPartition pid,
+                                      size_t granularity, Provenance *prov);
       void initialize_weight_partition(InnerContext *ctx, IndexPartition pid,
-                                const FutureMap &weights, size_t granularity);
+                                const FutureMap &weights, size_t granularity,
+                                Provenance *provenance);
       void initialize_union_partition(InnerContext *ctx,
                                       IndexPartition pid, 
                                       IndexPartition handle1,
-                                      IndexPartition handle2);
+                                      IndexPartition handle2,
+                                      Provenance *provenance);
       void initialize_intersection_partition(InnerContext *ctx,
                                              IndexPartition pid, 
                                              IndexPartition handle1,
-                                             IndexPartition handle2);
+                                             IndexPartition handle2,
+                                             Provenance *provenance);
       void initialize_intersection_partition(InnerContext *ctx,
                                              IndexPartition pid, 
                                              IndexPartition part,
-                                             const bool dominates);
+                                             const bool dominates,
+                                             Provenance *provenance);
       void initialize_difference_partition(InnerContext *ctx,
                                            IndexPartition pid, 
                                            IndexPartition handle1,
-                                           IndexPartition handle2);
+                                           IndexPartition handle2,
+                                           Provenance *provenance);
       void initialize_restricted_partition(InnerContext *ctx,
                                            IndexPartition pid,
                                            const void *transform,
                                            size_t transform_size,
                                            const void *extent,
-                                           size_t extent_size);
+                                           size_t extent_size,
+                                           Provenance *provenance);
       void initialize_by_domain(InnerContext *ctx, IndexPartition pid,
                                 const FutureMap &future_map,
-                                bool perform_intersections);
+                                bool perform_intersections,
+                                Provenance *provenance);
       void initialize_cross_product(InnerContext *ctx, IndexPartition base, 
-                                    IndexPartition source, LegionColor color);
+                                    IndexPartition source, LegionColor color,
+                                    Provenance *provenance);
       void initialize_index_space_union(InnerContext *ctx, IndexSpace target, 
-                                        const std::vector<IndexSpace> &handles);
+                                        const std::vector<IndexSpace> &handles,
+                                        Provenance *provenance);
       void initialize_index_space_union(InnerContext *ctx, IndexSpace target, 
-                                        IndexPartition handle);
+                                        IndexPartition handle,
+                                        Provenance *provenance);
       void initialize_index_space_intersection(InnerContext *ctx, 
                                                IndexSpace target,
-                                        const std::vector<IndexSpace> &handles);
+                                        const std::vector<IndexSpace> &handles,
+                                               Provenance *provenance);
       void initialize_index_space_intersection(InnerContext *ctx,
                                               IndexSpace target,
-                                              IndexPartition handle);
+                                              IndexPartition handle,
+                                              Provenance *provenance);
       void initialize_index_space_difference(InnerContext *ctx, 
                                              IndexSpace target, 
                                              IndexSpace initial,
-                                        const std::vector<IndexSpace> &handles);
+                                        const std::vector<IndexSpace> &handles,
+                                        Provenance *provenance);
       void perform_logging(void);
     public:
       void activate_pending(void);
@@ -3199,31 +3402,37 @@ namespace Legion {
                                LogicalRegion handle, LogicalRegion parent,
                                IndexSpace color_space, FieldID fid, 
                                MapperID id, MappingTagID tag,
-                               const UntypedBuffer &marg); 
+                               const UntypedBuffer &marg,
+                               Provenance *provenance); 
       void initialize_by_image(InnerContext *ctx, IndexPartition pid,
                                IndexSpace handle, LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
-                               const UntypedBuffer &marg);
+                               const UntypedBuffer &marg,
+                               Provenance *provenance);
       void initialize_by_image_range(InnerContext *ctx, IndexPartition pid,
                                IndexSpace handle, LogicalPartition projection,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
-                               const UntypedBuffer &marg);
+                               const UntypedBuffer &marg,
+                               Provenance *provenance);
       void initialize_by_preimage(InnerContext *ctx, IndexPartition pid,
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
-                               const UntypedBuffer &marg);
+                               const UntypedBuffer &marg,
+                               Provenance *provenance);
       void initialize_by_preimage_range(InnerContext *ctx, IndexPartition pid,
                                IndexPartition projection, LogicalRegion handle,
                                LogicalRegion parent, FieldID fid,
                                MapperID id, MappingTagID tag,
-                               const UntypedBuffer &marg);
+                               const UntypedBuffer &marg,
+                               Provenance *provenance);
       void initialize_by_association(InnerContext *ctx, LogicalRegion domain,
                                LogicalRegion domain_parent, FieldID fid,
                                IndexSpace range, MapperID id, MappingTagID tag,
-                               const UntypedBuffer &marg);
+                               const UntypedBuffer &marg,
+                               Provenance *provenance);
       void perform_logging(void) const;
       void log_requirement(void) const;
       const RegionRequirement& get_requirement(void) const;
@@ -3264,6 +3473,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
       virtual Mappable* get_mappable(void);
     public:
       virtual void activate(void);
@@ -3283,7 +3493,7 @@ namespace Legion {
       virtual std::map<PhysicalManager*,unsigned>*
                    get_acquired_instances_ref(void);
       virtual void record_reference_mutation_effect(RtEvent event);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       // Report a profiling result for this operation
@@ -3355,6 +3565,7 @@ namespace Legion {
       std::vector<PartitionProfilingInfo>                  profiling_info;
       RtUserEvent                                      profiling_reported;
       int                                              profiling_priority;
+      int                                              copy_fill_priority;
       std::atomic<int>                     outstanding_profiling_requests;
       std::atomic<int>                     outstanding_profiling_reported;
     };
@@ -3442,7 +3653,9 @@ namespace Legion {
     public:
       FillOp& operator=(const FillOp &rhs);
     public:
-      void initialize(InnerContext *ctx, const FillLauncher &launcher);
+      void initialize(InnerContext *ctx, const FillLauncher &launcher,
+                      Provenance *provenance);
+      void perform_base_dependence_analysis(void);
       inline const RegionRequirement& get_requirement(void) const 
         { return requirement; }
       void activate_fill(void);
@@ -3459,9 +3672,10 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
       virtual std::map<PhysicalManager*,unsigned>*
                                        get_acquired_instances_ref(void);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
     public:
@@ -3525,7 +3739,7 @@ namespace Legion {
     public:
       void initialize(InnerContext *ctx,
                       const IndexFillLauncher &launcher,
-                      IndexSpace launch_space);
+                      IndexSpace launch_space, Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -3546,7 +3760,6 @@ namespace Legion {
       virtual IndexSpaceNode* get_collective_space(void) const 
         { return launch_space; }
     public:
-      void perform_base_dependence_analysis(void);
       void enumerate_points(bool replaying);
       void handle_point_commit(void);
       void check_point_requirements(void);
@@ -3627,7 +3840,8 @@ namespace Legion {
       AttachOp& operator=(const AttachOp &rhs);
     public:
       PhysicalRegion initialize(InnerContext *ctx,
-                                const AttachLauncher &launcher);
+                                const AttachLauncher &launcher,
+                                Provenance *provenance);
       inline const RegionRequirement& get_requirement(void) const 
         { return requirement; }
     public:
@@ -3704,7 +3918,9 @@ namespace Legion {
                                    RegionTreeNode *upper_bound,
                                    IndexSpaceNode *launch_bounds,
                                    const IndexAttachLauncher &launcher,
-                                   const std::vector<unsigned> &indexes);
+                                   const std::vector<unsigned> &indexes,
+                                   Provenance *provenance,
+                                   const bool replicated);
       inline const RegionRequirement& get_requirement(void) const
         { return requirement; }
     public:
@@ -3790,7 +4006,8 @@ namespace Legion {
       DetachOp& operator=(const DetachOp &rhs);
     public:
       Future initialize_detach(InnerContext *ctx, PhysicalRegion region,
-                               const bool flush, const bool unordered);
+                               const bool flush, const bool unordered,
+                               Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -3810,7 +4027,7 @@ namespace Legion {
                                   const InstanceRef &target,
                                   const InstanceSet &sources,
                                   std::vector<unsigned> &ranking);
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void pack_remote_operation(Serializer &rez, AddressSpaceID target,
@@ -3851,7 +4068,8 @@ namespace Legion {
                                ExternalResourcesImpl *external,
                                const std::vector<FieldID> &privilege_fields,
                                const std::vector<PhysicalRegion> &regions,
-                               bool flush, bool unordered);
+                               bool flush, bool unordered,
+                               Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -3928,7 +4146,8 @@ namespace Legion {
     public:
       TimingOp& operator=(const TimingOp &rhs);
     public:
-      Future initialize(InnerContext *ctx, const TimingLauncher &launcher);
+      Future initialize(InnerContext *ctx, const TimingLauncher &launcher,
+                        Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -3963,7 +4182,8 @@ namespace Legion {
     public:
       void activate_tunable(void);
       void deactivate_tunable(void);
-      Future initialize(InnerContext *ctx, const TunableLauncher &launcher);
+      Future initialize(InnerContext *ctx, const TunableLauncher &launcher,
+                        Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -4005,7 +4225,8 @@ namespace Legion {
     public:
       Future initialize(InnerContext *ctx, const FutureMap &future_map,
                         ReductionOpID redop, bool deterministic,
-                        MapperID mapper_id, MappingTagID tag);
+                        MapperID mapper_id, MappingTagID tag,
+                        Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(void);
@@ -4090,7 +4311,7 @@ namespace Legion {
                                   const InstanceRef &target,
                                   const InstanceSet &sources,
                                   std::vector<unsigned> &ranking) = 0;
-      virtual void add_copy_profiling_request(const PhysicalTraceInfo &info,
+      virtual int add_copy_profiling_request(const PhysicalTraceInfo &info,
                                Realm::ProfilingRequestSet &requests,
                                bool fill, unsigned count = 1);
       virtual void report_uninitialized_usage(const unsigned index,
@@ -4124,6 +4345,7 @@ namespace Legion {
     protected:
       std::vector<ProfilingMeasurementID> profiling_requests;
       int                                 profiling_priority;
+      int                                 copy_fill_priority;
       Processor                           profiling_target;
       RtUserEvent                         profiling_response;
       std::atomic<int>                    profiling_reports;
@@ -4148,6 +4370,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
@@ -4179,6 +4402,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
@@ -4210,6 +4434,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
@@ -4241,6 +4466,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
@@ -4272,6 +4498,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
@@ -4303,6 +4530,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
     public:
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
@@ -4334,6 +4562,7 @@ namespace Legion {
       virtual void set_context_index(size_t index);
       virtual int get_depth(void) const;
       virtual const Task* get_parent_task(void) const;
+      virtual const std::string& get_provenance_string(bool human = true) const;
       virtual PartitionKind get_partition_kind(void) const;
     public:
       virtual const char* get_logging_name(void) const;

@@ -127,8 +127,23 @@ namespace Legion {
       operation_instances.push_back(OperationInstance());
       OperationInstance &inst = operation_instances.back();
       inst.op_id = op->get_unique_op_id();
+      InnerContext *parent_ctx = op->get_context();
+      // Legion prof uses ULLONG_MAX to represent the unique IDs of the root
+      inst.parent_id = 
+       (parent_ctx->get_depth() < 0) ? ULLONG_MAX : parent_ctx->get_unique_id();
       inst.kind = op->get_operation_kind();
-      owner->update_footprint(sizeof(OperationInstance), this);
+      Provenance *prov = op->get_provenance();
+      if (prov != NULL)
+      {
+        inst.provenance = prov->clone();
+        owner->update_footprint(
+            sizeof(OperationInstance) + strlen(inst.provenance), this);
+      }
+      else
+      {
+        inst.provenance = NULL;
+        owner->update_footprint(sizeof(OperationInstance), this);
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -701,6 +716,7 @@ namespace Legion {
       info.op_id = prof_info->op_id;
       info.inst_id = timeline.instance.id;
       info.create = timeline.create_time;
+      info.ready = timeline.ready_time;
       info.destroy = timeline.delete_time;
       owner->update_footprint(sizeof(InstTimelineInfo), this);
     }
@@ -893,6 +909,8 @@ namespace Legion {
             operation_instances.begin(); it != operation_instances.end(); it++)
       {
         serializer->serialize(*it);
+        if (it->provenance != NULL)
+          free(const_cast<char*>(it->provenance));
       }
       for (std::deque<MultiTask>::const_iterator it = 
             multi_tasks.begin(); it != multi_tasks.end(); it++)
@@ -1163,6 +1181,11 @@ namespace Legion {
         OperationInstance &front = operation_instances.front();
         serializer->serialize(front);
         diff += sizeof(front);
+        if (front.provenance != NULL)
+        {
+          diff += strlen(front.provenance);
+          free(const_cast<char*>(front.provenance));
+        }
         operation_instances.pop_front();
         const long long t_curr = Realm::Clock::current_time_in_microseconds();
         if (t_curr >= t_stop)
