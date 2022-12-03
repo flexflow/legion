@@ -69,12 +69,12 @@ variables:
   CC:  "clang-14"
   CXX: "clang++-14"
   F90: "gfortran-11"
-.hpcsdk212: &hpcsdk212
-  CC: "/opt/nvidia/hpc_sdk/Linux_x86_64/21.2/compilers/bin/nvc"
-  CXX: "/opt/nvidia/hpc_sdk/Linux_x86_64/21.2/compilers/bin/nvc++"
-  F90: "/opt/nvidia/hpc_sdk/Linux_x86_64/21.2/compilers/bin/nvfortran"
+.hpcsdk2211: &hpcsdk2211
+  CC: "/opt/nvidia/hpc_sdk/Linux_x86_64/22.11/compilers/bin/nvc"
+  CXX: "/opt/nvidia/hpc_sdk/Linux_x86_64/22.11/compilers/bin/nvc++"
+  F90: "/opt/nvidia/hpc_sdk/Linux_x86_64/22.11/compilers/bin/nvfortran"
   # cmake gets confused and can't figure out library arch
-  EXTRA_CMAKE_ARGS: "-DCMAKE_LIBRARY_ARCHITECTURE=x86_64-linux-gnu"
+  # EXTRA_CMAKE_ARGS: "-DCMAKE_LIBRARY_ARCHITECTURE=x86_64-linux-gnu"
 .icc212: &icc212
   CC: "/opt/intel/oneapi/compiler/2021.2.0/linux/bin/intel64/icc"
   CXX: "/opt/intel/oneapi/compiler/2021.2.0/linux/bin/intel64/icpc"
@@ -166,6 +166,7 @@ variables:
   USE_LLVM: "1"
 .cuda: &cuda
   USE_CUDA: "1"
+  USE_NVTX: "1"
 .cuda_dynamic: &cuda_dynamic
   EXTRA_CMAKE_ARGS: "-DLegion_CUDA_DYNAMIC_LOAD=ON -DLegion_HIJACK_CUDART=OFF"
 .gasnet1_mpi: &gasnet1_mpi
@@ -368,6 +369,7 @@ before_script:
     if [[ "$USE_CUDA" -eq 1 ]]; then
       # make sure dynamic loading finds the right libcudart.so
       export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${CUDA}/lib64"
+      export PATH=$PATH:${CUDA}/bin
     fi
   - |
     if [[ "$USE_KOKKOS" -eq 1 ]]; then
@@ -487,6 +489,12 @@ before_script:
     - linux
     - compute
 
+# For tests that require AVX:
+.linux_avx: &linux_avx
+  tags:
+    - linux
+    - avx
+
 # For CUDA tests, always use a specific machine:
 .p100: &p100
   tags:
@@ -531,18 +539,21 @@ before_script:
   CUDA: "/usr/local/cuda-10.2"
   CUDA_TOOLKIT_ROOT: "/usr/local/cuda-10.2"
   CUDAHOSTCXX: "g++-8"
+  USE_NVTX: "1"
 
 .p100_cuda110: &p100_cuda110
   <<: *p100_base
   CUDA: "/usr/local/cuda-11.0"
   CUDA_TOOLKIT_ROOT: "/usr/local/cuda-11.0"
   CUDAHOSTCXX: "g++-9"
+  USE_NVTX: "1"
 
 .p100_cuda112: &p100_cuda112
   <<: *p100_base
   CUDA: "/usr/local/cuda-11.2"
   CUDA_TOOLKIT_ROOT: "/usr/local/cuda-11.2"
   CUDAHOSTCXX: "g++-9"
+  USE_NVTX: "1"
 
 ###
 ### Docker Image
@@ -559,7 +570,7 @@ before_script:
 .image_kokkos_openmp: &image_kokkos_openmp
   image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-20.04:210923
 .image_hpcsdk: &image_hpcsdk
-  image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-hpcsdk
+  image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-hpcsdk:221201
 .image_icc: &image_icc
   image: registry.gitlab.com/stanfordlegion/legion/gitlab-ci-icc
 .image_msvc169: &image_msvc169
@@ -1317,14 +1328,14 @@ darwin_power9_clang8_cxx17_debug_legion:
     <<: [*clang8, *debug, *cxx17_normal, *legion, *darwin_power9_scheduler]
 
 # HPCSDK (nvc++) tests:
-hpcsdk212_cxx11_release_legion:
-  <<: [*linux, *image_hpcsdk, *tests]
+hpcsdk2211_cxx11_release_legion:
+  <<: [*linux_avx, *image_hpcsdk, *tests]
   variables:
-    <<: [*hpcsdk212, *release, *cxx11_normal, *legion]
-hpcsdk212_cxx11_debug_cmake_legion:
-  <<: [*linux, *image_hpcsdk, *tests]
+    <<: [*hpcsdk2211, *release, *cxx11_normal, *legion]
+hpcsdk2211_cxx11_debug_cmake_legion:
+  <<: [*linux_avx, *image_hpcsdk, *tests]
   variables:
-    <<: [*hpcsdk212, *debug, *cxx11_normal, *cmake, *legion, *ctest, *short]
+    <<: [*hpcsdk2211, *debug, *cxx11_normal, *cmake, *legion, *ctest, *short]
 
 # Intel compiler (icc/icpc) tests:
 icc212_cxx11_release_legion:

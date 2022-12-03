@@ -42,6 +42,23 @@ String.prototype.hashCode = function() {
   return Math.abs(hash);
 }
 
+function getProvenanceString(d) {
+  var provenance = "";
+  if (d.op_id != -1) {
+      provenance = state.operations[d.op_id].provenance;
+  }
+  if ((provenance == "") && (d.initiation != undefined) && (d.initiation != "")) {
+      provenance = state.operations[d.initiation].provenance;
+  }
+  return provenance;
+}
+
+function operationMatchesRegex(regex, d) {
+  return regex.exec(d.title) != null ||
+         regex.exec(d.initiation) != null ||
+         regex.exec(getProvenanceString(d)) != null;
+}
+
 function parseURLParameters() {
   var match,
   pl     = /\+/g,  // Regex for replacing addition symbol with a space
@@ -407,15 +424,9 @@ function getMouseOver() {
     total = parseFloat(total.toFixed(3))
     delay = parseFloat(delay.toFixed(3))
     var initiation = "";
-    var provenance = "";
-    // Insert texts in reverse order
-    if (d.op_id != -1) {
-        provenance = state.operations[d.op_id].provenance;
-    }
-    if ((provenance == "") && (d.initiation != undefined) && (d.initiation != "")) {
-        provenance = state.operations[d.initiation].provenance;
-    }
+    var provenance = getProvenanceString(d);
 
+    // Insert texts in reverse order
     if (provenance != "") {
         // provenance strings are in this form:
         // "(human readable string)$(key1),(value1)|(key2),(value2)|..."
@@ -432,10 +443,9 @@ function getMouseOver() {
                 descTexts.push(tokens[0] + ": " + tokens[1]);
             });
         }
+      // Add a line break to separate provenance info from the rest
+      descTexts.push(" ");
     }
-    // Add a line break to separate provenance info from the rest
-    descTexts.push(" ");
-
     if ((d.ready != undefined) && (d.ready != "") && (delay != 0)) {
       descTexts.push("Ready State: " + get_time_str(delay,false));
     }
@@ -1357,8 +1367,7 @@ function drawTimeline() {
     .attr("x", function(d) { return convertToPos(state, d.start); })
     .attr("y", timelineLevelCalculator)
     .style("fill", function(d) {
-      if (!state.searchEnabled ||
-          searchRegex[currentPos].exec(d.title) == null)
+      if (!(state.searchEnabled && operationMatchesRegex(searchRegex[currentPos], d)))
         return d.color;
       else return "#ff0000";
     })
@@ -1381,9 +1390,8 @@ function drawTimeline() {
     })
     .attr("height", state.thickness)
     .style("opacity", function(d) {
-      if (!state.searchEnabled || searchRegex[currentPos].exec(d.title) != null || searchRegex[currentPos].exec(d.initiation) != null) {
+      if (!state.searchEnabled || operationMatchesRegex(searchRegex[currentPos], d))
         return d.opacity;
-      }
       else return 0.05;
     })
     .on("mouseout", function(d, i) { 

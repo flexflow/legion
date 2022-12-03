@@ -714,9 +714,7 @@ namespace Legion {
      */
     class FutureNameExchange : public AllGatherCollective<false> {
     public:
-      FutureNameExchange(ReplicateContext *ctx, CollectiveID id, 
-                         ReplFutureMapImpl *future_map,
-                         ReferenceMutator *mutator);
+      FutureNameExchange(ReplicateContext *ctx, CollectiveIndexLocation loc);
       FutureNameExchange(const FutureNameExchange &rhs);
       virtual ~FutureNameExchange(void);
     public:
@@ -725,10 +723,7 @@ namespace Legion {
       virtual void pack_collective_stage(Serializer &rez, int stage);
       virtual void unpack_collective_stage(Deserializer &derez, int stage);
     public:
-      void exchange_future_names(std::map<DomainPoint,Future> &futures);
-    public:
-      ReplFutureMapImpl *const future_map;
-      ReferenceMutator *const mutator;
+      void exchange_future_names(std::map<DomainPoint,FutureImpl*> &futures);
     protected:
       std::map<DomainPoint,Future> results;
     };
@@ -1377,9 +1372,9 @@ namespace Legion {
     public:
       void initialize_replication(ReplicateContext *ctx);
       void set_sharding_function(ShardingID functor,ShardingFunction *function);
-      virtual FutureMapImpl* create_future_map(TaskContext *ctx,
+      virtual FutureMap create_future_map(TaskContext *ctx,
                     IndexSpace launch_space, IndexSpace shard_space);
-      virtual void initialize_concurrent_analysis(void);
+      virtual void initialize_concurrent_analysis(bool replay);
       virtual RtEvent verify_concurrent_execution(const DomainPoint &point,
                                                   Processor target);
       void select_sharding_function(ReplicateContext *repl_ctx);
@@ -1902,7 +1897,7 @@ namespace Legion {
     public:
       virtual void activate(void);
       virtual void deactivate(void);
-      virtual FutureMapImpl* create_future_map(TaskContext *ctx,
+      virtual FutureMap create_future_map(TaskContext *ctx,
                       IndexSpace domain, IndexSpace shard_space);
       virtual RtEvent get_concurrent_analysis_precondition(void);
       virtual void instantiate_tasks(InnerContext *ctx,
@@ -2541,6 +2536,12 @@ namespace Legion {
                       const FieldMask &mask, DistributedID did, bool &first);
       void deduplicate_attaches(const IndexAttachLauncher &launcher,
                                 std::vector<unsigned> &indexes);
+      FutureMap deduplicate_future_map_creation(ReplicateContext *ctx,
+          Operation *op, IndexSpaceNode *domain, IndexSpaceNode *shard_domain,
+          DistributedID did, Provenance *provenance); 
+      FutureMap deduplicate_future_map_creation(ReplicateContext *ctx,
+          IndexSpaceNode *domain, IndexSpaceNode *shard_domain, size_t index,
+          DistributedID did, ApEvent completion, Provenance *provenance);
       // Return true if we have a shard on every address space
       bool is_total_sharding(void);
     public:
@@ -2552,9 +2553,6 @@ namespace Legion {
     public:
       void send_collective_message(ShardID target, Serializer &rez);
       void handle_collective_message(Deserializer &derez);
-    public:
-      void send_future_map_request(ShardID target, Serializer &rez);
-      void handle_future_map_request(Deserializer &derez);
     public:
       void send_disjoint_complete_request(ShardID target, Serializer &rez);
       void handle_disjoint_complete_request(Deserializer &derez);
@@ -2601,7 +2599,6 @@ namespace Legion {
       static void handle_trigger_complete(Deserializer &derez, Runtime *rt);
       static void handle_trigger_commit(Deserializer &derez, Runtime *rt);
       static void handle_collective_message(Deserializer &derez, Runtime *rt);
-      static void handle_future_map_request(Deserializer &derez, Runtime *rt);
       static void handle_disjoint_complete_request(Deserializer &derez, 
                                                    Runtime *rt);
       static void handle_intra_space_dependence(Deserializer &derez, 
@@ -2674,6 +2671,8 @@ namespace Legion {
     protected:
       std::map<DistributedID,std::pair<EquivalenceSet*,size_t> > 
                                         created_equivalence_sets;
+      std::map<DistributedID,std::pair<ReplFutureMapImpl*,size_t> >
+                                        created_future_maps;
       // ApEvents describing the completion of each shard
       std::set<ApEvent> shard_effects;
     protected:

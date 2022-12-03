@@ -350,8 +350,7 @@ namespace Legion {
         runtime->forest->perform_dependence_analysis(this, idx, req,
                                                      projection_info,
                                                      privilege_paths[idx],
-                                                     refinement_tracker,
-                                                     map_applied_conditions);
+                                                     refinement_tracker);
       }
     }
 
@@ -773,7 +772,7 @@ namespace Legion {
       }
       // Prepare any setup for performing the concurrent analysis
       if (concurrent_task)
-        initialize_concurrent_analysis();
+        initialize_concurrent_analysis(false/*replay*/);
       // If it's empty we're done, otherwise we go back on the queue
       if (!internal_space.exists())
       {
@@ -872,7 +871,7 @@ namespace Legion {
 #endif
         // Still need to do any rendezvous for concurrent analysis
         if (concurrent_task)
-          initialize_concurrent_analysis();
+          initialize_concurrent_analysis(true/*replay*/);
         // We have no local points, so we can just trigger
         if (serdez_redop_fns == NULL)
         {
@@ -929,8 +928,7 @@ namespace Legion {
         runtime->forest->perform_dependence_analysis(this, idx, req, 
                                                      projection_info,
                                                      privilege_paths[idx],
-                                                     refinement_tracker,
-                                                     map_applied_conditions);
+                                                     refinement_tracker);
       }
     }
 
@@ -1164,7 +1162,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    FutureMapImpl* ReplIndexTask::create_future_map(TaskContext *ctx,
+    FutureMap ReplIndexTask::create_future_map(TaskContext *ctx,
                                 IndexSpace launch_space, IndexSpace shard_space)
     //--------------------------------------------------------------------------
     {
@@ -1178,14 +1176,14 @@ namespace Legion {
       IndexSpaceNode *shard_node = 
         ((launch_space == shard_space) || !shard_space.exists()) ?
         launch_node : runtime->forest->get_node(shard_space);
+      const DistributedID future_map_did = repl_ctx->get_next_distributed_id();
       // Make a replicate future map 
-      return new ReplFutureMapImpl(repl_ctx, this, launch_node, shard_node,
-          runtime, runtime->get_available_distributed_id(),
-          runtime->address_space, get_provenance());
+      return repl_ctx->shard_manager->deduplicate_future_map_creation(repl_ctx,
+          this, launch_node, shard_node, future_map_did, get_provenance());
     } 
 
     //--------------------------------------------------------------------------
-    void ReplIndexTask::initialize_concurrent_analysis(void)
+    void ReplIndexTask::initialize_concurrent_analysis(bool replay)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -1597,10 +1595,9 @@ namespace Legion {
         region_node->invalidate_refinement(ctx, refinement_mask,
             false/*self*/, *repl_ctx, map_applied_conditions, to_release);
         // Register this refinement in the tree 
-        region_node->record_refinement(ctx, set, refinement_mask, 
-                                       map_applied_conditions);
+        region_node->record_refinement(ctx, set, refinement_mask); 
         // Remove the CONTEXT_REF on the set now that it is registered
-        if (set->remove_base_valid_ref(CONTEXT_REF))
+        if (set->remove_base_gc_ref(CONTEXT_REF))
           assert(false); // should never actually hit this
         if (!map_applied_conditions.empty())
           Runtime::phase_barrier_arrive(mapped_barrier, 1/*count*/,
@@ -1989,7 +1986,7 @@ namespace Legion {
             assert(finder != sharded_region_version_infos.end());
 #endif
             PendingEquivalenceSet *pending = new PendingEquivalenceSet(*rit);
-            pending->record_all(finder->second, map_applied_conditions);
+            pending->record_all(finder->second);
             // Context takes ownership at this point
             parent_ctx->record_pending_disjoint_complete_set(pending, 
                                                              pit->second);
@@ -2019,8 +2016,7 @@ namespace Legion {
         {
           // Still propagate the refinement so we can do lookups
           // correctly for control replication
-          it->first->propagate_refinement(ctx, NULL/*no child*/, it->second,
-                                          map_applied_conditions);
+          it->first->propagate_refinement(ctx, NULL/*no child*/, it->second);
           continue;
         }
         // We're not actually going to make the equivalence sets here
@@ -2030,8 +2026,7 @@ namespace Legion {
         // actual owner of the initial equivalence set will be done
         // with a first touch policy so that the first writer will
         // the one to make the equivalence sets
-        it->first->propagate_refinement(ctx, children, it->second, 
-                                        map_applied_conditions);
+        it->first->propagate_refinement(ctx, children, it->second); 
       }
       // Now we do the replicated partitions and regions
       if (!replicated_partitions.empty() || !replicated_regions.empty())
@@ -2071,9 +2066,9 @@ namespace Legion {
                                                       child, mask, did, first);
               if (first)
                 initialize_replicated_set(set, mask, map_applied_conditions);
-              child->record_refinement(ctx, set, mask, map_applied_conditions);
+              child->record_refinement(ctx, set, mask);
               // Remove the CONTEXT_REF on the set now that it is registered
-              if (set->remove_base_valid_ref(CONTEXT_REF))
+              if (set->remove_base_gc_ref(CONTEXT_REF))
                 assert(false); // should never actually hit this
             }
           }
@@ -2093,9 +2088,9 @@ namespace Legion {
                                                       child, mask, did, first);
               if (first)
                 initialize_replicated_set(set, mask, map_applied_conditions);
-              child->record_refinement(ctx, set, mask, map_applied_conditions);
+              child->record_refinement(ctx, set, mask);
               // Remove the CONTEXT_REF on the set now that it is registered
-              if (set->remove_base_valid_ref(CONTEXT_REF))
+              if (set->remove_base_gc_ref(CONTEXT_REF))
                 assert(false); // should never actually hit this
             }
             delete itr;
@@ -2125,10 +2120,9 @@ namespace Legion {
                                         it->second, mask, did, first);
           if (first)
             initialize_replicated_set(set, mask, map_applied_conditions);
-          it->second->record_refinement(ctx, set, mask, 
-                                        map_applied_conditions);
+          it->second->record_refinement(ctx, set, mask); 
           // Remove the CONTEXT_REF on the set now that it is registered
-          if (set->remove_base_valid_ref(CONTEXT_REF))
+          if (set->remove_base_gc_ref(CONTEXT_REF))
             assert(false); // should never actually hit this
         }
 #ifdef DEBUG_LEGION
@@ -2297,8 +2291,7 @@ namespace Legion {
       runtime->forest->perform_dependence_analysis(this, 0/*idx*/, 
                                                    requirement,
                                                    projection_info,
-                                                   privilege_path, tracker,
-                                                   map_applied_conditions);
+                                                   privilege_path, tracker);
     }
 
     //--------------------------------------------------------------------------
@@ -2507,8 +2500,7 @@ namespace Legion {
       runtime->forest->perform_dependence_analysis(this, 0/*idx*/,
                                                    requirement,
                                                    projection_info,
-                                                   privilege_path, tracker,
-                                                   map_applied_conditions);
+                                                   privilege_path, tracker);
     }
 
     //--------------------------------------------------------------------------
@@ -2752,8 +2744,7 @@ namespace Legion {
         runtime->forest->perform_dependence_analysis(this, idx, req, 
                                                      projection_info,
                                                      src_privilege_paths[idx],
-                                                     refinement_tracker,
-                                                     map_applied_conditions);
+                                                     refinement_tracker);
       }
       for (unsigned idx = 0; idx < dst_requirements.size(); idx++)
       {
@@ -2769,8 +2760,7 @@ namespace Legion {
         runtime->forest->perform_dependence_analysis(this, index, req, 
                                                      projection_info,
                                                      dst_privilege_paths[idx],
-                                                     refinement_tracker,
-                                                     map_applied_conditions);
+                                                     refinement_tracker);
         // Switch the privileges back when we are done
         if (is_reduce_req)
           req.privilege = LEGION_REDUCE;
@@ -2787,8 +2777,7 @@ namespace Legion {
           runtime->forest->perform_dependence_analysis(this, offset + idx, req,
                                                  projection_info,
                                                  gather_privilege_paths[idx],
-                                                 refinement_tracker,
-                                                 map_applied_conditions);
+                                                 refinement_tracker);
         }
       }
       if (!dst_indirect_requirements.empty())
@@ -2804,8 +2793,7 @@ namespace Legion {
           runtime->forest->perform_dependence_analysis(this, offset + idx, req,
                                                  projection_info,
                                                  scatter_privilege_paths[idx],
-                                                 refinement_tracker,
-                                                 map_applied_conditions);
+                                                 refinement_tracker);
         }
       }
     }
@@ -3035,8 +3023,7 @@ namespace Legion {
                                                      src_requirements[idx],
                                                      projection_info,
                                                      src_privilege_paths[idx],
-                                                     refinement_tracker,
-                                                     map_applied_conditions);
+                                                     refinement_tracker);
       }
       for (unsigned idx = 0; idx < dst_requirements.size(); idx++)
       {
@@ -3052,8 +3039,7 @@ namespace Legion {
                                                      dst_requirements[idx],
                                                      projection_info,
                                                      dst_privilege_paths[idx],
-                                                     refinement_tracker,
-                                                     map_applied_conditions);
+                                                     refinement_tracker);
         // Switch the privileges back when we are done
         if (is_reduce_req)
           dst_requirements[idx].privilege = LEGION_REDUCE;
@@ -3069,8 +3055,7 @@ namespace Legion {
                                                  src_indirect_requirements[idx],
                                                  gather_info,
                                                  gather_privilege_paths[idx],
-                                                 refinement_tracker,
-                                                 map_applied_conditions);
+                                                 refinement_tracker);
         }
       }
       if (!dst_indirect_requirements.empty())
@@ -3084,8 +3069,7 @@ namespace Legion {
                                                  dst_indirect_requirements[idx],
                                                  scatter_info,
                                                  scatter_privilege_paths[idx],
-                                                 refinement_tracker,
-                                                 map_applied_conditions);
+                                                 refinement_tracker);
         }
       }
     }
@@ -3884,7 +3868,7 @@ namespace Legion {
       {
         for (std::vector<EquivalenceSet*>::const_iterator it =
               to_release.begin(); it != to_release.end(); it++)
-          if ((*it)->remove_base_valid_ref(DISJOINT_COMPLETE_REF))
+          if ((*it)->remove_base_gc_ref(DISJOINT_COMPLETE_REF))
             delete (*it);
         to_release.clear();
       }
@@ -4061,10 +4045,20 @@ namespace Legion {
       assert(sources.empty());
       assert(future_map.impl != NULL);
 #endif
-      if (thunk->need_all_futures())
-        future_map.impl->get_all_futures(sources);
+      if (!thunk->need_all_futures())
+      {
+#ifdef DEBUG_LEGION
+        ReplicateContext *repl_ctx = 
+          dynamic_cast<ReplicateContext*>(parent_ctx);
+        assert(repl_ctx != NULL);
+#else
+        ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
+#endif
+        future_map.impl->get_shard_local_futures(
+            repl_ctx->owner_shard->shard_id, sources);
+      }
       else
-        future_map.impl->get_shard_local_futures(sources);
+        future_map.impl->get_all_futures(sources);
     }
 
     //--------------------------------------------------------------------------
@@ -4505,8 +4499,7 @@ namespace Legion {
       runtime->forest->perform_dependence_analysis(this, 0/*idx*/,
                                                    requirement,
                                                    projection_info,
-                                                   privilege_path, tracker,
-                                                   map_applied_conditions);
+                                                   privilege_path, tracker);
       // Record this dependent partition op with the context so that it 
       // can track implicit dependences on it for later operations
       parent_ctx->update_current_implicit(this);
@@ -4995,7 +4988,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    FutureMapImpl* ReplMustEpochOp::create_future_map(TaskContext *ctx,
+    FutureMap ReplMustEpochOp::create_future_map(TaskContext *ctx,
                                 IndexSpace launch_space, IndexSpace shard_space)
     //--------------------------------------------------------------------------
     {
@@ -5009,9 +5002,9 @@ namespace Legion {
       IndexSpaceNode *shard_node = 
         ((launch_space == shard_space) || !shard_space.exists()) ?
         launch_node : runtime->forest->get_node(shard_space);
-      return new ReplFutureMapImpl(repl_ctx, this, launch_node, shard_node,
-          runtime, runtime->get_available_distributed_id(),
-          runtime->address_space, get_provenance());
+      const DistributedID future_map_did = repl_ctx->get_next_distributed_id();
+      return repl_ctx->shard_manager->deduplicate_future_map_creation(repl_ctx,
+          this, launch_node, shard_node, future_map_did, get_provenance());
     }
 
     //--------------------------------------------------------------------------
@@ -5870,8 +5863,13 @@ namespace Legion {
     {
 #ifdef DEBUG_LEGION
       assert(sources.empty());
+      ReplicateContext *repl_ctx = dynamic_cast<ReplicateContext*>(parent_ctx);
+      assert(repl_ctx != NULL);
+#else
+      ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
 #endif
-      future_map.impl->get_shard_local_futures(sources);
+      future_map.impl->get_shard_local_futures(
+          repl_ctx->owner_shard->shard_id, sources);
     }
 
     //--------------------------------------------------------------------------
@@ -5911,10 +5909,10 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(serdez_redop_fns != NULL);
 #endif
-      for (std::map<DomainPoint,Future>::const_iterator it = 
+      for (std::map<DomainPoint,FutureImpl*>::const_iterator it = 
             sources.begin(); it != sources.end(); it++)
       {
-        FutureImpl *impl = it->second.impl;
+        FutureImpl *impl = it->second;
         size_t src_size = 0;
         const void *source = impl->find_internal_buffer(parent_ctx, src_size);
         (*(serdez_redop_fns->fold_fn))(redop, serdez_redop_buffer, 
@@ -5970,10 +5968,10 @@ namespace Legion {
     {
       std::vector<FutureInstance*> instances;
       instances.reserve(sources.size());
-      for (std::map<DomainPoint,Future>::const_iterator it = 
+      for (std::map<DomainPoint,FutureImpl*>::const_iterator it = 
             sources.begin(); it != sources.end(); it++)
       {
-        FutureImpl *impl = it->second.impl;
+        FutureImpl *impl = it->second;
         FutureInstance *instance = impl->get_canonical_instance();
         if (instance->size != redop->sizeof_rhs)
           REPORT_LEGION_ERROR(ERROR_FUTURE_MAP_REDOP_TYPE_MISMATCH,
@@ -7145,8 +7143,7 @@ namespace Legion {
       // Add a valid reference to the instances to act as an acquire to keep
       // them valid through the end of mapping them, we'll release the valid
       // references when we are done mapping
-      WrapperReferenceMutator mutator(map_applied_conditions);
-      manager->add_base_valid_ref(MAPPING_ACQUIRE_REF, &mutator);
+      manager->add_base_valid_ref(MAPPING_ACQUIRE_REF);
       ShardedView *sharded_view = region.impl->get_sharded_view();
       ApEvent detach_event;
       if ((sharded_view != NULL) || (is_owner_shard))
@@ -7365,8 +7362,7 @@ namespace Legion {
       runtime->forest->perform_dependence_analysis(this, 0/*idx*/,
                                                    requirement,
                                                    projection_info,
-                                                   privilege_path, tracker,
-                                                   map_applied_conditions);
+                                                   privilege_path, tracker);
     }
 
     //--------------------------------------------------------------------------
@@ -7536,8 +7532,7 @@ namespace Legion {
       runtime->forest->perform_dependence_analysis(this, 0/*idx*/,
                                                    requirement,
                                                    projection_info,
-                                                   privilege_path, tracker,
-                                                   map_applied_conditions);
+                                                   privilege_path, tracker);
     }
 
     /////////////////////////////////////////////////////////////
@@ -9094,8 +9089,8 @@ namespace Legion {
           node->column_source->get_field_mask(req.privilege_fields);
         mapped_equivalence_sets[idx] =
           new EquivalenceSet(runtime, runtime->get_available_distributed_id(),
-              runtime->address_space, runtime->address_space, node,
-              true/*reg now*/, collective_mapping, &mask);
+              runtime->address_space, node, true/*reg now*/,
+              collective_mapping, &mask);
       }
       // Now either send the shards to the remote nodes or record them locally
       for (std::map<AddressSpaceID,std::vector<ShardTask*> >::const_iterator 
@@ -9243,7 +9238,7 @@ namespace Legion {
         derez.deserialize(mask);
         RegionNode *region_node = runtime->forest->get_node(handle);
         mapped_equivalence_sets[idx] = new EquivalenceSet(runtime, did,
-            owner_space, owner_space, region_node, true/*register now*/,
+            owner_space, region_node, true/*register now*/,
             collective_mapping, &mask);
         // This adds a CONTEXT_REF for each local shard
         mapped_equivalence_sets[idx]->initialize_collective_references(
@@ -9316,7 +9311,7 @@ namespace Legion {
           return result;
         }
         // Didn't find it so make it
-        result = new EquivalenceSet(runtime, did, owner_space, owner_space,
+        result = new EquivalenceSet(runtime, did, owner_space,
               region_node, true/*register now*/, collective_mapping, &mask);
         // This adds as many context refs as there are shards
         result->initialize_collective_references(local_shards.size());
@@ -9328,7 +9323,7 @@ namespace Legion {
       }
       else // Only one shard here on this node so just make it
       {
-        result = new EquivalenceSet(runtime, did, owner_space, owner_space,
+        result = new EquivalenceSet(runtime, did, owner_space,
               region_node, true/*register now*/, collective_mapping, &mask);
         // This adds as many context refs as there are shards
         result->initialize_collective_references(1/*local shard count*/);
@@ -9465,6 +9460,111 @@ namespace Legion {
       }
       if (wait_on.exists() && !wait_on.has_triggered())
         wait_on.wait();
+    }
+
+    //--------------------------------------------------------------------------
+    FutureMap ShardManager::deduplicate_future_map_creation(
+        ReplicateContext *ctx, Operation *op, IndexSpaceNode *domain,
+        IndexSpaceNode *shard_domain, DistributedID did, Provenance *provenance)
+    //--------------------------------------------------------------------------
+    {
+      if (local_shards.size() > 1)
+      {
+        AutoLock m_lock(manager_lock);
+        // See if we already have this here or not
+        std::map<DistributedID,std::pair<ReplFutureMapImpl*,size_t> >::iterator
+          finder = created_future_maps.find(did);
+        if (finder != created_future_maps.end())
+        {
+          FutureMap result(finder->second.first);
+#ifdef DEBUG_LEGION
+          assert(finder->second.second > 0);
+#endif
+          if (--finder->second.second == 0)
+          {
+            if (finder->second.first->remove_base_gc_ref(RUNTIME_REF))
+              assert(false); // should never be deleted
+            created_future_maps.erase(finder);
+          }
+          return result;
+        }
+        // Didn't find it so make it
+        ReplFutureMapImpl *result = new ReplFutureMapImpl(ctx, this, op,
+            domain, shard_domain, runtime, did, provenance, collective_mapping);
+        // Add a reference to it to keep it from being deleted and then 
+        // register it with the runtime
+        result->add_base_gc_ref(RUNTIME_REF);
+        result->register_with_runtime();
+        // Record it for the shards that come later
+        std::pair<ReplFutureMapImpl*,size_t> &pending = 
+          created_future_maps[did];
+        pending.first = result;
+        pending.second = local_shards.size() - 1;
+        return FutureMap(result);
+      }
+      else
+      {
+        ReplFutureMapImpl *impl = new ReplFutureMapImpl(ctx, this, op, domain,
+            shard_domain, runtime, did, provenance, collective_mapping);
+        // Get a reference on it before we register it
+        FutureMap result(impl);
+        impl->register_with_runtime();
+        return result;
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    FutureMap ShardManager::deduplicate_future_map_creation(
+        ReplicateContext *ctx, IndexSpaceNode *domain,
+        IndexSpaceNode *shard_domain, size_t index,
+        DistributedID did, ApEvent completion, Provenance *provenance)
+    //--------------------------------------------------------------------------
+    {
+      if (local_shards.size() > 1)
+      {
+        AutoLock m_lock(manager_lock);
+        // See if we already have this here or not
+        std::map<DistributedID,std::pair<ReplFutureMapImpl*,size_t> >::iterator
+          finder = created_future_maps.find(did);
+        if (finder != created_future_maps.end())
+        {
+          FutureMap result(finder->second.first);
+#ifdef DEBUG_LEGION
+          assert(finder->second.second > 0);
+#endif
+          if (--finder->second.second == 0)
+          {
+            if (finder->second.first->remove_base_gc_ref(RUNTIME_REF))
+              assert(false); // should never be deleted
+            created_future_maps.erase(finder);
+          }
+          return result;
+        }
+        // Didn't find it so make it
+        ReplFutureMapImpl *result = new ReplFutureMapImpl(ctx, this, runtime,
+                                domain, shard_domain, did, index, completion,
+                                provenance, collective_mapping);
+        // Add a reference to it to keep it from being deleted and then 
+        // register it with the runtime
+        result->add_base_gc_ref(RUNTIME_REF);
+        result->register_with_runtime();
+        // Record it for the shards that come later
+        std::pair<ReplFutureMapImpl*,size_t> &pending = 
+          created_future_maps[did];
+        pending.first = result;
+        pending.second = local_shards.size() - 1;
+        return FutureMap(result);
+      }
+      else
+      {
+        ReplFutureMapImpl *impl = new ReplFutureMapImpl(ctx, this, runtime,
+            domain, shard_domain, did, index, completion,
+            provenance, collective_mapping);
+        // Get a reference on it before we register it
+        FutureMap result(impl);
+        impl->register_with_runtime();
+        return result;
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -9735,47 +9835,6 @@ namespace Legion {
         if ((*it)->shard_id == target)
         {
           (*it)->handle_collective_message(derez);
-          return;
-        }
-      }
-      // Should never get here
-      assert(false);
-    }
-
-    //--------------------------------------------------------------------------
-    void ShardManager::send_future_map_request(ShardID target, Serializer &rez)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(target < address_spaces->size());
-#endif
-      AddressSpaceID target_space = (*address_spaces)[target];
-      // Check to see if this is a local shard
-      if (target_space == runtime->address_space)
-      {
-        Deserializer derez(rez.get_buffer(), rez.get_used_bytes());
-        // Have to unpack the preample we already know
-        ReplicationID local_repl;
-        derez.deserialize(local_repl);     
-        handle_future_map_request(derez);
-      }
-      else
-        runtime->send_control_replicate_future_map_request(target_space, rez);
-    }
-
-    //--------------------------------------------------------------------------
-    void ShardManager::handle_future_map_request(Deserializer &derez)
-    //--------------------------------------------------------------------------
-    {
-      // Figure out which shard we are going to
-      ShardID target;
-      derez.deserialize(target);
-      for (std::vector<ShardTask*>::const_iterator it = 
-            local_shards.begin(); it != local_shards.end(); it++)
-      {
-        if ((*it)->shard_id == target)
-        {
-          (*it)->handle_future_map_request(derez);
           return;
         }
       }
@@ -10515,17 +10574,6 @@ namespace Legion {
       derez.deserialize(repl_id);
       ShardManager *manager = runtime->find_shard_manager(repl_id);
       manager->handle_collective_message(derez);
-    }
-
-    //--------------------------------------------------------------------------
-    /*static*/ void ShardManager::handle_future_map_request(Deserializer &derez,
-                                                            Runtime *runtime)
-    //--------------------------------------------------------------------------
-    {
-      ReplicationID repl_id;
-      derez.deserialize(repl_id);
-      ShardManager *manager = runtime->find_shard_manager(repl_id);
-      manager->handle_future_map_request(derez);
     }
 
     //--------------------------------------------------------------------------
@@ -12254,25 +12302,18 @@ namespace Legion {
                                    std::map<IndexSpace,IndexPartition> &handles)
     //--------------------------------------------------------------------------
     {
-      // Need the lock in case we are unpacking other things here
+      // Only put the non-empty partitions into our local set
+      for (std::map<IndexSpace,IndexPartition>::const_iterator it = 
+            handles.begin(); it != handles.end(); it++)
       {
-        AutoLock c_lock(collective_lock);
-        // Only put the non-empty partitions into our local set
-        for (std::map<IndexSpace,IndexPartition>::const_iterator it = 
-              handles.begin(); it != handles.end(); it++)
-        {
-          if (!it->second.exists())
-            continue;
-          non_empty_handles.insert(*it);
-        }
+        if (!it->second.exists())
+          continue;
+        non_empty_handles.insert(*it);
       }
       // Now we do the exchange
       perform_collective_sync();
       // When we wake up we should have all the handles and no need the lock
       // to access them
-#ifdef DEBUG_LEGION
-      assert(handles.size() == non_empty_handles.size());
-#endif
       handles = non_empty_handles;
     }
 
@@ -13031,16 +13072,15 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureNameExchange::FutureNameExchange(ReplicateContext *ctx,
-                   CollectiveID id, ReplFutureMapImpl *m, ReferenceMutator *mut)
-      : AllGatherCollective(ctx, id), future_map(m), mutator(mut)
+                                           CollectiveIndexLocation loc)
+      : AllGatherCollective(loc, ctx)
     //--------------------------------------------------------------------------
     {
     }
 
     //--------------------------------------------------------------------------
     FutureNameExchange::FutureNameExchange(const FutureNameExchange &rhs)
-      : AllGatherCollective(rhs), future_map(rhs.future_map), 
-        mutator(rhs.mutator)
+      : AllGatherCollective(rhs)
     //--------------------------------------------------------------------------
     {
       // should never be called
@@ -13091,29 +13131,22 @@ namespace Legion {
       {
         DomainPoint point;
         derez.deserialize(point);
-        FutureImpl *impl = FutureImpl::unpack_future(runtime, derez, mutator);
-        if (impl != NULL)
-        {
-          // Add the reference ourselves so we can capture the effects
-          impl->add_base_gc_ref(FUTURE_HANDLE_REF, mutator);
-          results[point] = Future(impl, false/*need referece*/);
-        }
-        else
-          results[point] = Future();
+        results[point] = FutureImpl::unpack_future(runtime, derez);
       }
     }
 
     //--------------------------------------------------------------------------
     void FutureNameExchange::exchange_future_names(
-                                          std::map<DomainPoint,Future> &futures)
+                                     std::map<DomainPoint,FutureImpl*> &futures)
     //--------------------------------------------------------------------------
     {
-      {
-        AutoLock c_lock(collective_lock);
-        results.insert(futures.begin(), futures.end());
-      }
+      for (std::map<DomainPoint,FutureImpl*>::const_iterator it =
+            futures.begin(); it != futures.end(); it++)
+        results[it->first] = Future(it->second);
       perform_collective_sync();
-      futures = results;
+      for (std::map<DomainPoint,Future>::const_iterator it =
+            results.begin(); it != results.end(); it++)
+        futures.insert(std::make_pair(it->first, it->second.impl));
     }
 
     /////////////////////////////////////////////////////////////
@@ -13232,7 +13265,6 @@ namespace Legion {
       instances.resize(mappings.size());
       // Add valid references to all the physical instances that we will
       // hold until all the must epoch operations are done with the exchange
-      WrapperReferenceMutator mutator(done_events);
       for (unsigned idx1 = 0; idx1 < mappings.size(); idx1++)
       {
         std::vector<DistributedID> &dids = instances[idx1];
@@ -13244,7 +13276,7 @@ namespace Legion {
           dids[idx2] = manager->did;
           if (held_references.find(manager) != held_references.end())
             continue;
-          manager->add_base_valid_ref(REPLICATION_REF, &mutator);
+          manager->add_base_valid_ref(REPLICATION_REF);
           held_references.insert(manager);
         }
       }
@@ -13294,7 +13326,6 @@ namespace Legion {
           ready.wait();
       }
       // Lastly we need to put acquire references on any of local instances
-      WrapperReferenceMutator mutator(done_events);
       for (unsigned idx = 0; idx < constraint_indexes.size(); idx++)
       {
         const unsigned constraint_index = constraint_indexes[idx];
@@ -13310,7 +13341,15 @@ namespace Legion {
           if (acquired.find(manager) != acquired.end())
             continue;
           manager->add_base_resource_ref(INSTANCE_MAPPER_REF);
-          manager->add_base_valid_ref(MAPPING_ACQUIRE_REF, &mutator);
+#ifdef DEBUG_LEGION
+#ifndef NDEBUG
+          bool result = 
+#endif
+#endif
+          manager->acquire_instance(MAPPING_ACQUIRE_REF);
+#ifdef DEBUG_LEGION
+          assert(result);
+#endif
           acquired[manager] = 1/*count*/; 
         }
       }
@@ -13480,7 +13519,6 @@ namespace Legion {
 #endif
       // Add valid references to all the physical instances that we will
       // hold until all the must epoch operations are done with the exchange
-      WrapperReferenceMutator mutator(done_events);
       for (unsigned idx = 0; idx < mappings.size(); idx++)
       {
         for (std::vector<Mapping::PhysicalInstance>::const_iterator it = 
@@ -13489,7 +13527,7 @@ namespace Legion {
           PhysicalManager *manager = it->impl->as_physical_manager();
           if (held_references.find(manager) != held_references.end())
             continue;
-          manager->add_base_valid_ref(REPLICATION_REF, &mutator);
+          manager->add_base_valid_ref(REPLICATION_REF);
           held_references.insert(manager);
         }
       }
@@ -13594,7 +13632,7 @@ namespace Legion {
           if (acquired.find(manager) != acquired.end())
             continue;
           manager->add_base_resource_ref(INSTANCE_MAPPER_REF);
-          manager->add_base_valid_ref(MAPPING_ACQUIRE_REF, &mutator);
+          manager->add_base_valid_ref(MAPPING_ACQUIRE_REF);
           acquired[manager] = 1/*count*/;
         }
       }
