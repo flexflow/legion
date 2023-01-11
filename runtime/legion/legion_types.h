@@ -336,7 +336,6 @@ namespace Legion {
       LG_FUTURE_CALLBACK_TASK_ID,
       LG_CALLBACK_RELEASE_TASK_ID,
       LG_FUTURE_BROADCAST_TASK_ID,
-      LG_DEFERRED_DELETE_FUTURE_INST_TASK_ID,
       LG_TOP_FINISH_TASK_ID,
       LG_MAPPER_TASK_ID,
       LG_DISJOINTNESS_TASK_ID,
@@ -455,7 +454,6 @@ namespace Legion {
         "Future Callback",                                        \
         "Future Callback Release",                                \
         "Future Broadcast",                                       \
-        "Defer Delete Future Instance",                           \
         "Top Finish",                                             \
         "Mapper Task",                                            \
         "Disjointness Test",                                      \
@@ -819,8 +817,6 @@ namespace Legion {
       SEND_FUTURE_RESULT,
       SEND_FUTURE_RESULT_SIZE,
       SEND_FUTURE_SUBSCRIPTION,
-      SEND_FUTURE_NOTIFICATION,
-      SEND_FUTURE_BROADCAST,
       SEND_FUTURE_CREATE_INSTANCE_REQUEST,
       SEND_FUTURE_CREATE_INSTANCE_RESPONSE,
       SEND_FUTURE_MAP_REQUEST,
@@ -1048,8 +1044,6 @@ namespace Legion {
         "Send Future Result",                                         \
         "Send Future Result Size",                                    \
         "Send Future Subscription",                                   \
-        "Send Future Notification",                                   \
-        "Send Future Broadcast",                                      \
         "Send Future Create Instance Request",                        \
         "Send Future Create Instance Response",                       \
         "Send Future Map Future Request",                             \
@@ -1501,7 +1495,7 @@ namespace Legion {
     // Ones that have been commented out are free to be reused
     enum CollectiveIndexLocation {
       //COLLECTIVE_LOC_0 = 0, 
-      COLLECTIVE_LOC_1 = 1,
+      //COLLECTIVE_LOC_1 = 1,
       COLLECTIVE_LOC_2 = 2,
       COLLECTIVE_LOC_3 = 3,
       COLLECTIVE_LOC_4 = 4, 

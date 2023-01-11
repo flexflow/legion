@@ -734,6 +734,11 @@ namespace Legion {
           const std::deque<MappingInstance>         &output,
           const InstanceSet                         &sources,
           std::vector<unsigned>                     &ranking) const;
+      void log_mapping_decision(unsigned index, const RegionRequirement &req,
+                                const InstanceSet &targets,
+                                bool postmapping = false) const;
+      void log_virtual_mapping(unsigned index, 
+                               const RegionRequirement &req) const;
 #ifdef DEBUG_LEGION
     protected:
       virtual void dump_physical_state(RegionRequirement *req, unsigned idx,
@@ -3853,6 +3858,7 @@ namespace Legion {
                                        const std::vector<size_t> &field_sizes,
                                              LayoutConstraintSet &cons,
                                              ApEvent &ready_event,
+                                             LgEvent &unique_event,
                                              size_t &instance_footprint);
     protected:
       void activate_attach_op(void);
@@ -4028,6 +4034,7 @@ namespace Legion {
       VersionInfo version_info;
       unsigned parent_req_index;
       std::set<RtEvent> map_applied_conditions;
+      ApEvent detach_event;
       Future result;
       bool flush;
     };
@@ -4069,8 +4076,10 @@ namespace Legion {
       virtual void trigger_commit(void);
       virtual unsigned find_parent_index(unsigned idx);
     public:
+      // Override for control replication
+      virtual ApEvent get_complete_effects(void);
       void complete_detach(void);
-      void handle_point_complete(void);
+      void handle_point_complete(ApEvent point_effects);
       void handle_point_commit(void);
     protected:
       void activate_index_detach(void);
@@ -4084,6 +4093,7 @@ namespace Legion {
       IndexSpaceNode*                               launch_space;
       std::vector<PointDetachOp*>                   points;
       std::set<RtEvent>                             map_applied_conditions;
+      std::vector<ApEvent>                          point_effects;
       Future                                        result;
       unsigned                                      parent_req_index;
       unsigned                                      points_completed;

@@ -1314,7 +1314,8 @@ extern "C" {
                                          legion_color_t color /* = AUTO_GENERATE_ID */,
                                          legion_mapper_id_t id /* = 0 */,
                                          legion_mapping_tag_id_t tag /* = 0 */,
-                                         legion_partition_kind_t part_kind /* = DISJOINT_KIND */);
+                                         legion_partition_kind_t part_kind /* = DISJOINT_KIND */,
+    legion_untyped_buffer_t map_arg);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1333,7 +1334,8 @@ extern "C" {
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
     legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
-    legion_mapping_tag_id_t tag /* = 0 */);
+    legion_mapping_tag_id_t tag /* = 0 */,
+    legion_untyped_buffer_t map_arg);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1352,7 +1354,8 @@ extern "C" {
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
     legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
-    legion_mapping_tag_id_t tag /* = 0 */);
+    legion_mapping_tag_id_t tag /* = 0 */,
+    legion_untyped_buffer_t map_arg);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1371,7 +1374,8 @@ extern "C" {
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
     legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
-    legion_mapping_tag_id_t tag /* = 0 */);
+    legion_mapping_tag_id_t tag /* = 0 */,
+    legion_untyped_buffer_t map_arg);
 
   /**
    * @return Caller takes ownership of return value.
@@ -1390,7 +1394,8 @@ extern "C" {
     legion_partition_kind_t part_kind /* = COMPUTE_KIND */,
     legion_color_t color /* = AUTO_GENERATE_ID */,
     legion_mapper_id_t id /* = 0 */,
-    legion_mapping_tag_id_t tag /* = 0 */);
+    legion_mapping_tag_id_t tag /* = 0 */,
+    legion_untyped_buffer_t map_arg);
 
   /**
    * @return Caller takes ownership of return value.
@@ -2092,6 +2097,22 @@ extern "C" {
   legion_logical_partition_retrieve_name(legion_runtime_t runtime,
                                          legion_logical_partition_t handle,
                                          const char **result);
+
+  /**
+   * The caller must have ownership of all regions, partitions and fields
+   * passed into this function.
+   *
+   * @see Legion::Runtime::advise_analysis_subtree()
+   */
+  void legion_advise_analysis_subtree(legion_runtime_t runtime,
+                                      legion_context_t ctx,
+                                      legion_logical_region_t parent,
+                                      int num_regions,
+                                      legion_logical_region_t* regions,
+                                      int num_parts,
+                                      legion_logical_partition_t* partitions,
+                                      int num_fields,
+                                      legion_field_id_t* fields);
 
   // -----------------------------------------------------------------------
   // Region Requirement Operations

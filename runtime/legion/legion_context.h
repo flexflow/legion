@@ -799,11 +799,7 @@ namespace Legion {
       // Our cached set of index spaces for immediate domains
       std::map<Domain,IndexSpace> index_launch_spaces;
     protected:
-#ifdef LEGION_MALLOC_INSTANCES
-      std::vector<std::pair<PhysicalInstance,uintptr_t> > task_local_instances;
-#else
       std::set<PhysicalInstance> task_local_instances;
-#endif
     protected:
       bool task_executed;
       bool has_inline_accessor;
@@ -1842,6 +1838,9 @@ namespace Legion {
       // Some help for Legion Spy for validating fences
       std::deque<UniqueID> ops_since_last_fence;
       std::set<ApEvent> previous_completion_events;
+      // And for verifying the cummulativity property of task
+      // (e.g. that they are not complete until all their children are)
+      std::vector<ApEvent> cummulative_child_completion_events;
 #endif
     protected: // Queues for fusing together small meta-tasks
       mutable LocalLock                               prepipeline_lock;
@@ -2903,6 +2902,8 @@ namespace Legion {
         { return deletion_execution_barrier.next(this); }
       inline RtBarrier get_next_detach_resource_barrier(void)
         { return detach_resource_barrier.next(this); }
+      inline ApBarrier get_next_detach_effects_barrier(void)
+        { return detach_effects_barrier.next(this); }
       inline ApBarrier get_next_future_map_wait_barrier(void)
         { return future_map_wait_barrier.next(this); }
       inline RtBarrier get_next_dependent_partition_barrier(void)
@@ -3024,6 +3025,10 @@ namespace Legion {
           const unsigned safe_level, const TaskLauncher &launcher) const;
       void hash_index_launcher(Murmur3Hasher &hasher,
           const unsigned safe_level, const IndexTaskLauncher &launcher);
+      void hash_execution_constraints(Murmur3Hasher &hasher,
+          const ExecutionConstraintSet &constraints);
+      void hash_layout_constraints(Murmur3Hasher &hasher,
+          const LayoutConstraintSet &constraints, bool hash_pointers);
     public:
       // A little help for ConsensusMatchExchange since it is templated
       static void help_complete_future(Future &f, const void *ptr,
@@ -3075,6 +3080,7 @@ namespace Legion {
       RtReplBar inline_mapping_barrier;
       RtReplBar attach_resource_barrier;
       RtLogicalBar detach_resource_barrier;
+      ApLogicalBar detach_effects_barrier;
       RtLogicalBar mapping_fence_barrier;
       RtReplBar resource_return_barrier;
       RtLogicalBar summary_fence_barrier;

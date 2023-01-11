@@ -177,8 +177,8 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
-      Future result = runtime->help_create_future(this, ApEvent::NO_AP_EVENT,
-                                                  provenance, &size);
+      Future result(new FutureImpl(this, runtime, true/*register*/,
+            runtime->get_available_distributed_id(), provenance));
       // Set the future result
       RtEvent done;
       FutureInstance *instance = NULL;
@@ -195,7 +195,7 @@ namespace Legion {
         else
           instance = copy_to_future_inst(value, size, done);
       }
-      result.impl->set_result(instance);
+      result.impl->set_result(ApEvent::NO_AP_EVENT, instance);
       if (done.exists() && !done.has_triggered())
         done.wait();
       return result;
@@ -209,11 +209,11 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
-      Future result = runtime->help_create_future(this, ApEvent::NO_AP_EVENT, 
-                                                  provenance, &size);
+      Future result(new FutureImpl(this, runtime, true/*register*/,
+            runtime->get_available_distributed_id(), provenance));
       FutureInstance *instance = new FutureInstance(buffer, size,
           ApEvent::NO_AP_EVENT, runtime, owned, resource.clone(), freefunc);
-      result.impl->set_result(instance);
+      result.impl->set_result(ApEvent::NO_AP_EVENT, instance);
       return result;
     }
 
@@ -225,8 +225,8 @@ namespace Legion {
       // No need to do a match here, there is just one shard
       const size_t future_size = sizeof(num_elements);
       memcpy(output, input, num_elements*future_size);
-      Future result = runtime->help_create_future(this, ApEvent::NO_AP_EVENT,
-                                                  provenance, &future_size);
+      Future result(new FutureImpl(this, runtime, true/*register*/,
+            runtime->get_available_distributed_id(), provenance));
       result.impl->set_local(&num_elements, future_size);
       return result;
     }
@@ -890,9 +890,6 @@ namespace Legion {
     void TaskContext::log_created_requirements(void)
     //--------------------------------------------------------------------------
     {
-      std::vector<MappingInstance> instances(1, 
-            Mapping::PhysicalInstance::get_virtual_instance());
-      const UniqueID unique_op_id = get_unique_id();
       for (std::map<unsigned,RegionRequirement>::const_iterator it = 
            created_requirements.begin(); it != created_requirements.end(); it++)
       {
@@ -900,14 +897,7 @@ namespace Legion {
         // Skip it if there are no privilege fields
         if (it->second.privilege_fields.empty())
           continue;
-        InstanceSet instance_set;
-        std::vector<PhysicalManager*> unacquired;  
-        RegionTreeID bad_tree; std::vector<FieldID> missing_fields;
-        runtime->forest->physical_convert_mapping(owner_task, 
-            it->second, instances, instance_set, bad_tree, 
-            missing_fields, NULL, unacquired, false/*do acquire_checks*/);
-        runtime->forest->log_mapping_decision(unique_op_id, this,
-            it->first, it->second, instance_set);
+        owner_task->log_virtual_mapping(it->first, it->second);
       }
     } 
 
@@ -1278,16 +1268,7 @@ namespace Legion {
           {
             LegionSpy::log_requirement_fields(get_unique_id(),
                                               it->first, overlapping_fields);
-            std::vector<MappingInstance> instances(1, 
-                          Mapping::PhysicalInstance::get_virtual_instance());
-            InstanceSet instance_set;
-            std::vector<PhysicalManager*> unacquired;  
-            RegionTreeID bad_tree; std::vector<FieldID> missing_fields;
-            runtime->forest->physical_convert_mapping(owner_task, 
-                req, instances, instance_set, bad_tree, 
-                missing_fields, NULL, unacquired, false/*do acquire_checks*/);
-            runtime->forest->log_mapping_decision(get_unique_id(), this,
-                it->first, req, instance_set);
+            owner_task->log_virtual_mapping(it->first, req);
           }
         }
       }
@@ -1322,7 +1303,6 @@ namespace Legion {
         // We need some extra logging for legion spy
         std::vector<MappingInstance> instances(1, 
               Mapping::PhysicalInstance::get_virtual_instance());
-        const UniqueID unique_op_id = get_unique_id();
         AutoLock priv_lock(privilege_lock);
         for (std::map<unsigned,RegionRequirement>::iterator it = 
               created_requirements.begin(); it != 
@@ -1341,14 +1321,7 @@ namespace Legion {
             if (!it->second.privilege_fields.empty())
             {
               // Do extra logging for legion spy
-              InstanceSet instance_set;
-              std::vector<PhysicalManager*> unacquired;  
-              RegionTreeID bad_tree; std::vector<FieldID> missing_fields;
-              runtime->forest->physical_convert_mapping(owner_task, 
-                  it->second, instances, instance_set, bad_tree, 
-                  missing_fields, NULL, unacquired, false/*do acquire_checks*/);
-              runtime->forest->log_mapping_decision(unique_op_id, this,
-                  it->first, it->second, instance_set);
+              owner_task->log_virtual_mapping(it->first, it->second);
               // Then do the result of the normal operations
               delete_reqs.resize(delete_reqs.size()+1);
               RegionRequirement &req = delete_reqs.back();
@@ -2105,16 +2078,21 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       PhysicalInstance instance;
-      Realm::ProfilingRequestSet no_requests;
-#ifdef LEGION_MALLOC_INSTANCES
-      uintptr_t ptr = runtime->allocate_deferred_instance(memory, 
-                              layout->bytes_used, false/*free*/); 
-      const RtEvent wait_on(Realm::RegionInstance::create_external(instance,
-                                          memory, ptr, layout, no_requests));
-      task_local_instances.push_back(std::make_pair(instance, ptr));
-#else
       MemoryManager *manager = runtime->find_memory_manager(memory);
-      const ApEvent wait_on(manager->create_eager_instance(instance, layout));
+#ifdef LEGION_MALLOC_INSTANCES
+      const Realm::ProfilingRequestSet no_requests;
+      const ApEvent wait_on(manager->allocate_legion_instance(layout->clone(),
+                                                      no_requests, instance));
+#else
+      LgEvent unique_event;
+      if (runtime->profiler != NULL)
+      {
+        const RtUserEvent unique = Runtime::create_rt_user_event();
+        Runtime::trigger_event(unique);
+        unique_event = unique;
+      }
+      const ApEvent wait_on(manager->create_eager_instance(instance, 
+                                              unique_event, layout));
       if (!instance.exists())
       {
         const char *mem_names[] = {
@@ -2130,8 +2108,8 @@ namespace Legion {
             "flag on the command line.", get_task_name(), get_unique_id(), 
             mem_names[memory.kind()], memory.id)
       }
-      task_local_instances.insert(instance);
 #endif
+      task_local_instances.insert(instance);
       if (wait_on.exists())
       {
         bool poisoned = false;
@@ -2147,17 +2125,17 @@ namespace Legion {
     void TaskContext::destroy_task_local_instance(PhysicalInstance instance)
     //--------------------------------------------------------------------------
     {
-#ifdef LEGION_MALLOC_INSTANCES
-      // TODO: We don't eagerly destroy local instances when they are malloc'ed
-#else
       std::set<PhysicalInstance>::iterator finder =
         task_local_instances.find(instance);
 #ifdef DEBUG_LEGION
       assert(finder != task_local_instances.end());
 #endif
       task_local_instances.erase(finder);
-      MemoryManager *manager = runtime->find_memory_manager(
-          instance.get_location());
+      MemoryManager *manager = 
+        runtime->find_memory_manager(instance.get_location());
+#ifdef LEGION_MALLOC_INSTANCES
+      manager->free_legion_instance(RtEvent::NO_RT_EVENT, instance);
+#else
       manager->free_eager_instance(instance, RtEvent::NO_RT_EVENT);
 #endif
     }
@@ -2399,23 +2377,6 @@ namespace Legion {
     uintptr_t TaskContext::escape_task_local_instance(PhysicalInstance instance)
     //--------------------------------------------------------------------------
     {
-#ifdef LEGION_MALLOC_INSTANCES
-      uintptr_t ptr = 0;
-      std::vector<std::pair<PhysicalInstance,uintptr_t> > new_instances;
-#ifdef DEBUG_LEGION
-      assert(!task_local_instances.empty());
-#endif
-      new_instances.reserve(task_local_instances.size() - 1);
-      for (std::vector<std::pair<PhysicalInstance,uintptr_t> >::iterator it =
-           task_local_instances.begin(); it != task_local_instances.end(); ++it)
-        if (it->first == instance)
-          ptr = it->second;
-        else
-          new_instances.push_back(*it);
-
-      task_local_instances.swap(new_instances);
-      return ptr;
-#else
       std::set<PhysicalInstance>::iterator finder =
         task_local_instances.find(instance);
 #ifdef DEBUG_LEGION
@@ -2425,7 +2386,6 @@ namespace Legion {
       task_local_instances.erase(finder);
       void *ptr = instance.pointer_untyped(0,0);
       return reinterpret_cast<uintptr_t>(ptr);
-#endif
     }
 
     //--------------------------------------------------------------------------
@@ -2610,13 +2570,7 @@ namespace Legion {
     void TaskContext::release_task_local_instances(void)
     //--------------------------------------------------------------------------
     {
-#ifdef LEGION_MALLOC_INSTANCES
-      for (unsigned idx = 0; idx < task_local_instances.size(); idx++)
-      {
-        std::pair<PhysicalInstance,uintptr_t> inst = task_local_instances[idx];
-        inst.first.destroy(Processor::get_current_finish_event());
-      }
-#else
+      const RtEvent done(Processor::get_current_finish_event());
       for (std::set<PhysicalInstance>::iterator it =
            task_local_instances.begin(); it !=
            task_local_instances.end(); ++it)
@@ -2624,10 +2578,12 @@ namespace Legion {
         PhysicalInstance inst = *it;
         MemoryManager *manager =
           runtime->find_memory_manager(inst.get_location());
-        manager->free_eager_instance(
-            inst, RtEvent(Processor::get_current_finish_event()));
-      }
+#ifdef LEGION_MALLOC_INSTANCES
+        manager->free_legion_instance(done, inst);
+#else
+        manager->free_eager_instance(inst, done);
 #endif
+      }
       task_local_instances.clear();
     }
 
@@ -2641,15 +2597,14 @@ namespace Legion {
       if (launcher.predicate_false_future.impl != NULL)
         return launcher.predicate_false_future;
       // Otherwise check to see if we have a value
-      const size_t future_size = launcher.predicate_false_result.get_size(); 
       FutureImpl *result = new FutureImpl(this, runtime, true/*register*/,
-        runtime->get_available_distributed_id(),
-        ApEvent::NO_AP_EVENT, provenance, &future_size);
+        runtime->get_available_distributed_id(), provenance);
+      const size_t future_size = launcher.predicate_false_result.get_size(); 
       if (future_size > 0)
         result->set_local(launcher.predicate_false_result.get_ptr(),
-            launcher.predicate_false_result.get_size(), false/*own*/);
+            future_size, false/*own*/);
       else
-        result->set_result(NULL);
+        result->set_result(ApEvent::NO_AP_EVENT, NULL);
       return Future(result);
     }
 
@@ -2682,7 +2637,8 @@ namespace Legion {
                 itr; itr++)
           {
             Future f = result->get_future(itr.p, true/*internal*/);
-            f.impl->set_result(copy_to_future_inst(target, canonical));
+            f.impl->set_result(ApEvent::NO_AP_EVENT, 
+                copy_to_future_inst(target, canonical));
           }
         }
         else
@@ -2691,7 +2647,7 @@ namespace Legion {
                 itr; itr++)
           {
             Future f = result->get_future(itr.p, true/*internal*/);
-            f.impl->set_result(NULL);
+            f.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
           }
         }
         return FutureMap(result);
@@ -2703,7 +2659,7 @@ namespace Legion {
               itr; itr++)
         {
           Future f = result->get_future(itr.p, true/*internal*/);
-          f.impl->set_result(NULL);
+          f.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
         }
       }
       else
@@ -2730,15 +2686,14 @@ namespace Legion {
       if (launcher.predicate_false_future.impl != NULL)
         return launcher.predicate_false_future;
       // Otherwise check to see if we have a value
-      const size_t future_size = launcher.predicate_false_result.get_size(); 
       FutureImpl *result = new FutureImpl(this, runtime, true/*register*/, 
-        runtime->get_available_distributed_id(),
-        ApEvent::NO_AP_EVENT, provenance, &future_size);
+        runtime->get_available_distributed_id(), provenance);
+      const size_t future_size = launcher.predicate_false_result.get_size(); 
       if (future_size > 0)
         result->set_local(launcher.predicate_false_result.get_ptr(),
-            launcher.predicate_false_result.get_size(), false/*own*/);
+            future_size, false/*own*/);
       else
-        result->set_result(NULL);
+        result->set_result(ApEvent::NO_AP_EVENT, NULL);
       return Future(result);
     }
 
@@ -6445,6 +6400,7 @@ namespace Legion {
                                             true/*track parent*/,
                                             false/*top level*/,
                                             false/*implicit top level*/,
+                                            false/*must epoch*/,
                                             outputs);
 #ifdef DEBUG_LEGION
       log_task.debug("Registering new single task with unique id %lld "
@@ -6536,9 +6492,7 @@ namespace Legion {
                         get_task_name(), get_unique_id());
         const ReductionOp *reduction_op = runtime->get_reduction(redop);
         FutureImpl *result = new FutureImpl(this, runtime, true/*register*/,
-          runtime->get_available_distributed_id(),
-          ApEvent::NO_AP_EVENT, provenance,
-          &reduction_op->sizeof_rhs);
+          runtime->get_available_distributed_id(), provenance);
         result->set_local(reduction_op->identity,
                           reduction_op->sizeof_rhs, false/*own*/);
         return Future(result);
@@ -6578,8 +6532,7 @@ namespace Legion {
       {
         const ReductionOp *reduction_op = runtime->get_reduction(redop);
         FutureImpl *result = new FutureImpl(this, runtime, true/*register*/,
-          runtime->get_available_distributed_id(),
-          ApEvent::NO_AP_EVENT, prov, &reduction_op->sizeof_rhs);
+          runtime->get_available_distributed_id(), prov);
         result->set_local(reduction_op->identity,
                           reduction_op->sizeof_rhs, false/*own*/);
         return Future(result);
@@ -6621,8 +6574,7 @@ namespace Legion {
             get_task_name(), get_unique_id())
         const size_t future_size = it->second.get_size();
         FutureImpl *future = new FutureImpl(this, runtime, true/*register*/,
-            runtime->get_available_distributed_id(),
-            ApEvent::NO_AP_EVENT, provenance, &future_size);
+            runtime->get_available_distributed_id(), provenance);
         future->set_local(it->second.get_ptr(), future_size);
         impl->set_future(it->first, future);
       }
@@ -7754,19 +7706,17 @@ namespace Legion {
       AutoRuntimeCall call(this); 
       if (p == Predicate::TRUE_PRED)
       {
+        Future result(new FutureImpl(this, runtime, true/*register*/,
+              runtime->get_available_distributed_id(), provenance));
         const bool value = true;
-        const size_t size = sizeof(value);
-        Future result = runtime->help_create_future(this, 
-            ApEvent::NO_AP_EVENT, provenance, &size);
         result.impl->set_local(&value, sizeof(value));
         return result;
       }
       else if (p == Predicate::FALSE_PRED)
       {
+        Future result(new FutureImpl(this, runtime, true/*register*/,
+              runtime->get_available_distributed_id(), provenance));
         const bool value = false;
-        const size_t size = sizeof(value);
-        Future result = runtime->help_create_future(this,
-            ApEvent::NO_AP_EVENT, provenance, &size);
         result.impl->set_local(&value, sizeof(value));
         return result;
       }
@@ -8774,7 +8724,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       bool needs_trigger = false;
-      std::set<ApEvent> child_completion_events;
+      std::vector<ApEvent> child_completion_events;
       {
         AutoLock child_lock(child_op_lock);
         std::map<Operation*,GenerationID>::iterator finder = 
@@ -8793,11 +8743,33 @@ namespace Legion {
         {
           needs_trigger = true;
           children_complete_invoked = true;
+#ifdef LEGION_SPY
+          child_completion_events.swap(cummulative_child_completion_events);
+#endif
+          child_completion_events.reserve(
+              child_completion_events.size() + complete_children.size());
           for (LegionMap<Operation*,GenerationID,
                 COMPLETE_CHILD_ALLOC>::const_iterator it =
                 complete_children.begin(); it != complete_children.end(); it++)
-            child_completion_events.insert(it->first->get_completion_event());
+            child_completion_events.push_back(
+                it->first->get_completion_event());
         }
+#ifdef LEGION_SPY
+        else
+        {
+          const ApEvent child_complete = op->get_completion_event();
+          cummulative_child_completion_events.push_back(child_complete);
+          // Make sure this vector doesn't grow too large for long-running tasks
+          constexpr size_t MAX_SIZE = 32;
+          if (cummulative_child_completion_events.size() == MAX_SIZE)
+          {
+            const ApEvent merged = 
+              Runtime::merge_events(NULL, cummulative_child_completion_events);
+            cummulative_child_completion_events.clear();
+            cummulative_child_completion_events.push_back(merged);
+          }
+        }
+#endif
       }
       if (needs_trigger)
       {
@@ -11111,7 +11083,7 @@ namespace Legion {
       bool need_complete = false;
       bool need_commit = false;
       std::set<RtEvent> preconditions;
-      std::set<ApEvent> child_completion_events;
+      std::vector<ApEvent> child_completion_events;
       {
         AutoLock child_lock(child_op_lock);
         // Only need to do this for executing and executed children
@@ -11139,10 +11111,16 @@ namespace Legion {
           {
             need_complete = true;
             children_complete_invoked = true;
+#ifdef LEGION_SPY
+            child_completion_events.swap(cummulative_child_completion_events);
+#endif
+            child_completion_events.reserve(
+                child_completion_events.size() + complete_children.size()); 
             for (LegionMap<Operation*,GenerationID,
                   COMPLETE_CHILD_ALLOC>::const_iterator it =
                  complete_children.begin(); it != complete_children.end(); it++)
-              child_completion_events.insert(it->first->get_completion_event());
+              child_completion_events.push_back(
+                  it->first->get_completion_event());
           }
           if (complete_children.empty() && 
               !children_commit_invoked)
@@ -12042,17 +12020,17 @@ namespace Legion {
         if (hasher.verify(__func__))
           break;
       }
-      ApUserEvent complete = Runtime::create_ap_user_event(NULL);
       const size_t future_size = sizeof(num_elements);
-      Future result = runtime->help_create_future(this, complete, 
-                                                  provenance, &future_size);
+      Future result(new FutureImpl(this, runtime, true/*register*/,
+            runtime->get_available_distributed_id(), provenance));
+      result.impl->set_future_result_size(future_size, runtime->address_space);
       switch (element_size)
       {
         case 1:
           {
             ConsensusMatchExchange<uint8_t> *collective = 
               new ConsensusMatchExchange<uint8_t>(this, COLLECTIVE_LOC_89,
-                                                  result, output, complete);
+                                                  result, output);
             if (collective->match_elements_async(input, num_elements))
               delete collective;
             break;
@@ -12061,7 +12039,7 @@ namespace Legion {
           {
             ConsensusMatchExchange<uint16_t> *collective = 
               new ConsensusMatchExchange<uint16_t>(this, COLLECTIVE_LOC_89,
-                                                   result, output, complete);
+                                                   result, output);
             if (collective->match_elements_async(input, num_elements))
               delete collective;
             break;
@@ -12070,7 +12048,7 @@ namespace Legion {
           {
             ConsensusMatchExchange<uint32_t> *collective = 
               new ConsensusMatchExchange<uint32_t>(this, COLLECTIVE_LOC_89,
-                                                   result, output, complete);
+                                                   result, output);
             if (collective->match_elements_async(input, num_elements))
               delete collective;
             break;
@@ -12079,7 +12057,7 @@ namespace Legion {
           {
             ConsensusMatchExchange<uint64_t> *collective = 
               new ConsensusMatchExchange<uint64_t>(this, COLLECTIVE_LOC_89,
-                                                   result, output, complete);
+                                                   result, output);
             if (collective->match_elements_async(input, num_elements))
               delete collective;
             break;
@@ -12113,10 +12091,14 @@ namespace Legion {
         if (registrar.task_variant_name != NULL)
           hasher.hash(registrar.task_variant_name, 
                       strlen(registrar.task_variant_name), "task_variant_name");
-        Serializer rez;
-        registrar.execution_constraints.serialize(rez);
-        registrar.layout_constraints.serialize(rez);
-        hasher.hash(rez.get_buffer(), rez.get_used_bytes(), "constraints");
+        hash_execution_constraints(hasher, registrar.execution_constraints);
+        for (std::multimap<unsigned,LayoutConstraintID>::const_iterator it =
+              registrar.layout_constraints.layouts.begin(); it !=
+              registrar.layout_constraints.layouts.end(); it++)
+        {
+          hasher.hash(it->first, "layout constraints");
+          hasher.hash(it->second, "layout_constraints");
+        }
         for (std::set<TaskID>::const_iterator it = 
               registrar.generator_tasks.begin(); it !=
               registrar.generator_tasks.end(); it++)
@@ -12776,6 +12758,122 @@ namespace Legion {
       hasher.hash(launcher.enable_inlining, "enable_inlining");
       hasher.hash(launcher.independent_requirements,"independent_requirements");
       hasher.hash(launcher.silence_warnings, "silence_warnings");
+    }
+
+    //--------------------------------------------------------------------------
+    void ReplicateContext::hash_execution_constraints(Murmur3Hasher &hasher,
+                                      const ExecutionConstraintSet &constraints)
+    //--------------------------------------------------------------------------
+    {
+      hasher.hash(constraints.isa_constraint.isa_prop, "ISA Constraint");
+      for (std::vector<Processor::Kind>::const_iterator it =
+            constraints.processor_constraint.valid_kinds.begin(); it !=
+            constraints.processor_constraint.valid_kinds.end(); it++)
+        hasher.hash(*it, "Processor Constraint");
+      for (std::vector<ResourceConstraint>::const_iterator it =
+            constraints.resource_constraints.begin(); it !=
+            constraints.resource_constraints.end(); it++)
+      {
+        hasher.hash(it->resource_kind, "Resource Constraint resource_kind");
+        hasher.hash(it->equality_kind, "Resource Constraint equality_kind");
+        hasher.hash(it->value, "Resource Constraint value");
+      }
+      for (std::vector<LaunchConstraint>::const_iterator it =
+            constraints.launch_constraints.begin(); it !=
+            constraints.launch_constraints.end(); it++)
+      {
+        hasher.hash(it->launch_kind, "Launch Constraint launch_kind");
+        hasher.hash(it->dims, "Launch Constraint dims");
+        for (int i = 0; i < it->dims; i++)
+          hasher.hash(it->values[i], "Launch Constraint value");
+      }
+      for (std::vector<ColocationConstraint>::const_iterator cit =
+            constraints.colocation_constraints.begin(); cit !=
+            constraints.colocation_constraints.end(); cit++)
+      {
+        for (std::set<FieldID>::const_iterator it =
+              cit->fields.begin(); it != cit->fields.end(); it++)
+          hasher.hash(*it, "Colocation Constraint fields");
+        for (std::set<unsigned>::const_iterator it =
+              cit->indexes.begin(); it != cit->indexes.end(); it++)
+          hasher.hash(*it, "Colocation Constraint indexes");
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    void ReplicateContext::hash_layout_constraints(Murmur3Hasher &hasher,
+                     const LayoutConstraintSet &constraints, bool hash_pointers)
+    //--------------------------------------------------------------------------
+    {
+      hasher.hash(constraints.specialized_constraint.kind,
+          "Specialized Constraint kind");
+      hasher.hash(constraints.specialized_constraint.redop,
+          "Specialized Constraint redop");
+      hasher.hash(constraints.specialized_constraint.collective,
+          "Specialized Constraint collective");
+      hasher.hash(constraints.specialized_constraint.max_pieces,
+          "Specialized Constraint max_pieces");
+      hasher.hash(constraints.specialized_constraint.max_overhead,
+          "Specialized Constraint max_overhead");
+      hasher.hash(constraints.specialized_constraint.no_access,
+          "Specialized Constraint no_access");
+      hasher.hash(constraints.specialized_constraint.exact,
+          "Specialized Constraint exact");
+      for (std::vector<FieldID>::const_iterator it =
+            constraints.field_constraint.field_set.begin(); it !=
+            constraints.field_constraint.field_set.end(); it++)
+        hasher.hash(*it, "Field Constraint fields");
+      hasher.hash(constraints.field_constraint.contiguous, 
+          "Field Constraint contiguous");
+      hasher.hash(constraints.field_constraint.inorder, 
+          "Field Constraint inorder");
+      if (constraints.memory_constraint.has_kind)
+        hasher.hash(constraints.memory_constraint.kind, 
+            "Memory Constraint kind");
+      if (hash_pointers && constraints.pointer_constraint.is_valid)
+      {
+        hasher.hash(constraints.pointer_constraint.memory,
+            "Pointer Constraint memory");
+        hasher.hash(constraints.pointer_constraint.ptr,
+            "Pointer Constraint ptr");
+      }
+      for (std::vector<DimensionKind>::const_iterator it =
+            constraints.ordering_constraint.ordering.begin(); it !=
+            constraints.ordering_constraint.ordering.end(); it++)
+        hasher.hash(*it, "Ordering Constraint ordering");
+      hasher.hash(constraints.ordering_constraint.contiguous,
+          "Ordering Constraint contiguous");
+      for (std::vector<SplittingConstraint>::const_iterator it =
+            constraints.splitting_constraints.begin(); it !=
+            constraints.splitting_constraints.end(); it++)
+      {
+        hasher.hash(it->kind, "Splitting Constraint kind");
+        hasher.hash(it->value, "Splitting Constraint value");
+        hasher.hash(it->chunks, "Splitting Constraint chunks");
+      }
+      for (std::vector<DimensionConstraint>::const_iterator it =
+            constraints.dimension_constraints.begin(); it !=
+            constraints.dimension_constraints.end(); it++)
+      {
+        hasher.hash(it->kind, "Dimension Constraint kind");
+        hasher.hash(it->eqk, "Dimension Constraint eqk");
+        hasher.hash(it->value, "Splitting Constraint value");
+      }
+      for (std::vector<AlignmentConstraint>::const_iterator it =
+            constraints.alignment_constraints.begin(); it !=
+            constraints.alignment_constraints.end(); it++)
+      {
+        hasher.hash(it->fid, "Alignment Constraint fid");
+        hasher.hash(it->eqk, "Alignment Constraint eqk");
+        hasher.hash(it->alignment, "Alignment Constraint alignment");
+      }
+      for (std::vector<OffsetConstraint>::const_iterator it =
+            constraints.offset_constraints.begin(); it !=
+            constraints.offset_constraints.end(); it++)
+      {
+        hasher.hash(it->fid, "Offset Constraint fid");
+        hasher.hash(it->offset, "Offset Constraint offset");
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -17396,6 +17494,7 @@ namespace Legion {
                                             true /*track*/,
                                             false /*top_level*/,
                                             false /*implicit_top_level*/,
+                                            false /*must epoch*/,
                                             outputs);
 #ifdef DEBUG_LEGION
       if (owner_shard->shard_id == 0)
@@ -17532,8 +17631,7 @@ namespace Legion {
                         get_task_name(), get_unique_id());
         const ReductionOp *reduction_op = runtime->get_reduction(redop);
         FutureImpl *result = new FutureImpl(this, runtime, true/*register*/,
-          runtime->get_available_distributed_id(),
-          ApEvent::NO_AP_EVENT, provenance, &reduction_op->sizeof_rhs);
+          runtime->get_available_distributed_id(), provenance);
         result->set_local(reduction_op->identity,
                           reduction_op->sizeof_rhs, false/*own*/);
         return Future(result);
@@ -17590,8 +17688,7 @@ namespace Legion {
       {
         const ReductionOp *reduction_op = runtime->get_reduction(redop);
         FutureImpl *result = new FutureImpl(this, runtime, true/*register*/,
-          runtime->get_available_distributed_id(), ApEvent::NO_AP_EVENT,
-          provenance, &reduction_op->sizeof_rhs);
+          runtime->get_available_distributed_id(), provenance);
         result->set_local(reduction_op->identity,
                           reduction_op->sizeof_rhs, false/*own*/);
         return Future(result);
@@ -17770,8 +17867,7 @@ namespace Legion {
             get_task_name(), get_unique_id())
         const size_t future_size = it->second.get_size();
         FutureImpl *future = new FutureImpl(this, runtime, true/*register*/,
-            runtime->get_available_distributed_id(),
-            ApEvent::NO_AP_EVENT, provenance, &future_size);
+            runtime->get_available_distributed_id(), provenance);
         future->set_local(it->second.get_ptr(), future_size);
         result.impl->set_future(it->first, future);
       }
@@ -18395,9 +18491,8 @@ namespace Legion {
           hasher.hash(it->second, strlen(it->second), "field_files");
         }
         hasher.hash(launcher.local_files, "local_files");
-        Serializer rez;
-        launcher.constraints.serialize(rez);
-        hasher.hash(rez.get_buffer(), rez.get_used_bytes(), "constraints");
+        hash_layout_constraints(hasher, launcher.constraints, 
+                                false/*hash pointer*/);
         for (std::set<FieldID>::const_iterator it = 
               launcher.privilege_fields.begin(); it !=
               launcher.privilege_fields.end(); it++)
@@ -22829,7 +22924,9 @@ namespace Legion {
         IndividualTask *task = runtime->get_available_individual_task(); 
         InnerContext *parent = owner_task->get_context();
         Future result =
-          task->initialize_task(parent, launcher, provenance, outputs);
+          task->initialize_task(parent, launcher, provenance, 
+              false/*track*/, false/*top level*/, false/*implicit*/,
+              false/*must epoch*/, outputs);
         inline_child_task(task);
         return result;
       }
@@ -22861,7 +22958,7 @@ namespace Legion {
           launch_space = find_index_launch_space(launcher.launch_domain,
                                                  provenance);
         FutureMap result = task->initialize_task(parent, launcher, launch_space,
-                                                 provenance, outputs);
+                                           provenance, false/*track*/, outputs);
         inline_child_task(task);
         return result;
       }
@@ -22892,7 +22989,7 @@ namespace Legion {
           launch_space = find_index_launch_space(launcher.launch_domain,
                                                  provenance);
         Future result = task->initialize_task(parent, launcher, launch_space, 
-                                  provenance, redop, deterministic, outputs);
+                    provenance, redop, deterministic, false/*track*/, outputs);
         inline_child_task(task);
         return result;
       }
@@ -23285,19 +23382,17 @@ namespace Legion {
     {
       if (p == Predicate::TRUE_PRED)
       {
+        Future result(new FutureImpl(this, runtime, true/*register*/,
+              runtime->get_available_distributed_id(), provenance));
         const bool value = true;
-        const size_t size = sizeof(value);
-        Future result = runtime->help_create_future(this, ApEvent::NO_AP_EVENT,
-                                                    provenance, &size);
         result.impl->set_local(&value, sizeof(value));
         return result;
       }
       else if (p == Predicate::FALSE_PRED)
       {
+        Future result(new FutureImpl(this, runtime, true/*register*/,
+              runtime->get_available_distributed_id(), provenance));
         const bool value = false;
-        const size_t size = sizeof(value);
-        Future result = runtime->help_create_future(this, ApEvent::NO_AP_EVENT,
-                                                    provenance, &size);
         result.impl->set_local(&value, sizeof(value));
         return result;
       }
