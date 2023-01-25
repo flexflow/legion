@@ -1,5 +1,5 @@
 #------------------------------------------------------------------------------#
-# Copyright 2022 Kitware, Inc.
+# Copyright 2023 Kitware, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -66,6 +66,7 @@ list(APPEND REALM_SRC
   realm/operation.inl
   realm/proc_impl.h         realm/proc_impl.cc
   realm/procset/procset_module.h realm/procset/procset_module.cc
+  realm/repl_heap.h         realm/repl_heap.cc
   realm/rsrv_impl.h         realm/rsrv_impl.cc
   realm/runtime_impl.h      realm/runtime_impl.cc
   realm/sampling_impl.h     realm/sampling_impl.cc
@@ -269,6 +270,13 @@ if(UNIX AND NOT APPLE)
 endif()
 set_target_properties(RealmRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set_target_properties(RealmRuntime PROPERTIES SOVERSION ${SOVERSION})
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_target_properties(RealmRuntime PROPERTIES BUILD_RPATH "\$ORIGIN")
+  set_target_properties(RealmRuntime PROPERTIES INSTALL_RPATH "\$ORIGIN")
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  set_target_properties(RealmRuntime PROPERTIES BUILD_RPATH "@loader_path")
+  set_target_properties(RealmRuntime PROPERTIES INSTALL_RPATH "@loader_path")
+endif ()
 
 if(REALM_LIMIT_SYMBOL_VISIBILITY)
   set_target_properties(RealmRuntime PROPERTIES CXX_VISIBILITY_PRESET hidden)
@@ -895,6 +903,14 @@ endif()
 set_target_properties(LegionRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set_target_properties(LegionRuntime PROPERTIES OUTPUT_NAME "legion${INSTALL_SUFFIX}")
 set_target_properties(LegionRuntime PROPERTIES SOVERSION ${SOVERSION})
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_target_properties(LegionRuntime PROPERTIES BUILD_RPATH "\$ORIGIN")
+  set_target_properties(LegionRuntime PROPERTIES INSTALL_RPATH "\$ORIGIN")
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  set_target_properties(LegionRuntime PROPERTIES BUILD_RPATH "@loader_path")
+  set_target_properties(LegionRuntime PROPERTIES INSTALL_RPATH "@loader_path")
+endif ()
+
 target_compile_options(LegionRuntime PRIVATE ${CXX_BUILD_WARNING_FLAGS})
 if(COMPILER_SUPPORTS_DEFCHECK)
   # use the cxx_defcheck wrapper to make sure legion_defines.h is included

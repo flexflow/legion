@@ -1,5 +1,5 @@
-# Copyright 2022 Stanford University, NVIDIA Corporation
-# Copyright 2022 Los Alamos National Laboratory
+# Copyright 2023 Stanford University, NVIDIA Corporation
+# Copyright 2023 Los Alamos National Laboratory
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -929,6 +929,7 @@ REALM_SRC 	+= $(LG_RT_DIR)/realm/runtime_impl.cc \
 		   $(LG_RT_DIR)/realm/operation.cc \
 	           $(LG_RT_DIR)/realm/tasks.cc \
 	           $(LG_RT_DIR)/realm/metadata.cc \
+	           $(LG_RT_DIR)/realm/repl_heap.cc \
 	           $(LG_RT_DIR)/realm/deppart/partitions.cc \
 	           $(LG_RT_DIR)/realm/deppart/sparsity_impl.cc \
 	           $(LG_RT_DIR)/realm/deppart/image.cc \

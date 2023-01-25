@@ -1,5 +1,5 @@
 #------------------------------------------------------------------------------#
-# Copyright 2022 Stanford University
+# Copyright 2023 Stanford University
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@ list(APPEND REALM_TESTS
   sparse_construct
   extres_alias
   reservations
+  multiaffine
   )
 
 if(Legion_USE_CUDA)
@@ -58,6 +59,7 @@ if(Legion_USE_CUDA)
   # some tests have CUDA source files too
   set(CUDASRC_memspeed memspeed_gpu.cu)
   set(CUDASRC_simple_reduce simple_reduce_gpu.cu)
+  set(CUDASRC_multiaffine multiaffine_gpu.cu)
 
   list(APPEND REALM_TESTS cuda_arrays)
   set(CUDASRC_cuda_arrays cuda_arrays_gpu.cu)

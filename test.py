@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2022 Stanford University
+# Copyright 2023 Stanford University
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -356,6 +356,11 @@ def run_test_legion_jupyter_cxx(launcher, root_dir, tmp_dir, bin_dir, env, threa
     jupyter_test_file = os.path.join(root_dir, 'jupyter_notebook', 'ci_test.py')
     jupyter_test_cmd = ['jupyter', 'run', '--kernel', 'legion_kernel_nocr', jupyter_test_file]
     cmd(jupyter_test_cmd, env=env)
+    canonical_jupyter_test_file = os.path.join(root_dir, 'jupyter_notebook', 'test_canonical.py')
+    canonical_jupyter_test_cmd = ['jupyter', 'run', '--kernel', 'python3', canonical_jupyter_test_file]
+    cmd(canonical_jupyter_test_cmd, env=env)
+    canonical_python_test_cmd = [sys.executable, canonical_jupyter_test_file]
+    cmd(canonical_python_test_cmd, env=env)
     cmd([make_exe, '-C', python_dir, 'clean'], env=env)
 
 def run_test_legion_provenance_cxx(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, timelimit):

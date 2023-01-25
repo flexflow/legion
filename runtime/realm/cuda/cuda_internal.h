@@ -1,4 +1,4 @@
-/* Copyright 2022 Stanford University, NVIDIA Corporation
+/* Copyright 2023 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1166,6 +1166,17 @@ namespace Realm {
 
       static void handle_message(NodeID sender, const CudaIpcRelease& args,
                                  const void *data, size_t datalen);
+    };
+
+    class GPUReplHeapListener : public ReplicatedHeap::Listener {
+    public:
+      GPUReplHeapListener(CudaModule *_module);
+
+      virtual void chunk_created(void *base, size_t bytes);
+      virtual void chunk_destroyed(void *base, size_t bytes);
+
+    protected:
+      CudaModule *module;
     };
 
 

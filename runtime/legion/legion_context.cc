@@ -1,4 +1,4 @@
-/* Copyright 2022 Stanford University, NVIDIA Corporation
+/* Copyright 2023 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -2084,11 +2084,12 @@ namespace Legion {
       const ApEvent wait_on(manager->allocate_legion_instance(layout->clone(),
                                                       no_requests, instance));
 #else
-      LgEvent unique_event;
+      ApEvent unique_event(Processor::get_current_finish_event());
       if (runtime->profiler != NULL)
       {
-        const RtUserEvent unique = Runtime::create_rt_user_event();
-        Runtime::trigger_event(unique);
+        // If we're profiling then each of these needs a unique event
+        const ApUserEvent unique = Runtime::create_ap_user_event(NULL);
+        Runtime::trigger_event(NULL, unique, unique_event);
         unique_event = unique;
       }
       const ApEvent wait_on(manager->create_eager_instance(instance, 
@@ -2109,7 +2110,7 @@ namespace Legion {
             mem_names[memory.kind()], memory.id)
       }
 #endif
-      task_local_instances.insert(instance);
+      task_local_instances[instance] = unique_event;
       if (wait_on.exists())
       {
         bool poisoned = false;
@@ -2125,7 +2126,7 @@ namespace Legion {
     void TaskContext::destroy_task_local_instance(PhysicalInstance instance)
     //--------------------------------------------------------------------------
     {
-      std::set<PhysicalInstance>::iterator finder =
+      std::map<PhysicalInstance,ApEvent>::iterator finder =
         task_local_instances.find(instance);
 #ifdef DEBUG_LEGION
       assert(finder != task_local_instances.end());
@@ -2183,9 +2184,8 @@ namespace Legion {
         assert(freefunc == NULL);
 #endif
         // escape this task local instance
-        escape_task_local_instance(deferred_result_instance);
-        instance = new FutureInstance(res, res_size,
-            ApEvent(Processor::get_current_finish_event()), runtime,
+        ApEvent ready = escape_task_local_instance(deferred_result_instance);
+        instance = new FutureInstance(res, res_size, ready, runtime,
             true/*eager*/, false/*external*/, true/*own alloc*/,
             deferred_result_instance);
       }
@@ -2374,18 +2374,18 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    uintptr_t TaskContext::escape_task_local_instance(PhysicalInstance instance)
+    ApEvent TaskContext::escape_task_local_instance(PhysicalInstance instance)
     //--------------------------------------------------------------------------
     {
-      std::set<PhysicalInstance>::iterator finder =
+      std::map<PhysicalInstance,ApEvent>::iterator finder =
         task_local_instances.find(instance);
 #ifdef DEBUG_LEGION
       assert(finder != task_local_instances.end());
 #endif
+      const ApEvent result = finder->second;
       // Remove the instance from the set of task local instances
       task_local_instances.erase(finder);
-      void *ptr = instance.pointer_untyped(0,0);
-      return reinterpret_cast<uintptr_t>(ptr);
+      return result;
     }
 
     //--------------------------------------------------------------------------
@@ -2571,11 +2571,11 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       const RtEvent done(Processor::get_current_finish_event());
-      for (std::set<PhysicalInstance>::iterator it =
+      for (std::map<PhysicalInstance,ApEvent>::iterator it =
            task_local_instances.begin(); it !=
            task_local_instances.end(); ++it)
       {
-        PhysicalInstance inst = *it;
+        PhysicalInstance inst = it->first;
         MemoryManager *manager =
           runtime->find_memory_manager(inst.get_location());
 #ifdef LEGION_MALLOC_INSTANCES
@@ -6548,7 +6548,7 @@ namespace Legion {
     FutureMap InnerContext::construct_future_map(IndexSpace space,
                                 const std::map<DomainPoint,UntypedBuffer> &data,
                                 Provenance *provenance, bool collective,
-                                ShardingID sid, bool implicit)
+                                ShardingID sid, bool implicit, bool internal)
     //--------------------------------------------------------------------------
     {
       AutoRuntimeCall call(this);
@@ -6588,8 +6588,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       // this method is deprecated so don't care about provenance
+      // pretend this is internal since it is deprecated and we don't 
+      // want to check collective behavior which could be wrong since 
+      // each shard might have a different index space
       return construct_future_map(find_index_launch_space(domain, NULL/*prov*/),
-          data, NULL/*deprecated so no provenance*/, collective, sid, implicit);
+          data, NULL/*deprecated so no provenance*/, collective, sid, 
+          implicit, true/*internal*/);
     }
 
     //--------------------------------------------------------------------------
@@ -6630,8 +6634,11 @@ namespace Legion {
                                  ShardingID sid, bool implicit) 
     //--------------------------------------------------------------------------
     {
+      // pretend this is internal since it is deprecated and we don't 
+      // want to check collective behavior which could be wrong since 
+      // each shard might have a different index space
       return construct_future_map(find_index_launch_space(domain, NULL),
-              futures, NULL/*deprecated so no provenance*/, internal, 
+              futures, NULL/*deprecated so no provenance*/, true/*internal*/,
               collective, sid, implicit);
     }
 
@@ -7985,8 +7992,12 @@ namespace Legion {
           add_reference();
           // Make the queue the first time if necessary
           if (!comp_queue.exists())
-            comp_queue = CompletionQueue::create_completion_queue(
-                HAS_BOUND ? context_configuration.max_window_size : 0);
+            // We can put an upper bound on the number of operations as long
+            // as we aren't using frames to runahead, if we're using frames
+            // to run ahead then we can't know the maximum run ahead size
+            comp_queue = CompletionQueue::create_completion_queue((HAS_BOUND &&
+                (context_configuration.min_frames_to_schedule == 0)) ?
+                  context_configuration.max_window_size : 0);
         }
         queue.push_back(entry);
         comp_queue.add_event(entry.ready);
@@ -17777,31 +17788,36 @@ namespace Legion {
     FutureMap ReplicateContext::construct_future_map(IndexSpace space,
                                 const std::map<DomainPoint,UntypedBuffer> &data,
                                 Provenance *provenance, bool collective,
-                                ShardingID sid, bool implicit)
+                                ShardingID sid, bool implicit, bool internal)
     //--------------------------------------------------------------------------
     {
-      AutoRuntimeCall call(this);
-      for (int i = 0; runtime->safe_control_replication && (i < 2) &&
-            ((current_trace == NULL) || !current_trace->is_fixed()); i++)
+      if (!internal)
       {
-        Murmur3Hasher hasher(this, runtime->safe_control_replication > 1,
-                              i > 0, provenance);
-        hasher.hash(REPLICATE_CONSTRUCT_FUTURE_MAP, __func__);
-        hasher.hash(space, "space");
-        if (!collective)
+        AutoRuntimeCall call(this);
+        for (int i = 0; runtime->safe_control_replication && (i < 2) &&
+              ((current_trace == NULL) || !current_trace->is_fixed()); i++)
         {
-          for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
-                data.begin(); it != data.end(); it++)
+          Murmur3Hasher hasher(this, runtime->safe_control_replication > 1,
+                                i > 0, provenance);
+          hasher.hash(REPLICATE_CONSTRUCT_FUTURE_MAP, __func__);
+          hasher.hash(space, "space");
+          if (!collective)
           {
-            hasher.hash(it->first, "data");
-            if (runtime->safe_control_replication > 1)
-              hasher.hash(it->second.get_ptr(), it->second.get_size(), "data");
+            for (std::map<DomainPoint,UntypedBuffer>::const_iterator it =
+                  data.begin(); it != data.end(); it++)
+            {
+              hasher.hash(it->first, "data");
+              if (runtime->safe_control_replication > 1)
+                hasher.hash(it->second.get_ptr(), it->second.get_size(),"data");
+            }
           }
+          else if (!implicit)
+            hasher.hash(sid, "sid");
+          if (hasher.verify(__func__))
+            break;
         }
-        else if (!implicit)
-          hasher.hash(sid, "sid");
-        if (hasher.verify(__func__))
-          break;
+        return construct_future_map(space, data, provenance, collective,
+                                    sid, implicit, true/*internal*/);
       }
       IndexSpaceNode *domain_node = runtime->forest->get_node(space);
       Domain domain;
@@ -23019,7 +23035,7 @@ namespace Legion {
     FutureMap LeafContext::construct_future_map(IndexSpace domain,
                                 const std::map<DomainPoint,UntypedBuffer> &data,
                                 Provenance *provenance, bool collective,
-                                ShardingID sid, bool implicit)
+                                ShardingID sid, bool implicit, bool internal)
     //--------------------------------------------------------------------------
     {
       REPORT_LEGION_ERROR(ERROR_ILLEGAL_EXECUTE_INDEX_SPACE,

@@ -1,4 +1,4 @@
-/* Copyright 2022 Stanford University, NVIDIA Corporation
+/* Copyright 2023 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -442,7 +442,8 @@ namespace Legion {
                                              Provenance *provenance,
                                              bool collective = false,
                                              ShardingID sid = 0,
-                                             bool implicit = false) = 0;
+                                             bool implicit = false,
+                                             bool internal = false) = 0;
       virtual FutureMap construct_future_map(const Domain &domain,
                                 const std::map<DomainPoint,UntypedBuffer> &data,
                                              bool collective = false,
@@ -605,7 +606,7 @@ namespace Legion {
                                  FutureFunctor *callback_functor,
                                  bool own_callback_functor) = 0;
       bool is_task_local_instance(PhysicalInstance instance);
-      uintptr_t escape_task_local_instance(PhysicalInstance instance);
+      ApEvent escape_task_local_instance(PhysicalInstance instance);
       FutureInstance* copy_to_future_inst(const void *value, size_t size,
                                           RtEvent &done);
       FutureInstance* copy_to_future_inst(Memory memory, FutureInstance *src);
@@ -799,7 +800,9 @@ namespace Legion {
       // Our cached set of index spaces for immediate domains
       std::map<Domain,IndexSpace> index_launch_spaces;
     protected:
-      std::set<PhysicalInstance> task_local_instances;
+      // Map of task local instances including their unique events
+      // from the profilters perspective
+      std::map<PhysicalInstance,ApEvent> task_local_instances;
     protected:
       bool task_executed;
       bool has_inline_accessor;
@@ -1465,7 +1468,8 @@ namespace Legion {
                                              Provenance *provenance,
                                              bool collective = false,
                                              ShardingID sid = 0,
-                                             bool implicit = false);
+                                             bool implicit = false,
+                                             bool internal = false);
       virtual FutureMap construct_future_map(const Domain &domain,
                                 const std::map<DomainPoint,UntypedBuffer> &data,
                                              bool collective = false,
@@ -2740,7 +2744,8 @@ namespace Legion {
                                              Provenance *provenance,
                                              bool collective = false,
                                              ShardingID sid = 0,
-                                             bool implicit = false);
+                                             bool implicit = false,
+                                             bool internal = false);
       virtual FutureMap construct_future_map(IndexSpace space,
                     const std::map<DomainPoint,Future> &futures,
                                              Provenance *provenance,
@@ -3631,7 +3636,8 @@ namespace Legion {
                                              Provenance *provenance,
                                              bool collective = false,
                                              ShardingID sid = 0,
-                                             bool implicit = false);
+                                             bool implicit = false,
+                                             bool internal = false);
       virtual FutureMap construct_future_map(const Domain &domain,
                                 const std::map<DomainPoint,UntypedBuffer> &data,
                                              bool collective = false,

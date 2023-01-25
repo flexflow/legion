@@ -1,4 +1,4 @@
-/* Copyright 2022 Stanford University, NVIDIA Corporation
+/* Copyright 2023 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -50,7 +50,8 @@ namespace Legion {
       std::vector<unsigned> field_indexes(req.instance_fields.size());
       fs->get_field_indexes(req.instance_fields, field_indexes);
       instances.resize(field_indexes.size());
-      if (forest->runtime->num_profiling_nodes > 0)
+      Runtime *runtime = forest->runtime;
+      if ((runtime->num_profiling_nodes > 0) || runtime->legion_spy_enabled)
         instance_events.resize(field_indexes.size());
       // For each of the fields in the region requirement
       // (importantly in the order they will be copied)
@@ -8155,6 +8156,8 @@ namespace Legion {
       if (parent != NULL)
         assert(handle.get_type_tag() == parent->handle.get_type_tag());
 #endif
+      if (parent != NULL)
+        parent->add_nested_resource_ref(did);
 #ifdef LEGION_GC
       log_garbage.info("GC Index Space %lld %d %d",
           LEGION_DISTRIBUTED_ID_FILTER(this->did), local_space, handle.id);
@@ -8167,6 +8170,8 @@ namespace Legion {
     IndexSpaceNode::~IndexSpaceNode(void)
     //--------------------------------------------------------------------------
     {
+      if ((parent != NULL) && parent->remove_nested_resource_ref(did))
+        delete parent;
       // Remove ourselves from the context
       if (registered_with_runtime)
         context->remove_node(handle);
@@ -8960,8 +8965,7 @@ namespace Legion {
 
       IndexPartNode *parent_node = NULL;
       if (parent != IndexPartition::NO_PART)
-        parent_node = context->get_node(parent, NULL/*defer*/,
-            true/*can fail*/, true/*first*/, true/*local only*/);
+        parent_node = context->get_node(parent);
       IndexSpaceNode *node = context->create_node(handle, index_space_ptr,
           false/*is domain*/, parent_node, color, did, initialized, provenance,
           ready_event,expr_id,mapping,false/*add root reference*/,depth,valid);
@@ -9664,11 +9668,7 @@ namespace Legion {
       if (parent->remove_nested_resource_ref(did))
         delete parent;
       if (color_space->remove_nested_resource_ref(did))
-        delete color_space;
-      for (std::map<LegionColor,IndexSpaceNode*>::const_iterator it =
-            color_map.begin(); it != color_map.end(); it++)
-        if (it->second->remove_nested_resource_ref(did))
-          delete it->second;
+        delete color_space; 
       if ((shard_mapping != NULL) && shard_mapping->remove_reference())
         delete shard_mapping;
     }
@@ -9718,6 +9718,11 @@ namespace Legion {
       IndexSpaceExpression *expr = union_expr.load();
       if ((expr != NULL) && expr->remove_nested_expression_reference(did))
         delete expr;
+      for (std::map<LegionColor,IndexSpaceNode*>::const_iterator it =
+            color_map.begin(); it != color_map.end(); it++)
+        if (it->second->remove_nested_resource_ref(did))
+          delete it->second;
+      color_map.clear();
     }
 
     //--------------------------------------------------------------------------
