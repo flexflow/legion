@@ -3739,7 +3739,7 @@ namespace Realm {
       , cfg_use_dynamic_fb(true)
       , cfg_dynfb_max_size(~size_t(0))
       , cfg_num_gpus(0)
-      , cfg_task_streams(1)
+      , cfg_task_streams(12)
       , cfg_d2d_streams(4)
       , cfg_use_worker_threads(false)
       , cfg_use_shared_worker(true)
