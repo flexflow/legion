@@ -333,13 +333,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     template<int DIM, typename T>
     Realm::InstanceLayoutGeneric* IndexSpaceExpression::create_layout_internal(
-                                 const Realm::IndexSpace<DIM,T> &space,
-                                 const LayoutConstraintSet &constraints,
-                                 const std::vector<FieldID> &field_ids,
-                                 const std::vector<size_t> &field_sizes,
-                                 bool compact, LayoutConstraintKind *unsat_kind,
-                                 unsigned *unsat_index, void **piece_list,
-                                 size_t *piece_list_size) const
+                                   const Realm::IndexSpace<DIM,T> &space,
+                                   const LayoutConstraintSet &constraints,
+                                   const std::vector<FieldID> &field_ids,
+                                   const std::vector<size_t> &field_sizes,
+                                   bool compact, void **piece_list,
+                                   size_t *piece_list_size) const
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -369,19 +368,23 @@ namespace Legion {
         if (spec.max_overhead > 0)
         {
           std::vector<Realm::Rect<DIM,T> > covering;
-          if (!space.compute_covering(spec.max_pieces, spec.max_overhead,
+          if (space.compute_covering(spec.max_pieces, spec.max_overhead,
                                       covering))
           {
-            if (unsat_kind != NULL)
-              *unsat_kind = LEGION_SPECIALIZED_CONSTRAINT;
-            if (unsat_index != NULL)
-              *unsat_index = 0;
-            return NULL;
+            // Container problem is stupid
+            piece_bounds.resize(covering.size());
+            for (unsigned idx = 0; idx < covering.size(); idx++)
+              piece_bounds[idx] = covering[idx];
           }
-          // Container problem is stupid
-          piece_bounds.resize(covering.size());
-          for (unsigned idx = 0; idx < covering.size(); idx++)
-            piece_bounds[idx] = covering[idx];
+          else
+          {
+            // Just fill in with the compact rectangles for now
+            // This will likely fail the max pieces test later
+            for (Realm::IndexSpaceIterator<DIM,T> itr(space); 
+                  itr.valid; itr.step())
+              if (!itr.rect.empty())
+                piece_bounds.push_back(itr.rect);
+          }
         }
         else
         {
@@ -389,14 +392,6 @@ namespace Legion {
                 itr.valid; itr.step())
             if (!itr.rect.empty())
               piece_bounds.push_back(itr.rect);
-          if (spec.max_pieces < piece_bounds.size())
-          {
-            if (unsat_kind != NULL)
-              *unsat_kind = LEGION_SPECIALIZED_CONSTRAINT;
-            if (unsat_index != NULL)
-              *unsat_index = 0;
-            return NULL;
-          }
         }
         if (!piece_bounds.empty())
         {
@@ -1397,10 +1392,8 @@ namespace Legion {
                                     const LayoutConstraintSet &constraints,
                                     const std::vector<FieldID> &field_ids,
                                     const std::vector<size_t> &field_sizes,
-                                    bool compact, 
-                                    LayoutConstraintKind *unsat_kind,
-                                    unsigned *unsat_index, void **piece_list,
-                                    size_t *piece_list_size)
+                                    bool compact,
+                                    void **piece_list, size_t *piece_list_size)
     //--------------------------------------------------------------------------
     {
       Realm::IndexSpace<DIM,T> local_is;
@@ -1408,7 +1401,7 @@ namespace Legion {
       if (space_ready.exists())
         space_ready.wait();
       return create_layout_internal(local_is, constraints,field_ids,field_sizes,
-                 compact, unsat_kind, unsat_index, piece_list, piece_list_size);
+                                    compact, piece_list, piece_list_size);
     }
 
     //--------------------------------------------------------------------------
@@ -5854,9 +5847,7 @@ namespace Legion {
                                     const LayoutConstraintSet &constraints,
                                     const std::vector<FieldID> &field_ids,
                                     const std::vector<size_t> &field_sizes,
-                                    bool compact, 
-                                    LayoutConstraintKind *unsat_kind,
-                                    unsigned *unsat_index, void **piece_list, 
+                                    bool compact, void **piece_list,
                                     size_t *piece_list_size)
     //--------------------------------------------------------------------------
     {
@@ -5865,7 +5856,7 @@ namespace Legion {
       if (space_ready.exists())
         space_ready.wait();
       return create_layout_internal(local_is, constraints,field_ids,field_sizes,
-                 compact, unsat_kind, unsat_index, piece_list, piece_list_size);
+                                    compact, piece_list, piece_list_size);
     }
 
     //--------------------------------------------------------------------------
@@ -6044,6 +6035,56 @@ namespace Legion {
       const Domain domain((DomainT<DIM,T>(realm_is)));
       return context->runtime->find_or_create_index_slice_space(domain, 
                                     handle.get_type_tag(), provenance);
+    }
+
+    //--------------------------------------------------------------------------
+    template<int DIM, typename T>
+    void IndexSpaceNodeT<DIM,T>::compute_range_shards(ShardingFunction *func,
+           IndexSpace shard_space, const std::vector<DomainPoint> &shard_points,
+           const Domain &shard_domain, std::set<ShardID> &range_shards)
+    //--------------------------------------------------------------------------
+    {
+      DomainT<DIM,T> local_space;
+      get_realm_index_space(local_space, true/*tight*/);
+      Domain sharding_domain;
+      if (shard_space.exists() && shard_space != handle)
+        context->find_launch_space_domain(shard_space, sharding_domain);
+      else
+        sharding_domain = local_space;
+      if (!func->functor->is_invertible())
+      {
+        const size_t max_size = get_volume();
+        for (Realm::IndexSpaceIterator<DIM,T> rect_itr(local_space); 
+              rect_itr.valid; rect_itr.step())
+        {
+          for (Realm::PointInRectIterator<DIM,T> itr(rect_itr.rect);
+                itr.valid; itr.step())
+          {
+            const ShardID point_shard = 
+             func->find_owner(DomainPoint(Point<DIM,T>(itr.p)),sharding_domain);
+            if (range_shards.insert(point_shard).second && 
+                (range_shards.size() == max_size))
+              break;
+          }
+          if (range_shards.size() == max_size)
+            break;
+        }
+      }
+      else
+      {
+        for (ShardID shard = 0; shard < shard_points.size(); shard++)
+        {
+          std::vector<DomainPoint> domain_points;
+          if (func->use_points)
+            func->functor->invert_points(shard_points[shard], shard_points,
+                shard_domain,Domain(local_space),sharding_domain,domain_points);
+          else
+            func->functor->invert(shard, Domain(local_space), sharding_domain,
+                                  shard_points.size(), domain_points);
+          if (!domain_points.empty())
+            range_shards.insert(shard);
+        }
+      }
     }
 
     /////////////////////////////////////////////////////////////
