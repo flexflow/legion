@@ -2647,6 +2647,7 @@ namespace Legion {
       // Make sure our instance is valid before we try to delete it
       if (instance.exists() && use_event.exists() && !use_event.has_triggered())
         use_event.wait();
+      bool free_resource = true;
       // Only need to free resources if we own the allocation
       if (own_allocation)
       {
@@ -2700,6 +2701,9 @@ namespace Legion {
                 runtime->issue_runtime_meta_task(args,
                     LG_THROUGHPUT_WORK_PRIORITY,
                     Runtime::protect_event(precondition));
+              // No longer safe to free the resource since that is going
+              // to be done by the free external args task
+              free_resource = false;
             }
             else
             {
@@ -2755,7 +2759,7 @@ namespace Legion {
         else
           Runtime::trigger_event(NULL, remote_reads_done);
       }
-      if (resource != NULL)
+      if ((resource != NULL) && free_resource)
         delete resource;
     }
 
@@ -3369,8 +3373,7 @@ namespace Legion {
       (*(fargs->freefunc))(*resource);
       if (fargs->instance.exists())
         fargs->instance.destroy();
-      if (fargs->resource == NULL)
-        delete resource;
+      delete resource;
     }
 
     //--------------------------------------------------------------------------
@@ -9459,9 +9462,16 @@ namespace Legion {
                                 bool tight_region_bounds, bool remote)
     //--------------------------------------------------------------------------
     {
+      RegionTreeID tree_id = 0;
+      for (std::vector<LogicalRegion>::const_iterator it =
+            regions.begin(); it != regions.end(); it++)
+      {
+        if (!it->exists())
+          continue;
+        tree_id = it->get_tree_id();
+        break;
+      }
       std::deque<PhysicalManager*> candidates;
-      const RegionTreeID tree_id =
-        regions.empty() ? 0 : regions[0].get_tree_id(); 
       if (tree_id != 0)
       {
         // Hold the lock while searching here
@@ -9561,9 +9571,16 @@ namespace Legion {
                             bool acquire, bool tight_region_bounds, bool remote)
     //--------------------------------------------------------------------------
     {
+      RegionTreeID tree_id = 0;
+      for (std::vector<LogicalRegion>::const_iterator it =
+            regions.begin(); it != regions.end(); it++)
+      {
+        if (!it->exists())
+          continue;
+        tree_id = it->get_tree_id();
+        break;
+      }
       std::deque<PhysicalManager*> candidates;
-      const RegionTreeID tree_id =
-        regions.empty() ? 0 : regions[0].get_tree_id(); 
       if (tree_id != 0)
       {
         // Hold the lock while searching here
@@ -9659,8 +9676,18 @@ namespace Legion {
     {
       if (regions.empty())
         return false;
+      RegionTreeID tree_id = 0;
+      for (std::vector<LogicalRegion>::const_iterator it =
+            regions.begin(); it != regions.end(); it++)
+      {
+        if (!it->exists())
+          continue;
+        tree_id = it->get_tree_id();
+        break;
+      }
+      if (tree_id == 0)
+        return false;
       std::deque<PhysicalManager*> candidates;
-      const RegionTreeID tree_id = regions[0].get_tree_id();
       {
         // Hold the lock while searching here
         AutoLock m_lock(manager_lock, 1, false/*exclusive*/);
@@ -10486,7 +10513,8 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    RtEvent MemoryManager::detach_external_instance(PhysicalManager *manager)
+    void MemoryManager::detach_external_instance(PhysicalManager *manager,
+                                                    ApEvent precondition)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -10495,44 +10523,43 @@ namespace Legion {
       if (!is_owner)
       {
         // Send a message to the owner node to do the deletion
-        RtUserEvent result = Runtime::create_rt_user_event();
         Serializer rez;
         {
           RezCheck z(rez);
           rez.serialize(memory);
           rez.serialize(manager->did);
-          rez.serialize(result);
+          rez.serialize(precondition);
         }
+        manager->pack_valid_ref();
         runtime->send_external_detach(manager->owner_space, rez);
-        return result;
       }
-#ifdef DEBUG_LEGION
-      assert(is_owner);
-#endif
-      // Either delete the instance now or do a deferred deltion
-      // that will delete the instance once all operations are
-      // done using it
+      else
       {
-        AutoLock m_lock(manager_lock);
-        std::map<RegionTreeID,TreeInstances>::iterator tree_finder = 
-          current_instances.find(manager->tree_id);
+        // Either delete the instance now or do a deferred deltion
+        // that will delete the instance once all operations are
+        // done using it
+        {
+          AutoLock m_lock(manager_lock);
+          std::map<RegionTreeID,TreeInstances>::iterator tree_finder = 
+            current_instances.find(manager->tree_id);
 #ifdef DEBUG_LEGION
-        assert(tree_finder != current_instances.end());
+          assert(tree_finder != current_instances.end());
 #endif
-        TreeInstances::iterator finder = tree_finder->second.find(manager);
+          TreeInstances::iterator finder = tree_finder->second.find(manager);
 #ifdef DEBUG_LEGION
-        assert(finder != tree_finder->second.end());
+          assert(finder != tree_finder->second.end());
 #endif
-        // Reference will flow out
-        tree_finder->second.erase(finder);
-        if (tree_finder->second.empty())
-          current_instances.erase(tree_finder);
+          // Reference will flow out
+          tree_finder->second.erase(finder);
+          if (tree_finder->second.empty())
+            current_instances.erase(tree_finder);
+        }
+        // Perform the deletion now with the precondition for all the users
+        // being done accessing the instance
+        manager->force_deletion(precondition);
+        if (manager->remove_base_resource_ref(MEMORY_MANAGER_REF))
+          delete manager;
       }
-      // Perform the deletion contingent on references being removed
-      const RtEvent result = manager->perform_deletion(runtime->address_space);
-      if (manager->remove_base_resource_ref(MEMORY_MANAGER_REF))
-        delete manager;
-      return result;
     }
 
     //--------------------------------------------------------------------------
@@ -14649,7 +14676,7 @@ namespace Legion {
              && ordering_constraint == rhs.ordering_constraint
              && alignment_constraints == rhs.alignment_constraints
              && dimension_constraints == rhs.dimension_constraints
-             && splitting_constraints == rhs.splitting_constraints
+             && tiling_constraints == rhs.tiling_constraints
              && offset_constraints == rhs.offset_constraints
              && pointer_constraint == rhs.pointer_constraint;
     }
@@ -14665,7 +14692,7 @@ namespace Legion {
              && ordering_constraint == rhs.ordering_constraint
              && alignment_constraints == rhs.alignment_constraints
              && dimension_constraints == rhs.dimension_constraints
-             && splitting_constraints == rhs.splitting_constraints
+             && tiling_constraints == rhs.tiling_constraints
              && offset_constraints == rhs.offset_constraints
              && pointer_constraint == rhs.pointer_constraint;
     }
@@ -14876,14 +14903,14 @@ namespace Legion {
       }
       if (!ordering_constraint.entails(other.ordering_constraint, total_dims))
         return false;
-      for (std::vector<SplittingConstraint>::const_iterator it = 
-            other.splitting_constraints.begin(); it !=
-            other.splitting_constraints.end(); it++)
+      for (std::vector<TilingConstraint>::const_iterator it = 
+            other.tiling_constraints.begin(); it !=
+            other.tiling_constraints.end(); it++)
       {
         bool entailed = false;
-        for (unsigned idx = 0; idx < splitting_constraints.size(); idx++)
+        for (unsigned idx = 0; idx < tiling_constraints.size(); idx++)
         {
-          if (splitting_constraints[idx].entails(*it))
+          if (tiling_constraints[idx].entails(*it))
           {
             entailed = true;
             break;
@@ -25066,13 +25093,13 @@ namespace Legion {
       RtEvent manager_ready;
       PhysicalManager *manager = 
         find_or_request_instance_manager(did, manager_ready);
-      RtUserEvent done_event;
-      derez.deserialize(done_event);
+      ApEvent precondition;
+      derez.deserialize(precondition);
       MemoryManager *memory_manager = find_memory_manager(target_memory);
       if (manager_ready.exists() && !manager_ready.has_triggered())
         manager_ready.wait();
-      RtEvent local_done = memory_manager->detach_external_instance(manager);
-      Runtime::trigger_event(done_event, local_done);
+      memory_manager->detach_external_instance(manager, precondition);
+      manager->unpack_valid_ref();
     }
 
     //--------------------------------------------------------------------------
@@ -31051,8 +31078,8 @@ namespace Legion {
                 "the runtime has been started with multiple runtime instances.") 
         const RtEvent done_event = the_runtime->perform_registration_callback(
             (void*)callback, buffer.get_ptr(), buffer.get_size(), 
-            true/*withargs*/, global, false/*preregistered*/, false/*dedup*/,
-            0/*dedup tag*/);
+            true/*withargs*/, global, false/*preregistered*/,
+            deduplicate, dedup_tag);
         if (done_event.exists() && !done_event.has_triggered())
         {
           // Block waiting for these to finish currently since we need
@@ -31326,7 +31353,9 @@ namespace Legion {
     /*static*/ ReductionOpID& Runtime::get_current_static_reduction_id(void)
     //--------------------------------------------------------------------------
     {
-      static ReductionOpID current_redop_id = LEGION_MAX_APPLICATION_REDOP_ID;
+      // Make sure to reserve space for the built-in reduction operators
+      static ReductionOpID current_redop_id = 
+        LEGION_MAX_APPLICATION_REDOP_ID + LEGION_REDOP_LAST;
       return current_redop_id;
     }
 

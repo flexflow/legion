@@ -1133,7 +1133,7 @@ namespace Legion {
         { assert(false); return ApEvent::NO_AP_EVENT; }
       virtual MemoizableOp* get_memoizable(void) { return this; }
     protected:
-      void invoke_memoize_operation(MapperID mapper_id);
+      void invoke_memoize_operation(void);
       RtEvent record_complete_replay(const TraceInfo &trace_info,
                     RtEvent ready = RtEvent::NO_RT_EVENT,
                     ApEvent precondition = ApEvent::NO_AP_EVENT);
@@ -1641,7 +1641,7 @@ namespace Legion {
     public:
       virtual IndexSpaceNode* get_shard_points(void) const 
         { return launch_space; }
-      void enumerate_points(bool replaying);
+      void enumerate_points(void);
       void handle_point_commit(RtEvent point_committed);
       void check_point_requirements(void);
     protected:
@@ -3801,7 +3801,7 @@ namespace Legion {
       virtual size_t get_collective_points(void) const;
       virtual IndexSpaceNode* get_shard_points(void) const 
         { return launch_space; }
-      void enumerate_points(bool replaying);
+      void enumerate_points(void);
       void handle_point_commit(void);
       void check_point_requirements(void);
     protected:
@@ -4123,6 +4123,7 @@ namespace Legion {
       virtual void pack_remote_operation(Serializer &rez, AddressSpaceID target,
                                          std::set<RtEvent> &applied) const;
       virtual RtEvent finalize_complete_mapping(RtEvent event) { return event; }
+      virtual void detach_external_instance(PhysicalManager *manager);
       virtual bool is_point_detach(void) const { return false; }
     protected:
       void compute_parent_index(void);

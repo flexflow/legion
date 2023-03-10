@@ -1269,7 +1269,8 @@ namespace Legion {
     Mappable* Operation::get_mappable(void)
     //--------------------------------------------------------------------------
     {
-      return parent_ctx->get_task();
+      // should never be called on this class
+      return NULL;
     }
 
     //--------------------------------------------------------------------------
@@ -1788,35 +1789,42 @@ namespace Legion {
       assert(reported.exists());
       assert(!reported.has_triggered());
 #endif
+      std::string prov_str;
+      Provenance *provenance = get_provenance();
+      if (provenance != NULL) {
+        std::stringstream prov_ss;
+        prov_ss << ", provenance: " << provenance->human_str();
+        prov_str = prov_ss.str();
+      }
       // Read-only or reduction usage of uninitialized data is always an error
       if (IS_READ_ONLY(usage))
         REPORT_LEGION_ERROR(ERROR_UNINITIALIZED_USE,
-                      "Region requirement %d of operation %s (UID %lld) in "
+                      "Region requirement %d of operation %s (UID %lld%s) in "
                       "parent task %s (UID %lld) is using uninitialized data "
                       "for field(s) %s of logical region (%d,%d,%d) with "
                       "read-only privileges", index, get_logging_name(), 
-                      get_unique_op_id(), parent_ctx->get_task_name(),
-                      parent_ctx->get_unique_id(), field_string, 
-                      handle.get_index_space().get_id(),
+                      get_unique_op_id(), prov_str.c_str(),
+                      parent_ctx->get_task_name(), parent_ctx->get_unique_id(),
+                      field_string, handle.get_index_space().get_id(),
                       handle.get_field_space().get_id(), 
                       handle.get_tree_id())
       else if (IS_REDUCE(usage))
         REPORT_LEGION_ERROR(ERROR_UNINITIALIZED_USE,
-                      "Region requirement %d of operation %s (UID %lld) in "
+                      "Region requirement %d of operation %s (UID %lld%s) in "
                       "parent task %s (UID %lld) is using uninitialized data "
                       "for field(s) %s of logical region (%d,%d,%d) with "
                       "reduction privileges", index, get_logging_name(), 
-                      get_unique_op_id(), parent_ctx->get_task_name(),
-                      parent_ctx->get_unique_id(), field_string, 
-                      handle.get_index_space().get_id(),
+                      get_unique_op_id(), prov_str.c_str(),
+                      parent_ctx->get_task_name(), parent_ctx->get_unique_id(),
+                      field_string, handle.get_index_space().get_id(),
                       handle.get_field_space().get_id(), 
                       handle.get_tree_id())
       else // Read-write usage is just a warning
         REPORT_LEGION_WARNING(LEGION_WARNING_UNINITIALIZED_USE,
-                      "Region requirement %d of operation %s (UID %lld) in "
+                      "Region requirement %d of operation %s (UID %lld%s) in "
                       "parent task %s (UID %lld) is using uninitialized data "
                       "for field(s) %s of logical region (%d,%d,%d)", index, 
-                      get_logging_name(), get_unique_op_id(),
+                      get_logging_name(), get_unique_op_id(), prov_str.c_str(),
                       parent_ctx->get_task_name(), parent_ctx->get_unique_id(),
                       field_string, handle.get_index_space().get_id(),
                       handle.get_field_space().get_id(), 
@@ -4071,7 +4079,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void MemoizableOp::invoke_memoize_operation(MapperID mapper_id)
+    void MemoizableOp::invoke_memoize_operation(void)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -4079,18 +4087,24 @@ namespace Legion {
       assert(!runtime->no_tracing);
       assert(!runtime->no_physical_tracing);
 #endif
-      Mapper::MemoizeInput  input;
-      Mapper::MemoizeOutput output;
-      input.trace_id = trace->get_trace_id();
-      output.memoize = false;
-      Processor mapper_proc = parent_ctx->get_executing_processor();
-      MapperManager *mapper = runtime->find_mapper(mapper_proc, mapper_id);
       Mappable *mappable = get_mappable();
+      if (mappable != NULL)
+      {
+        Mapper::MemoizeInput  input;
+        Mapper::MemoizeOutput output;
+        input.trace_id = trace->get_trace_id();
+        output.memoize = false;
+        Processor mapper_proc = parent_ctx->get_executing_processor();
+        MapperManager *mapper = runtime->find_mapper(mapper_proc, 
+                                                     mappable->map_id);
 #ifdef DEBUG_LEGION
-      assert(mappable != NULL);
+        assert(mappable != NULL);
 #endif
-      mapper->invoke_memoize_operation(mappable, &input, &output);
-      if (output.memoize)
+        mapper->invoke_memoize_operation(mappable, &input, &output);
+        if (output.memoize)
+          memo_state = MEMO_REQ;
+      }
+      else // Assume that all operations which are not mappable can be memoized
         memo_state = MEMO_REQ;
     }
 
@@ -7595,7 +7609,6 @@ namespace Legion {
       LegionSpy::log_replay_operation(unique_op_id);
 #endif
       tpl->register_operation(this);
-      complete_mapping();
     }
 
     //--------------------------------------------------------------------------
@@ -7618,6 +7631,7 @@ namespace Legion {
       }
       // Handle the case for marking when the copy completes
       record_completion_effect(copy_complete_event);
+      complete_mapping();
       complete_execution();
     }
 
@@ -8465,7 +8479,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       // Enumerate the points
-      enumerate_points(false/*replaying*/); 
+      enumerate_points(); 
       // Check for interfering point requirements in debug mode
       if (runtime->check_privileges)
         check_point_requirements();
@@ -8520,12 +8534,15 @@ namespace Legion {
       LegionSpy::log_replay_operation(unique_op_id);
 #endif
       // Enumerate the points
-      enumerate_points(true/*replaying*/);
+      enumerate_points();
       // Then call replay analysis on all of them
-      for (std::vector<PointCopyOp*>::const_iterator it = 
-            points.begin(); it != points.end(); it++)
-        (*it)->trigger_replay();
-      complete_mapping();
+      std::vector<RtEvent> mapped_preconditions(points.size());
+      for (unsigned idx = 0; idx < points.size(); idx++)
+      {
+        mapped_preconditions[idx] = points[idx]->get_mapped_event();
+        points[idx]->trigger_replay();
+      }
+      complete_mapping(Runtime::merge_events(mapped_preconditions));
       complete_execution();
     }
 
@@ -8537,7 +8554,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void IndexCopyOp::enumerate_points(bool replaying)
+    void IndexCopyOp::enumerate_points(void)
     //--------------------------------------------------------------------------
     {
       // Need to get the launch domain in case it is different than
@@ -8614,7 +8631,7 @@ namespace Legion {
                                    index_domain, projection_points);
         }
       }
-      if (runtime->legion_spy_enabled && !replaying)
+      if (runtime->legion_spy_enabled)
       {
         for (std::vector<PointCopyOp*>::const_iterator it = points.begin();
               it != points.end(); it++) 
@@ -9517,7 +9534,7 @@ namespace Legion {
               get_provenance(), track ? this : NULL));
       if (runtime->legion_spy_enabled)
         LegionSpy::log_fence_operation(parent_ctx->get_unique_id(),
-                                       unique_op_id, context_index);
+            unique_op_id, context_index, (kind == EXECUTION_FENCE));
       return result;
     }
 
@@ -12907,7 +12924,8 @@ namespace Legion {
       // Otherwise do the things needed to clean up this operation
       complete_execution();
       if (!map_applied_conditions.empty())
-        complete_mapping(Runtime::merge_events(map_applied_conditions));
+        complete_mapping(finalize_complete_mapping(
+              Runtime::merge_events(map_applied_conditions)));
       else
         complete_mapping();
     } 
@@ -13770,7 +13788,8 @@ namespace Legion {
       // Do the things needed to clean up this operation
       complete_execution();
       if (!map_applied_conditions.empty())
-        complete_mapping(Runtime::merge_events(map_applied_conditions));
+        complete_mapping(finalize_complete_mapping(
+              Runtime::merge_events(map_applied_conditions)));
       else
         complete_mapping();
     } 
@@ -16707,9 +16726,9 @@ namespace Legion {
       future_map = fm;
 #ifdef DEBUG_LEGION
       assert(sources.empty());
-      assert(future_map.impl != NULL);
 #endif
-      future_map.impl->get_all_futures(sources);
+      if (future_map.impl != NULL)
+        future_map.impl->get_all_futures(sources);
     }
 
     //--------------------------------------------------------------------------
@@ -19494,7 +19513,6 @@ namespace Legion {
       LegionSpy::log_replay_operation(unique_op_id);
 #endif
       tpl->register_operation(this);
-      complete_mapping();
     }
 
     //--------------------------------------------------------------------------
@@ -19516,6 +19534,7 @@ namespace Legion {
         }
       }
       record_completion_effect(fill_complete_event);
+      complete_mapping();
       complete_execution();
     }
 
@@ -19734,7 +19753,7 @@ namespace Legion {
     {
       const RtEvent view_ready = initialize_fill_view();
       // Enumerate the points
-      enumerate_points(false/*replaying*/); 
+      enumerate_points();
       // Check for interfering point requirements in debug mode
       if (runtime->check_privileges)
         check_point_requirements(); 
@@ -19807,18 +19826,19 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(is_replaying());
 #endif
-      if (runtime->legion_spy_enabled)
-        log_index_fill_requirement();
 #ifdef LEGION_SPY
       LegionSpy::log_replay_operation(unique_op_id);
 #endif
       // Enumerate the points
-      enumerate_points(true/*replaying*/);
+      enumerate_points();
       // Then call replay analysis on all of them
-      for (std::vector<PointFillOp*>::const_iterator it = 
-            points.begin(); it != points.end(); it++)
-        (*it)->trigger_replay();
-      complete_mapping();
+      std::vector<RtEvent> mapped_preconditions(points.size());
+      for (unsigned idx = 0; idx < points.size(); idx++)
+      {
+        mapped_preconditions[idx] = points[idx]->get_mapped_event();
+        points[idx]->trigger_replay();
+      }
+      complete_mapping(Runtime::merge_events(mapped_preconditions));
       complete_execution();
     }
 
@@ -19830,7 +19850,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void IndexFillOp::enumerate_points(bool replaying)
+    void IndexFillOp::enumerate_points(void)
     //--------------------------------------------------------------------------
     {
       // Enumerate the points
@@ -19860,7 +19880,7 @@ namespace Legion {
                                                       points.end());
       function->project_points(this, 0/*idx*/, requirement,
                                runtime, index_domain, projection_points);
-      if (runtime->legion_spy_enabled && !replaying)
+      if (runtime->legion_spy_enabled)
       {
         for (std::vector<PointFillOp*>::const_iterator it = points.begin();
               it != points.end(); it++)
@@ -22484,6 +22504,16 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void DetachOp::detach_external_instance(PhysicalManager *manager)
+    //--------------------------------------------------------------------------
+    {
+      // It's only safe to actually perform the detach after the mapping
+      // is performed to know that all the updates to the instance have
+      // been mapped
+      manager->detach_external_instance(detach_event);
+    }
+
+    //--------------------------------------------------------------------------
     void DetachOp::trigger_complete(void)
     //--------------------------------------------------------------------------
     {
@@ -22497,14 +22527,11 @@ namespace Legion {
 #endif
       const InstanceRef &reference = references[0];
       PhysicalManager *manager = reference.get_physical_manager();
-      // It's only safe to actually perform the detach after the mapping
-      // is performed to know that all the updates to the instance have
-      // been mapped
-      const RtEvent detached_event = manager->detach_external_instance();
+      detach_external_instance(manager);
       // We can remove the acquire reference that we added after we're mapped
       if (manager->remove_base_valid_ref(MAPPING_ACQUIRE_REF))
         delete manager;
-      complete_operation(detached_event);
+      complete_operation();
     }
 
     //--------------------------------------------------------------------------
@@ -25872,4 +25899,3 @@ namespace Legion {
 }; // namespace Legion 
 
 // EOF
-

@@ -1576,7 +1576,7 @@ namespace Legion {
       void remove_collectable(GCPriority priority, PhysicalManager *manager);
     public:
       RtEvent attach_external_instance(PhysicalManager *manager);
-      RtEvent detach_external_instance(PhysicalManager *manager);
+      void detach_external_instance(PhysicalManager *manager, ApEvent pre);
     public:
       bool is_visible_memory(Memory other);
     public:
@@ -2309,7 +2309,7 @@ namespace Legion {
                   std::map<IndexTreeNode*,ProjectionTree*> &node_map,
                   ShardID owner_shard = 0); 
     public:
-      const int depth; 
+      const unsigned depth; 
       const bool is_exclusive;
       const bool is_functional;
       const bool is_invertible;

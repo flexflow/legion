@@ -1095,11 +1095,11 @@ namespace Legion {
             constraints->ordering_constraint.ordering.begin(); it !=
             constraints->ordering_constraint.ordering.end(); it++)
         LegionSpy::log_instance_ordering_constraint_dimension(inst_event, *it);
-      for (std::vector<SplittingConstraint>::const_iterator it = 
-            constraints->splitting_constraints.begin(); it !=
-            constraints->splitting_constraints.end(); it++)
-        LegionSpy::log_instance_splitting_constraint(inst_event,
-                                it->kind, it->value, it->chunks);
+      for (std::vector<TilingConstraint>::const_iterator it = 
+            constraints->tiling_constraints.begin(); it !=
+            constraints->tiling_constraints.end(); it++)
+        LegionSpy::log_instance_tiling_constraint(inst_event,
+                                it->dim, it->value, it->tiles);
       for (std::vector<DimensionConstraint>::const_iterator it = 
             constraints->dimension_constraints.begin(); it !=
             constraints->dimension_constraints.end(); it++)
@@ -3175,6 +3175,10 @@ namespace Legion {
                                               AutoLock *i_lock /* = NULL*/)
     //--------------------------------------------------------------------------
     {
+#ifdef DEBUG_LEGION
+      assert(is_owner());
+      assert(source == local_space);
+#endif
       if (i_lock == NULL)
       {
         AutoLock instance_lock(inst_lock);
@@ -3188,8 +3192,6 @@ namespace Legion {
         return args.done;
       }
 #ifdef DEBUG_LEGION
-      assert(is_owner());
-      assert(source == local_space);
       assert(pending_views.empty());
 #endif
       log_garbage.spew("Deleting physical instance " IDFMT " in memory " 
@@ -3226,7 +3228,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void PhysicalManager::force_deletion(void)
+    void PhysicalManager::force_deletion(ApEvent precondition)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -3237,21 +3239,23 @@ namespace Legion {
 #ifndef LEGION_DISABLE_GC
       std::vector<PhysicalInstance::DestroyedField> serdez_fields;
       layout->compute_destroyed_fields(serdez_fields);
-#ifndef LEGION_MALLOC_INSTANCES
-      // If this is an eager allocation, return it back to the eager pool
-      if (kind == EAGER_INSTANCE_KIND)
-        memory_manager->free_eager_instance(instance, RtEvent::NO_RT_EVENT);
-      else
-#endif
-      {
-        if (!serdez_fields.empty())
-          instance.destroy(serdez_fields);
-        else
-          instance.destroy();
-      }
+      RtEvent deferred_deletion;
+      if (precondition.exists())
+        deferred_deletion = Runtime::protect_event(precondition);
 #ifdef LEGION_MALLOC_INSTANCES
       if (kind == INTERNAL_INSTANCE_KIND)
-        memory_manager->free_legion_instance(this, RtEvent::NO_RT_EVENT);
+        memory_manager->free_legion_instance(this, deferred_deletion);
+#else
+      // If this is an eager allocation, return it back to the eager pool
+      if (kind == EAGER_INSTANCE_KIND)
+        memory_manager->free_eager_instance(instance, deferred_deletion);
+      else
+      {
+        if (!serdez_fields.empty())
+          instance.destroy(serdez_fields, deferred_deletion);
+        else
+          instance.destroy(deferred_deletion);
+      }
 #endif
 #endif
     }
@@ -3293,13 +3297,13 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    RtEvent PhysicalManager::detach_external_instance(void)
+    void PhysicalManager::detach_external_instance(ApEvent precondition)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(is_external_instance());
 #endif
-      return memory_manager->detach_external_instance(this);
+      memory_manager->detach_external_instance(this, precondition);
     }
     
     //--------------------------------------------------------------------------
@@ -3564,15 +3568,16 @@ namespace Legion {
           default:
             break;
         }
+        size_t num_pieces = 0;
         realm_layout =
-          instance_domain->create_layout(constraints, field_set, 
-             field_sizes, compact, &piece_list, &piece_list_size);
+          instance_domain->create_layout(constraints, field_set,
+             field_sizes, compact, &piece_list, &piece_list_size, &num_pieces);
 #ifdef DEBUG_LEGION
         assert(realm_layout != NULL);
 #endif
         // If we were doing a compact layout then Check that we met 
         // the constraints for efficiency and number of pieces
-        if (compact && (spec.max_pieces < piece_list_size))
+        if (compact && (spec.max_pieces < num_pieces))
         {
           if (unsat_kind != NULL)
             *unsat_kind = LEGION_SPECIALIZED_CONSTRAINT;
@@ -3733,7 +3738,9 @@ namespace Legion {
         // Log the logical regions and fields that make up this instance
         for (std::vector<LogicalRegion>::const_iterator it =
               regions.begin(); it != regions.end(); it++)
-          runtime->profiler->record_physical_instance_region(unique_event, *it);
+          if (it->exists())
+            runtime->profiler->record_physical_instance_region(unique_event, 
+                                                               *it);
         runtime->profiler->record_physical_instance_layout(unique_event,
                                                      layout->owner->handle,
                                                      *layout->constraints);
@@ -3800,6 +3807,8 @@ namespace Legion {
       for (std::vector<LogicalRegion>::const_iterator it = 
             regions.begin(); it != regions.end(); it++)
       {
+        if (!it->exists())
+          continue;
         if (field_space_node == NULL)
           field_space_node = forest->get_node(it->get_field_space());
         if (tree_id == 0)
@@ -3821,10 +3830,6 @@ namespace Legion {
     {
       // First look at the OrderingConstraint to Figure out what kind
       // of instance we are building here, SOA, AOS, or hybrid
-      // Make sure to check for splitting constraints if see sub-dimensions
-      if (!constraints.splitting_constraints.empty())
-        REPORT_LEGION_FATAL(ERROR_UNSUPPORTED_LAYOUT_CONSTRAINT,
-            "Splitting layout constraints are not currently supported")
       const size_t num_dims = instance_domain->get_num_dims();
       OrderingConstraint &ord = constraints.ordering_constraint;
       if (!ord.ordering.empty())
@@ -3844,9 +3849,6 @@ namespace Legion {
             else
               field_idx = idx;
           }
-          else if (ord.ordering[idx] > LEGION_DIM_F)
-            REPORT_LEGION_FATAL(ERROR_UNSUPPORTED_LAYOUT_CONSTRAINT,
-              "Splitting layout constraints are not currently supported")
           else
           {
             // Should never be duplicated
@@ -3943,6 +3945,38 @@ namespace Legion {
       assert(ord.contiguous);
       assert(ord.ordering.size() == (num_dims + 1));
 #endif
+      // Check the tiling constraints
+      if (!constraints.tiling_constraints.empty())
+      {
+        // Check to make sure we're not asking for a compact-sparse instance
+        switch (constraints.specialized_constraint.get_kind())
+        {
+          case LEGION_COMPACT_SPECIALIZE:
+          case LEGION_COMPACT_REDUCTION_SPECIALIZE:
+            REPORT_LEGION_ERROR(ERROR_ILLEGAL_LAYOUT_CONSTRAINT,
+                "Illegal tiling constraints specified for compact-sparse "
+                "instance creation. Tiling constraints can only be specified "
+                "on affine instances currently. If you have a compelling use "
+                "case for tiling the pieces of an compact-sparse instance "
+                "please report it to the Legion developer's mailing list.")
+          default:
+            break;
+        }
+        // Make sure that each of the dimensions are valid and aren't duplicated
+        std::vector<bool> observed(num_dims, false);
+        for (std::vector<TilingConstraint>::iterator it =
+              constraints.tiling_constraints.begin(); it !=
+              constraints.tiling_constraints.end(); /*nothing*/)
+        {
+          if ((it->dim < num_dims) && !observed[it->dim])
+          {
+            observed[it->dim] = true;
+            it++;
+          }
+          else
+            it = constraints.tiling_constraints.erase(it);
+        }
+      }
       // From this we should be able to compute the field groups 
       // Use the FieldConstraint to put any fields in the proper order
       const std::vector<FieldID> &field_set = 

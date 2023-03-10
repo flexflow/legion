@@ -1402,6 +1402,7 @@ namespace Legion {
       void create_collective_view_rendezvous(RegionTreeID tid,
           unsigned requirement_index, unsigned analysis_index = 0);
       void shard_off_collective_view_rendezvous(std::set<RtEvent> &done_events);
+      void resolve_false_collective_view_rendezvous(void);
     protected:
       std::map<RendezvousKey,
                CollectiveViewRendezvous*> collective_view_rendezvous;
@@ -1626,6 +1627,7 @@ namespace Legion {
       virtual bool perform_collective_analysis(CollectiveMapping *&mapping,
                                                bool &first_local);
       virtual RtEvent initialize_fill_view(void);
+      virtual void resolve_false(bool speculated, bool launched);
     public:
       RtBarrier collective_map_barrier;
       CreateCollectiveFillView *collective;
@@ -2364,8 +2366,8 @@ namespace Legion {
       virtual void deactivate(bool free = true);
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
-      virtual void trigger_complete(void);
       virtual RtEvent finalize_complete_mapping(RtEvent event);
+      virtual void detach_external_instance(PhysicalManager *manager);
       virtual bool perform_collective_analysis(CollectiveMapping *&mapping,
                                                bool &first_local);
       virtual bool find_shard_participants(std::vector<ShardID> &shards);
@@ -2376,6 +2378,7 @@ namespace Legion {
     protected:
       RtBarrier collective_map_barrier;
       ApBarrier effects_barrier;
+      size_t exchange_index;
       bool collective_instances;
       bool is_first_local_shard;
     };

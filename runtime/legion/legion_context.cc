@@ -2280,31 +2280,13 @@ namespace Legion {
         FutureInstance *instance = manager->create_future_instance(owner_task,
             owner_task->get_unique_op_id(), ready,size, true/*eager*/);
         // create an external instance for the current allocation
-        const std::vector<Realm::FieldID> fids(1, 0/*field id*/);
-        const std::vector<size_t> sizes(1, 1);
-        const int dim_order[1] = { 0 };
-        const Realm::InstanceLayoutConstraints constraints(fids, sizes, 1);
-        const Realm::IndexSpace<1,coord_t> rect_space(
-            Realm::Rect<1,coord_t>(Realm::Point<1,coord_t>(0),
-                                   Realm::Point<1,coord_t>(size - 1)));
-        Realm::InstanceLayoutGeneric *ilg =
-          Realm::InstanceLayoutGeneric::choose_instance_layout<1,coord_t>(
-              rect_space, constraints, dim_order);
-        PhysicalInstance source_instance;
         const Realm::ExternalMemoryResource resource(
             reinterpret_cast<uintptr_t>(value), size, true/*read only*/);
-        const ApEvent src_ready(
-            PhysicalInstance::create_external_instance(
-              source_instance, resource.suggested_memory(), ilg, 
-              resource, Realm::ProfilingRequestSet()));
-        FutureInstance source(value, size, src_ready, runtime, false/*eager*/,
-            false/*external*/, false/*own alloc*/, source_instance);
+        FutureInstance source(value, size, ApEvent::NO_AP_EVENT, runtime,
+          false/*eager*/, true/*external allocation*/, false/*own allocation*/);
         // issue the copy between them
         Runtime::trigger_event(NULL, ready, 
             instance->copy_from(&source, owner_task));
-        done = Runtime::protect_event(ready);
-        // deferred delete the external instance source
-        source_instance.destroy(done);
         return instance;
       }
       else
@@ -7459,7 +7441,7 @@ namespace Legion {
       {
         const Point<2> p = point;
         // Control replication case, see if we're compacted or not
-        if (launch.dense())
+        if (launch.dense() && (launch.lo()[0] == 0))
         {
           // Dense means that all the shards had the same number of points
           // so we can compute where our offset is based on that
@@ -13204,13 +13186,13 @@ namespace Legion {
         hasher.hash(*it, "Ordering Constraint ordering");
       hasher.hash(constraints.ordering_constraint.contiguous,
           "Ordering Constraint contiguous");
-      for (std::vector<SplittingConstraint>::const_iterator it =
-            constraints.splitting_constraints.begin(); it !=
-            constraints.splitting_constraints.end(); it++)
+      for (std::vector<TilingConstraint>::const_iterator it =
+            constraints.tiling_constraints.begin(); it !=
+            constraints.tiling_constraints.end(); it++)
       {
-        hasher.hash(it->kind, "Splitting Constraint kind");
-        hasher.hash(it->value, "Splitting Constraint value");
-        hasher.hash(it->chunks, "Splitting Constraint chunks");
+        hasher.hash(it->dim, "Tiling Constraint dim");
+        hasher.hash(it->value, "Tiling Constraint value");
+        hasher.hash(it->tiles, "Tiling Constraint tiles");
       }
       for (std::vector<DimensionConstraint>::const_iterator it =
             constraints.dimension_constraints.begin(); it !=
@@ -19101,9 +19083,21 @@ namespace Legion {
         hasher.hash(launcher.deduplicate_across_shards,
                     "deduplicate_across_shards");
         // Everything else other than the privilege fields is sharded already
+        // Make sure we include privilege fields from the files too
+        // Effectively the direct privilege fields or privilege fields 
+        // mentioned by any of the other data structures need to be the same
+        std::set<FieldID> all_privilege_fields(launcher.privilege_fields);
+        for (std::vector<FieldID>::const_iterator it =
+              launcher.file_fields.begin(); it != 
+              launcher.file_fields.end(); it++)
+          all_privilege_fields.insert(*it);
+        for (std::map<FieldID,std::vector<const char*> >::const_iterator it =
+              launcher.field_files.begin(); it != 
+              launcher.field_files.end(); it++)
+          all_privilege_fields.insert(it->first);
         for (std::set<FieldID>::const_iterator it = 
-              launcher.privilege_fields.begin(); it !=
-              launcher.privilege_fields.end(); it++)
+              all_privilege_fields.begin(); it !=
+              all_privilege_fields.end(); it++)
           hasher.hash(*it, "privilege_fields");
         hash_static_dependences(hasher, launcher.static_dependences);
         if (hasher.verify(__func__))
@@ -19837,6 +19831,9 @@ namespace Legion {
           const std::vector<DistributedID> &instances, RtEvent &ready)
     //--------------------------------------------------------------------------
     {
+#ifdef DEBUG_LEGION
+      assert(instances.size() > 1);
+#endif
       // Find which shard is the owner
       const ShardID tid_shard = shard_manager->find_collective_owner(tid);
       if (tid_shard != owner_shard->shard_id)
@@ -22131,6 +22128,9 @@ namespace Legion {
           const std::vector<DistributedID> &instances, RtEvent &ready)
     //--------------------------------------------------------------------------
     {
+#ifdef DEBUG_LEGION
+      assert(instances.size() > 1);
+#endif
       const RtUserEvent to_trigger = Runtime::create_rt_user_event();
       CollectiveResult *result = new CollectiveResult(instances);
       result->add_reference();

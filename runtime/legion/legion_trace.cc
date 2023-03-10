@@ -1760,7 +1760,7 @@ namespace Legion {
       fence_kind = MAPPING_FENCE;
       if (runtime->legion_spy_enabled)
         LegionSpy::log_fence_operation(parent_ctx->get_unique_id(),
-                                       unique_op_id, context_index);
+            unique_op_id, context_index, false/*execution fence*/);
       context_index = invalidator->get_ctx_index();
       current_template = tpl;
       // The summary could have been marked as being traced,
@@ -1921,7 +1921,8 @@ namespace Legion {
     void PhysicalTrace::record_failed_capture(PhysicalTemplate *tpl)
     //--------------------------------------------------------------------------
     {
-      if (++nonreplayable_count > LEGION_NON_REPLAYABLE_WARNING)
+      if ((last_memoized > 0) && 
+          (++nonreplayable_count > LEGION_NON_REPLAYABLE_WARNING))
       {
         const std::string &message = tpl->get_replayable_message();
         const char *message_buffer = message.c_str();
@@ -1950,7 +1951,10 @@ namespace Legion {
         return true;
       }
       else
+      {
+        last_memoized = 0;
         return false;
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -2174,29 +2178,6 @@ namespace Legion {
         context->add_base_resource_ref(TRACE_REF);
       else
         context->add_nested_resource_ref(owner_did);
-    }
-
-    //--------------------------------------------------------------------------
-    TraceViewSet::TraceViewSet(InnerContext *ctx, TraceViewSet &source,
-                               DistributedID own_did, RegionNode *r)
-      : context(ctx), region(r), owner_did(
-          (own_did > 0) ? own_did : ctx->did), has_collective_views(false)
-    //--------------------------------------------------------------------------
-    {
-      region->add_nested_resource_ref(owner_did);
-      if (owner_did == ctx->did)
-        context->add_base_resource_ref(TRACE_REF);
-      else
-        context->add_nested_resource_ref(owner_did);
-      conditions.swap(source.conditions);
-      for (ViewExprs::const_iterator vit = 
-            conditions.begin(); vit != conditions.end(); ++vit)
-      {
-        vit->first->add_nested_valid_ref(owner_did);
-        for (FieldMaskSet<IndexSpaceExpression>::const_iterator it =
-              vit->second.begin(); it != vit->second.end(); ++it)
-          it->first->add_nested_expression_reference(owner_did);
-      }
     }
 
     //--------------------------------------------------------------------------
@@ -3484,10 +3465,12 @@ namespace Legion {
         if (!mask)
           break;
       }
+      Runtime *runtime = context->runtime;
       // We've got the names of any collective views that need to be
       // refined to not include this individual view, so go ahead and
       // ask the context to make that collective view for us
       std::vector<RtEvent> views_ready;
+      std::map<CollectiveView*,PhysicalManager*> individual_results;
       std::map<CollectiveView*,InnerContext::CollectiveResult*> results;
       for (FieldMaskSet<CollectiveView>::const_iterator it = 
             to_refine.begin(); it != to_refine.end(); it++)
@@ -3500,10 +3483,20 @@ namespace Legion {
 #endif
         dids.erase(finder);
         RtEvent ready;
-        InnerContext::CollectiveResult *result =
-          context->find_or_create_collective_view(region->handle.get_tree_id(),
-              dids, ready);
-        results[it->first] = result;
+        if (dids.size() > 1)
+        {
+          InnerContext::CollectiveResult *result =
+            context->find_or_create_collective_view(
+                region->handle.get_tree_id(), dids, ready);
+          results[it->first] = result;
+        }
+        else
+        {
+          // Just making a single view at this point
+          PhysicalManager *manager = 
+            runtime->find_or_request_instance_manager(dids.back(), ready);
+          individual_results[it->first] = manager;
+        }
         if (ready.exists())
           views_ready.push_back(ready);
       }
@@ -3516,17 +3509,30 @@ namespace Legion {
       for (FieldMaskSet<CollectiveView>::const_iterator rit =
             to_refine.begin(); rit != to_refine.end(); rit++)
       {
-        InnerContext::CollectiveResult *result = results[rit->first];
-        // Then wait for the collective view to be registered
-        if (result->ready_event.exists() && 
-            !result->ready_event.has_triggered())
-          result->ready_event.wait();
         RtEvent ready;
-        InstanceView *view = static_cast<InstanceView*>(
-          context->runtime->find_or_request_logical_view(
-            result->collective_did, ready));
-        if (result->remove_reference())
-          delete result;
+        InstanceView *view = NULL;
+        std::map<CollectiveView*,PhysicalManager*>::const_iterator
+          individual_finder = individual_results.find(rit->first);
+        if (individual_finder == individual_results.end())
+        {
+#ifdef DEBUG_LEGION
+          assert(results.find(rit->first) != results.end());
+#endif
+          // Common case
+          InnerContext::CollectiveResult *result = results[rit->first];
+          // Then wait for the collective view to be registered
+          if (result->ready_event.exists() && 
+              !result->ready_event.has_triggered())
+            result->ready_event.wait();
+          view = static_cast<InstanceView*>(
+              runtime->find_or_request_logical_view(
+                result->collective_did, ready));
+          if (result->remove_reference())
+            delete result;
+        }
+        else // Unusual case of an downgrading to an individual view
+          view = context->create_instance_top_view(individual_finder->second,
+                                                   runtime->address_space);
         ViewExprs::iterator finder = conditions.find(rit->first);
         if (finder->second.get_valid_mask() == rit->second)
         {
@@ -4702,7 +4708,6 @@ namespace Legion {
       std::map<TraceLocalID,MemoizableOp*> &ops = operations.back();
 #ifdef DEBUG_LEGION
       assert(ops.find(tid) == ops.end());
-      assert(memo_entries.find(tid) != memo_entries.end());
 #endif
       ops[tid] = memoizable;
     }
@@ -7609,18 +7614,6 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    unsigned PhysicalTemplate::find_memo_entry(const TraceLocalID &op_key)
-    //--------------------------------------------------------------------------
-    {
-      std::map<TraceLocalID,std::pair<unsigned,unsigned> >::iterator 
-        entry_finder = memo_entries.find(op_key);
-#ifdef DEBUG_LEGION
-      assert(entry_finder != memo_entries.end());
-#endif
-      return entry_finder->second.first;
-    }
-
-    //--------------------------------------------------------------------------
     void PhysicalTemplate::record_memo_entry(const TraceLocalID &tlid,
                                              unsigned entry, unsigned op_kind)
     //--------------------------------------------------------------------------
@@ -9541,10 +9534,15 @@ namespace Legion {
             local_subscriptions.find(it->first);
 #ifdef DEBUG_LEGION
           assert(subscription_finder != local_subscriptions.end());
-          assert(local_subscriptions.find(finder->second) == 
-                  local_subscriptions.end());
 #endif
-          local_subscriptions[finder->second].swap(subscription_finder->second);
+          std::map<unsigned,std::set<ShardID> >::iterator local_finder =
+            local_subscriptions.find(finder->second);
+          if (local_finder != local_subscriptions.end())
+            local_finder->second.insert(subscription_finder->second.begin(),
+                                        subscription_finder->second.end());
+          else
+            local_subscriptions[finder->second].swap(
+                                        subscription_finder->second);
           local_subscriptions.erase(subscription_finder);
           std::map<unsigned,ApBarrier>::iterator to_delete = it++;
           local_frontiers.erase(to_delete);

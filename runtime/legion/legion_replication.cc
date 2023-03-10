@@ -488,6 +488,19 @@ namespace Legion {
       }
     }
 
+    //--------------------------------------------------------------------------
+    template<typename OP>
+    void ReplCollectiveViewCreator<OP>::
+                                  resolve_false_collective_view_rendezvous(void)
+    //--------------------------------------------------------------------------
+    {
+      for (typename std::map<RendezvousKey,
+                             CollectiveViewRendezvous*>::const_iterator
+            it = collective_view_rendezvous.begin(); 
+            it != collective_view_rendezvous.end(); it++)
+        it->second->elide_collective();
+    }
+
     /////////////////////////////////////////////////////////////
     // Repl Individual Task 
     /////////////////////////////////////////////////////////////
@@ -1410,10 +1423,16 @@ namespace Legion {
             sharding_function->find_shard_space(repl_ctx->owner_shard->shard_id,
                 launch_space, launch_space->handle, get_provenance());
       }
-#ifdef DEBUG_LEGION
+      else
+      {
+        if (serdez_redop_collective != NULL)
+          serdez_redop_collective->elide_collective();
+        if (all_reduce_collective != NULL)
+          all_reduce_collective->elide_collective();
+      }
       if (output_size_collective != NULL)
         output_size_collective->elide_collective();
-#endif
+      resolve_false_collective_view_rendezvous();
       // Now continue through and do the base case
       IndexTask::resolve_false(speculated, launched);
     }
@@ -2677,6 +2696,21 @@ namespace Legion {
 #endif
     }
 
+    //--------------------------------------------------------------------------
+    void ReplFillOp::resolve_false(bool speculated, bool launched)
+    //--------------------------------------------------------------------------
+    {
+      // Trigger the first generation of the collective_map_barrier
+      if (!launched)
+      {
+        // Advance the first generation of the barrier for trigger_ready
+        Runtime::phase_barrier_arrive(collective_map_barrier, 1/*count*/);
+        Runtime::advance_barrier(collective_map_barrier);
+      }
+      // Second generation triggered by callback to finalize_complete_mapping
+      FillOp::resolve_false(speculated, launched);
+    }
+
     /////////////////////////////////////////////////////////////
     // Repl Index Fill Op 
     /////////////////////////////////////////////////////////////
@@ -2907,9 +2941,6 @@ namespace Legion {
       // If it's empty we're done, otherwise we do the replay
       if (!local_space.exists())
       {
-        // Still have to do this for legion spy
-        if (runtime->legion_spy_enabled)
-          log_index_fill_requirement();
 #ifdef LEGION_SPY
         LegionSpy::log_replay_operation(unique_op_id);
         LegionSpy::log_operation_events(unique_op_id, 
@@ -4479,20 +4510,24 @@ namespace Legion {
       assert(sources.empty());
       assert(future_map.impl != NULL);
 #endif
-      if (!thunk->need_all_futures())
+      if (future_map.impl != NULL)
       {
+        if (!thunk->need_all_futures())
+        {
 #ifdef DEBUG_LEGION
-        ReplicateContext *repl_ctx = 
-          dynamic_cast<ReplicateContext*>(parent_ctx);
-        assert(repl_ctx != NULL);
+          ReplicateContext *repl_ctx = 
+            dynamic_cast<ReplicateContext*>(parent_ctx);
+          assert(repl_ctx != NULL);
 #else
-        ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
+          ReplicateContext *repl_ctx =
+            static_cast<ReplicateContext*>(parent_ctx);
 #endif
-        future_map.impl->get_shard_local_futures(
-            repl_ctx->owner_shard->shard_id, sources);
+          future_map.impl->get_shard_local_futures(
+              repl_ctx->owner_shard->shard_id, sources);
+        }
+        else
+          future_map.impl->get_all_futures(sources);
       }
-      else
-        future_map.impl->get_all_futures(sources);
     }
 
     //--------------------------------------------------------------------------
@@ -7252,14 +7287,14 @@ namespace Legion {
                 if (!collective_instances)
                   single_broadcast->broadcast(
                       {instance, ready_event, unique_event});
+                constraints.memory_constraint =
+                  MemoryConstraint(instance.get_location().kind());
               }
               constraints.specialized_constraint = 
                 SpecializedConstraint(LEGION_GENERIC_FILE_SPECIALIZE);
               constraints.field_constraint = 
                 FieldConstraint(requirement.privilege_fields, 
                                 false/*contiguous*/, false/*inorder*/);
-              constraints.memory_constraint = 
-                MemoryConstraint(instance.get_location().kind());
               // TODO: Fill in the other constraints: 
               // OrderingConstraint, SplittingConstraints DimensionConstraints,
               // AlignmentConstraints, OffsetConstraints
@@ -7288,14 +7323,14 @@ namespace Legion {
                 if (!collective_instances)
                   single_broadcast->broadcast(
                       {instance, ready_event, unique_event});
+                constraints.memory_constraint =
+                  MemoryConstraint(instance.get_location().kind());
               }
               constraints.specialized_constraint = 
                 SpecializedConstraint(LEGION_HDF5_FILE_SPECIALIZE);
               constraints.field_constraint = 
                 FieldConstraint(requirement.privilege_fields, 
                                 false/*contiguous*/, false/*inorder*/);
-              constraints.memory_constraint = 
-                MemoryConstraint(instance.get_location().kind());
               constraints.ordering_constraint = 
                 layout_constraint_set.ordering_constraint;
               break;
@@ -7314,6 +7349,8 @@ namespace Legion {
                 if (!collective_instances)
                   single_broadcast->broadcast(
                       {instance, ready_event, unique_event});
+                constraints.memory_constraint =
+                  MemoryConstraint(instance.get_location().kind());
               }
               constraints = layout_constraint_set;
               constraints.specialized_constraint = 
@@ -7332,6 +7369,8 @@ namespace Legion {
         instance = result.instance;
         ready_event = result.ready_event;
         unique_event = result.unique_event;
+        constraints.memory_constraint =
+          MemoryConstraint(instance.get_location().kind());
       }
       else if ((runtime->profiler != NULL) && making_instance)
       {
@@ -7438,19 +7477,6 @@ namespace Legion {
             footprint, constraints, field_set, field_sizes, external_mask,
             mask_index_map, unique_event, node, serdez, 
             manager_did.load(), mapping);
-          // If we're the owner address space, record that we have 
-          // instances on all other address spaces in the control
-          // replicated parent task's collective mapping
-          if (manager->is_owner())
-          {
-            for (unsigned idx = 0; idx < mapping->size(); idx++)
-            {
-              const AddressSpaceID space = (*mapping)[idx];
-              if (space == manager->owner_space)
-                continue;
-              manager->update_remote_instances(space);
-            }
-          }
           if (mapping->remove_reference())
             delete mapping;
           shard_manager->exchange_shard_local_op_data(context_index,
@@ -7518,6 +7544,7 @@ namespace Legion {
       ReplCollectiveViewCreator<CollectiveViewCreator<DetachOp> >::activate();
       collective_map_barrier = RtBarrier::NO_RT_BARRIER;
       effects_barrier = ApBarrier::NO_AP_BARRIER;
+      exchange_index = 0;
       collective_instances = false;
       is_first_local_shard = false;
     }
@@ -7642,12 +7669,40 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ReplDetachOp::trigger_complete(void)
+    void ReplDetachOp::detach_external_instance(PhysicalManager *manager)
     //--------------------------------------------------------------------------
     {
+      // Always arrive on the effects barrier with the detach event
       Runtime::phase_barrier_arrive(effects_barrier, 1/*count*/, detach_event);
-      detach_event = effects_barrier;
-      DetachOp::trigger_complete();
+      if (collective_instances)
+      {
+#ifdef DEBUG_LEGION
+        ReplicateContext *repl_ctx =
+          dynamic_cast<ReplicateContext*>(parent_ctx);
+        assert(repl_ctx != NULL);
+#else
+        ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
+#endif
+        ShardManager *shard_manager = repl_ctx->shard_manager;
+        // See if all local shards have the same manager or not
+        if (is_first_local_shard)
+        {
+          shard_manager->exchange_shard_local_op_data(context_index,
+                                          exchange_index++, manager);
+          manager->detach_external_instance(effects_barrier);
+        }
+        else
+        {
+          PhysicalManager *first_manager = 
+            shard_manager->find_shard_local_op_data<PhysicalManager*>(
+                                      context_index, exchange_index++);
+          // If the managers are different then we do the detach as well
+          if (manager != first_manager)
+            manager->detach_external_instance(effects_barrier);
+        }
+      }
+      else if (manager->is_owner())
+        manager->detach_external_instance(effects_barrier);
     }
 
     /////////////////////////////////////////////////////////////
@@ -8197,8 +8252,11 @@ namespace Legion {
       if (launched)
         return;
 #ifdef DEBUG_LEGION
-      assert(!collective_map_barrier.exists());
+      assert(collective_map_barrier.exists());
 #endif
+      Runtime::phase_barrier_arrive(collective_map_barrier, 1/*count*/);
+      Runtime::advance_barrier(collective_map_barrier);
+      resolve_false_collective_view_rendezvous();
       AcquireOp::resolve_false(speculated, launched);
     }
 
@@ -8383,8 +8441,11 @@ namespace Legion {
       if (launched)
         return;
 #ifdef DEBUG_LEGION
-      assert(!collective_map_barrier.exists());
+      assert(collective_map_barrier.exists());
 #endif
+      Runtime::phase_barrier_arrive(collective_map_barrier, 1/*count*/);
+      Runtime::advance_barrier(collective_map_barrier);
+      resolve_false_collective_view_rendezvous();
       ReleaseOp::resolve_false(speculated, launched);
     }
 

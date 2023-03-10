@@ -557,8 +557,6 @@ namespace Legion {
     public:
       TraceViewSet(InnerContext *context, DistributedID owner_did,
                    RegionNode *region);
-      TraceViewSet(InnerContext *context, TraceViewSet &source,
-                   DistributedID owner_did, RegionNode *region);
       virtual ~TraceViewSet(void);
     public:
       void insert(LogicalView *view,
@@ -619,7 +617,7 @@ namespace Legion {
     protected:
       typedef LegionMap<LogicalView*,
                         FieldMaskSet<IndexSpaceExpression> > ViewExprs;
-    protected:
+    public:
       InnerContext *const context;
       RegionNode *const region;
       const DistributedID owner_did;
@@ -1122,7 +1120,6 @@ namespace Legion {
       static void handle_transitive_reduction(const void *args);
       static void handle_delete_template(const void *args);
     protected:
-      unsigned find_memo_entry(const TraceLocalID &tlid);
       void record_memo_entry(const TraceLocalID &tlid, unsigned entry,
                              unsigned op_kind);
     protected:
@@ -1184,6 +1181,8 @@ namespace Legion {
       std::deque<std::map<TraceLocalID,MemoizableOp*> > operations;
       std::deque<std::pair<ApEvent,bool/*recurrent*/> > pending_replays;
       // Pair in memo_entries is <entry index, Operation::Kind>
+      // This data structure is only used during template capture and
+      // can be ignored after the template has been optimized
       std::map<TraceLocalID,std::pair<unsigned,unsigned> > memo_entries;
     private:
       CachedPremappings cached_premappings;
