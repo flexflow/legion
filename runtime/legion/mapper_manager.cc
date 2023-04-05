@@ -1883,8 +1883,9 @@ namespace Legion {
               conflicts = true;
               break;
             }
-            if (constraints->specialized_constraint.is_exact() &&
-                !constraints->specialized_constraint.is_virtual())
+            if (!constraints->specialized_constraint.is_virtual() &&
+                (constraints->specialized_constraint.is_exact() ||
+                 constraints->padding_constraint.delta.get_dim() > 0))
             {
               std::vector<LogicalRegion> regions_to_check(1,
                         task.regions[lay_it->first].region);
@@ -1940,13 +1941,14 @@ namespace Legion {
             InstanceManager *manager = it->impl;
             if (manager->conflicts(constraints, NULL))
               it = instances.erase(it);
-            else if (constraints->specialized_constraint.is_exact() && 
-                    !constraints->specialized_constraint.is_virtual())
+            else if (!constraints->specialized_constraint.is_virtual() &&
+                      (constraints->specialized_constraint.is_exact() ||
+                       constraints->padding_constraint.delta.get_dim() > 0))
             {
               std::vector<LogicalRegion> regions_to_check(1,
                         task.regions[lay_it->first].region);
               PhysicalManager *phy = manager->as_physical_manager();
-              if (!phy->meets_regions(regions_to_check,true/*tight*/))
+              if (!phy->meets_regions(regions_to_check, true/*tight*/))
                 it = instances.erase(it);
               else
                 it++;
@@ -1999,13 +2001,14 @@ namespace Legion {
           InstanceManager *manager = it->impl;
           if (manager->conflicts(constraints, NULL))
             it = instances.erase(it);
-          else if (constraints->specialized_constraint.is_exact() &&
-                  !constraints->specialized_constraint.is_virtual())
+          else if (!constraints->specialized_constraint.is_virtual() &&
+                    (constraints->specialized_constraint.is_exact() ||
+                     constraints->padding_constraint.delta.get_dim() > 0))
           {
             std::vector<LogicalRegion> regions_to_check(1,
                       task.regions[lay_it->first].region);
             PhysicalManager *phy = manager->as_physical_manager();
-            if (!phy->meets_regions(regions_to_check,true/*tight*/))
+            if (!phy->meets_regions(regions_to_check, true/*tight*/))
               it = instances.erase(it);
             else
               it++;
@@ -2044,8 +2047,7 @@ namespace Legion {
         return false;
       if (regions.empty())
         return false;
-      if (!check_region_consistency(ctx, "create_physical_instance", regions))
-        return false;
+      check_region_consistency(ctx, "create_physical_instance", regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2080,8 +2082,7 @@ namespace Legion {
         return false;
       if (regions.empty())
         return false;
-      if (!check_region_consistency(ctx, "create_physical_instance", regions))
-        return false;
+      check_region_consistency(ctx, "create_physical_instance", regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2118,9 +2119,8 @@ namespace Legion {
         return false;
       if (regions.empty())
         return false;
-      if (!check_region_consistency(ctx, "find_or_create_physical_instance", 
-                                    regions))
-        return false;
+      check_region_consistency(ctx, "find_or_create_physical_instance",
+                               regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2156,9 +2156,8 @@ namespace Legion {
         return false;
       if (regions.empty())
         return false;
-      if (!check_region_consistency(ctx, "find_or_create_physical_instance", 
-                                    regions))
-        return false;
+      check_region_consistency(ctx, "find_or_create_physical_instance",
+                               regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2191,8 +2190,7 @@ namespace Legion {
     {
       if (!target_memory.exists())
         return false;
-      if (!check_region_consistency(ctx, "find_physical_instance", regions))
-        return false;
+      check_region_consistency(ctx, "find_physical_instance", regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2221,8 +2219,7 @@ namespace Legion {
     {
       if (!target_memory.exists())
         return false;
-      if (!check_region_consistency(ctx, "find_physical_instance", regions))
-        return false;
+      check_region_consistency(ctx, "find_physical_instance", regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2252,8 +2249,7 @@ namespace Legion {
     {
       if (!target_memory.exists())
         return;
-      if (!check_region_consistency(ctx, "find_physical_instances", regions))
-        return;
+      check_region_consistency(ctx, "find_physical_instances", regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2285,8 +2281,7 @@ namespace Legion {
     {
       if (!target_memory.exists())
         return;
-      if (!check_region_consistency(ctx, "find_physical_instances", regions))
-        return;
+      check_region_consistency(ctx, "find_physical_instances", regions);
       if (acquire && (ctx->acquired_instances == NULL))
       {
         REPORT_LEGION_WARNING(LEGION_WARNING_IGNORING_ACQUIRE_REQUEST,
@@ -2673,7 +2668,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    bool MapperManager::check_region_consistency(MappingCallInfo *info,
+    void MapperManager::check_region_consistency(MappingCallInfo *info,
                                                  const char *call_name,
                                       const std::vector<LogicalRegion> &regions)
     //--------------------------------------------------------------------------
@@ -2697,7 +2692,6 @@ namespace Legion {
         else
           tree_id = regions[idx].get_tree_id();
       }
-      return (tree_id > 0);
     }
 
     //--------------------------------------------------------------------------

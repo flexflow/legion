@@ -495,7 +495,7 @@ if(Legion_USE_HIP)
     if("${Legion_HIP_ARCH}" STREQUAL "")
       set(HIP_GENCODE "")
     else()
-      set(HIP_GENCODE "--amdgpu-target=${Legion_HIP_ARCH}")
+      set(HIP_GENCODE "--offload-target=${Legion_HIP_ARCH}")
     endif()
   endif()
 
@@ -970,6 +970,7 @@ if(Legion_BUILD_ALL OR Legion_BUILD_RUST_PROFILER)
 
   corrosion_import_crate(
     MANIFEST_PATH tools/legion_prof_rs/Cargo.toml
+    ALL_FEATURES
     PROFILE release
   )
 
