@@ -63,7 +63,7 @@ namespace Legion {
     static const TypeTag TYPE_TAG_##DIM##D = \
       Internal::NT_TemplateHelper::encode_tag<DIM,coord_t>();
     LEGION_FOREACH_N(DIMFUNC)
-#undef DIMFUNC
+#undef DIMFUNC 
 
     /////////////////////////////////////////////////////////////
     // Mappable 
@@ -470,7 +470,7 @@ namespace Legion {
       const_value = p.const_value;
       impl = p.impl;
       if (impl != NULL)
-        impl->add_predicate_reference();
+        impl->add_reference();
     }
 
     //--------------------------------------------------------------------------
@@ -495,30 +495,27 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       if (impl != NULL)
-        impl->add_predicate_reference();
+        impl->add_reference();
     }
 
     //--------------------------------------------------------------------------
     Predicate::~Predicate(void)
     //--------------------------------------------------------------------------
     {
-      if (impl != NULL)
-      {
-        impl->remove_predicate_reference();
-        impl = NULL;
-      }
+      if ((impl != NULL) && impl->remove_reference())
+        delete impl;
     }
 
     //--------------------------------------------------------------------------
     Predicate& Predicate::operator=(const Predicate &rhs)
     //--------------------------------------------------------------------------
     {
-      if (impl != NULL)
-        impl->remove_predicate_reference();
+      if ((impl != NULL) && impl->remove_reference())
+        delete impl;
       const_value = rhs.const_value;
       impl = rhs.impl;
       if (impl != NULL)
-        impl->add_predicate_reference();
+        impl->add_reference();
       return *this;
     }
 
@@ -526,8 +523,8 @@ namespace Legion {
     Predicate& Predicate::operator=(Predicate &&rhs)
     //--------------------------------------------------------------------------
     {
-      if (impl != NULL)
-        impl->remove_predicate_reference();
+      if ((impl != NULL) && impl->remove_reference())
+        delete impl;
       const_value = rhs.const_value;
       impl = rhs.impl;
       rhs.impl = NULL;
@@ -8053,8 +8050,12 @@ namespace Legion {
 #endif
       ctx = *((const Context*)data);
       task = ctx->get_task();
-
-      reg = &ctx->begin_task(runtime);
+      const Processor exec_proc = Processor::get_executing_processor();
+#ifdef DEBUG_LEGION
+      assert(exec_proc.exists());
+#endif
+      reg = &ctx->begin_task(exec_proc);
+      runtime = Internal::implicit_runtime->external;
     }
 
     //--------------------------------------------------------------------------

@@ -731,15 +731,19 @@ namespace Legion {
       }
 
       static inline void log_predicate_operation(UniqueID context, 
-                                                 UniqueID pred_op)
+                                                 UniqueID pred_op,
+                                                 size_t context_index)
       {
-        log_spy.print("Predicate Operation %llu %llu", context, pred_op);
+        log_spy.print("Predicate Operation %llu %llu %zd",
+                      context, pred_op, context_index);
       }
 
       static inline void log_must_epoch_operation(UniqueID context,
-                                                  UniqueID must_op)
+                                                  UniqueID must_op,
+                                                  size_t context_index)
       {
-        log_spy.print("Must Epoch Operation %llu %llu", context, must_op);
+        log_spy.print("Must Epoch Operation %llu %llu %zd",
+                      context, must_op, context_index);
       }
 
       static inline void log_summary_op_creator(UniqueID internal_op_id,
@@ -1232,42 +1236,42 @@ namespace Legion {
 
       // Logger calls for futures
       static inline void log_future_creation(UniqueID creator_id,
-                                             ApEvent future_event, 
+                                             DistributedID future_did,
                                              const DomainPoint &point)
       {
 #if LEGION_MAX_DIM == 1
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld",
-                      creator_id, future_event.id, point.dim,
+        log_spy.print("Future Creation %llu %llu %u %lld",
+                      creator_id, future_did, point.dim,
                       (long long)point.point_data[0]); 
 #elif LEGION_MAX_DIM == 2
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld",
-                      creator_id, future_event.id, point.dim,
+        log_spy.print("Future Creation %llu %llu %u %lld %lld",
+                      creator_id, future_did, point.dim,
                                         (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0);
 #elif LEGION_MAX_DIM == 3
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld %lld",
-                      creator_id, future_event.id, point.dim,
+        log_spy.print("Future Creation %llu %llu %u %lld %lld %lld",
+                      creator_id, future_did, point.dim,
                                         (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0,
                       (point.dim > 2) ? (long long)point.point_data[2] : 0);
 #elif LEGION_MAX_DIM == 4
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld %lld %lld",
-                      creator_id, future_event.id, point.dim,
+        log_spy.print("Future Creation %llu %llu %u %lld %lld %lld %lld",
+                      creator_id, future_did, point.dim,
                                         (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0,
                       (point.dim > 2) ? (long long)point.point_data[2] : 0,
                       (point.dim > 3) ? (long long)point.point_data[3] : 0);
 #elif LEGION_MAX_DIM == 5
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld %lld %lld "
-                      "%lld", creator_id, future_event.id, point.dim,
+        log_spy.print("Future Creation %llu %llu %u %lld %lld %lld %lld "
+                      "%lld", creator_id, future_did, point.dim,
                                         (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0,
                       (point.dim > 2) ? (long long)point.point_data[2] : 0,
                       (point.dim > 3) ? (long long)point.point_data[3] : 0,
                       (point.dim > 4) ? (long long)point.point_data[4] : 0);
 #elif LEGION_MAX_DIM == 6
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld %lld %lld "
-                      "%lld %lld", creator_id, future_event.id, point.dim,
+        log_spy.print("Future Creation %llu %llu %u %lld %lld %lld %lld "
+                      "%lld %lld", creator_id, future_did, point.dim,
                                         (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0,
                       (point.dim > 2) ? (long long)point.point_data[2] : 0,
@@ -1275,8 +1279,8 @@ namespace Legion {
                       (point.dim > 4) ? (long long)point.point_data[4] : 0,
                       (point.dim > 5) ? (long long)point.point_data[5] : 0);
 #elif LEGION_MAX_DIM == 7
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld %lld %lld "
-                      "%lld %lld %lld", creator_id, future_event.id, point.dim,
+        log_spy.print("Future Creation %llu %llu %u %lld %lld %lld %lld "
+                      "%lld %lld %lld", creator_id, future_did, point.dim,
                                         (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0,
                       (point.dim > 2) ? (long long)point.point_data[2] : 0,
@@ -1285,8 +1289,8 @@ namespace Legion {
                       (point.dim > 5) ? (long long)point.point_data[5] : 0,
                       (point.dim > 6) ? (long long)point.point_data[6] : 0);
 #elif LEGION_MAX_DIM == 8
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld %lld %lld "
-                      "%lld %lld %lld %lld", creator_id, future_event.id, 
+        log_spy.print("Future Creation %llu %llu %u %lld %lld %lld %lld "
+                      "%lld %lld %lld %lld", creator_id, future_did,
                        point.dim,       (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0,
                       (point.dim > 2) ? (long long)point.point_data[2] : 0,
@@ -1296,8 +1300,8 @@ namespace Legion {
                       (point.dim > 6) ? (long long)point.point_data[6] : 0,
                       (point.dim > 7) ? (long long)point.point_data[7] : 0);
 #elif LEGION_MAX_DIM == 9
-        log_spy.print("Future Creation %llu " IDFMT " %u %lld %lld %lld %lld "
-                      "%lld %lld %lld %lld %lld", creator_id, future_event.id, 
+        log_spy.print("Future Creation %llu %llu %u %lld %lld %lld %lld "
+                      "%lld %lld %lld %lld %lld", creator_id, future_did,
                        point.dim,       (long long)point.point_data[0], 
                       (point.dim > 1) ? (long long)point.point_data[1] : 0,
                       (point.dim > 2) ? (long long)point.point_data[2] : 0,
@@ -1312,10 +1316,10 @@ namespace Legion {
 #endif
       }
 
-      static inline void log_future_use(UniqueID user_id, 
-                                        ApEvent future_event)
+      static inline void log_future_use(UniqueID user_id,
+                                        DistributedID future_did)
       {
-        log_spy.print("Future Usage %llu " IDFMT "", user_id, future_event.id);
+        log_spy.print("Future Usage %llu %llu", user_id, future_did);
       }
 
       static inline void log_predicate_use(UniqueID pred_id,
@@ -1606,11 +1610,12 @@ namespace Legion {
                                          IndexSpaceExprID expr_id,
                                          RegionTreeID src_tree_id,
                                          RegionTreeID dst_tree_id,
-                                         LgEvent pre, LgEvent post)
+                                         LgEvent pre, LgEvent post,
+                                         CollectiveKind collective)
       {
-        log_spy.print("Copy Events %llu %lld %d %d " IDFMT " " IDFMT,
+        log_spy.print("Copy Events %llu %lld %d %d " IDFMT " " IDFMT " %d",
                       op_unique_id, expr_id, src_tree_id,
-                      dst_tree_id, pre.id, post.id);
+                      dst_tree_id, pre.id, post.id, collective);
       }
 
       static inline void log_copy_field(LgEvent post, FieldID src_fid,
@@ -1659,11 +1664,12 @@ namespace Legion {
                                          FieldSpace handle,
                                          RegionTreeID tree_id,
                                          LgEvent pre, LgEvent post,
-                                         UniqueID fill_unique_id)
+                                         UniqueID fill_unique_id,
+                                         CollectiveKind collective)
       {
-        log_spy.print("Fill Events %llu %lld %d %d " IDFMT " " IDFMT " %llu",
+        log_spy.print("Fill Events %llu %lld %d %d " IDFMT " " IDFMT " %llu %d",
 		      op_unique_id, expr_id, handle.get_id(), tree_id,
-		      pre.id, post.id, fill_unique_id);
+		      pre.id, post.id, fill_unique_id, collective);
       }
 
       static inline void log_fill_field(LgEvent post, 

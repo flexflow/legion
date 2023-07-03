@@ -22,6 +22,9 @@ endif()
 
 # enable build warnings for all tutorials/examples/tests/etc.
 add_compile_options(${CXX_BUILD_WARNING_FLAGS})
+if (CMAKE_CXX_STANDARD)
+  set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -std=c++${CMAKE_CXX_STANDARD})
+endif()
 
 add_subdirectory(00_hello_world)
 add_subdirectory(01_tasks_and_futures)
@@ -33,6 +36,7 @@ add_subdirectory(06_privileges)
 add_subdirectory(07_partitioning)
 add_subdirectory(08_multiple_partitions)
 add_subdirectory(09_custom_mapper)
+add_subdirectory(realm)
 if(Legion_USE_Fortran)
   add_subdirectory(fortran)
 endif()

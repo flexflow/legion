@@ -185,6 +185,65 @@ namespace Legion {
     };
 
     /**
+     * \class PredicateImpl
+     * This class provides the base support for a predicate and
+     * any state needed to manage the mapping of things that 
+     * depend on a predicate value
+     */
+    class PredicateImpl : public Collectable {
+    public:
+      PredicateImpl(Operation *creator);
+      PredicateImpl(const PredicateImpl &rhs) = delete;
+      virtual ~PredicateImpl(void);
+    public:
+      PredicateImpl& operator=(const PredicateImpl &rhs) = delete;
+    public:
+      // This returns the predicate value if it is set or returns the
+      // names of the guards to use if has not been set
+      virtual bool get_predicate(size_t context_index,
+          PredEvent &true_guard, PredEvent &false_guard);
+      bool get_predicate(RtEvent &ready);
+      virtual void set_predicate(bool value);
+    public:
+      InnerContext *const context;
+      Operation *const creator;
+      const GenerationID creator_gen;
+      const UniqueID creator_uid;
+      const size_t creator_ctx_index;
+    protected:
+      mutable LocalLock predicate_lock;
+      PredUserEvent true_guard, false_guard;
+      RtUserEvent ready_event;
+      int value; // <0 is unset, 0 is false, >0 is true
+    };
+
+    /**
+     * \class ReplPredicateImpl
+     * This is a predicate implementation for control replication
+     * contexts. It provides the same functionality as the normal
+     * version, but it also has one extra invariant, which is that
+     * it guarantees that it will not return a false predicate
+     * result until it guarantees that all the shards will return
+     * the same false result for all equivalent operations.
+     */
+    class ReplPredicateImpl : public PredicateImpl {
+    public:
+      ReplPredicateImpl(Operation *creator, CollectiveID id);
+      ReplPredicateImpl(const ReplPredicateImpl &rhs) = delete;
+      virtual ~ReplPredicateImpl(void);
+    public:
+      ReplPredicateImpl& operator=(const ReplPredicateImpl &rhs) = delete;
+    public:
+      virtual bool get_predicate(size_t context_index,
+          PredEvent &true_guard, PredEvent &false_guard);
+      virtual void set_predicate(bool value);
+    protected:
+      const CollectiveID collective_id;
+      size_t max_observed_index;
+      PredicateCollective *collective;
+    };
+
+    /**
      * \class FutureImpl
      * The base implementation of a future object.  The runtime
      * manages future implementation objects and knows how to
@@ -627,9 +686,7 @@ namespace Legion {
       virtual void get_all_futures(std::map<DomainPoint,FutureImpl*> &futures);
       void set_all_futures(const std::map<DomainPoint,Future> &futures);
     public:
-      // Will return NULL if it does not exist
-      virtual FutureImpl* find_shard_local_future(ShardID shard,
-                                                  const DomainPoint &point);
+      virtual FutureImpl* find_local_future(const DomainPoint &point);
       virtual void get_shard_local_futures(ShardID shard,
                                     std::map<DomainPoint,FutureImpl*> &futures);
     public:
@@ -687,9 +744,7 @@ namespace Legion {
       virtual void wait_all_results(bool silence_warnings = true,
                                     const char *warning_string = NULL);
     public:
-      // Will return NULL if it does not exist
-      virtual FutureImpl* find_shard_local_future(ShardID shard,
-                                                  const DomainPoint &point);
+      virtual FutureImpl* find_local_future(const DomainPoint &point);
       virtual void get_shard_local_futures(ShardID shard,
                                     std::map<DomainPoint,FutureImpl*> &futures);
     public:
@@ -733,8 +788,6 @@ namespace Legion {
                                     const char *warning_string = NULL);
     public:
       // Will return NULL if it does not exist
-      virtual FutureImpl* find_shard_local_future(ShardID shard,
-                                                  const DomainPoint &point);
       virtual void get_shard_local_futures(ShardID shard,
                                     std::map<DomainPoint,FutureImpl*> &futures);
     public:
@@ -1483,6 +1536,7 @@ namespace Legion {
     public:
       void register_remote_instance(PhysicalManager *manager);
       void unregister_remote_instance(PhysicalManager *manager);
+      void unregister_deleted_instance(PhysicalManager *manager);
     public:
       bool create_physical_instance(const LayoutConstraintSet &contraints,
                                     const std::vector<LogicalRegion> &regions,
@@ -1587,7 +1641,7 @@ namespace Legion {
       void remove_collectable(GCPriority priority, PhysicalManager *manager);
     public:
       RtEvent attach_external_instance(PhysicalManager *manager);
-      void detach_external_instance(PhysicalManager *manager, ApEvent pre);
+      void detach_external_instance(PhysicalManager *manager);
     public:
       bool is_visible_memory(Memory other);
     public:
@@ -1681,8 +1735,7 @@ namespace Legion {
         GarbageCollector(LocalLock &collection_lock, LocalLock &manager_lock,
                          AddressSpaceID local, Memory memory, size_t needed,
                          std::map<GCPriority,std::set<PhysicalManager*>,
-                                 std::greater<GCPriority> > &collectables,
-                         std::map<RegionTreeID,TreeInstances> &instances);
+                                 std::greater<GCPriority> > &collectables);
         GarbageCollector(const GarbageCollector &rhs) = delete;
         ~GarbageCollector(void);
       public:
@@ -1692,19 +1745,21 @@ namespace Legion {
         inline bool collection_complete(void) const 
           { return (current_priority == LEGION_GC_NEVER_PRIORITY); }
       protected:
+        void sort_next_priority_holes(bool advance = true);
+      protected:
         struct Range {
         public:
           Range(void) : size(0) { }
           Range(PhysicalManager *m); 
-          std::set<PhysicalManager*> managers;
+          std::vector<PhysicalManager*> managers;
           size_t size;
         };
       protected:
+        // Note this makes sure there is only one collection at a time
         AutoLock collection_lock;
         LocalLock &manager_lock;
         std::map<GCPriority,std::set<PhysicalManager*>,
                  std::greater<GCPriority> > &collectable_instances;
-        std::map<RegionTreeID,TreeInstances> &current_instances;
         const Memory memory;
         const AddressSpaceID local_space;
         const size_t needed_size;
@@ -1712,9 +1767,7 @@ namespace Legion {
         std::vector<PhysicalManager*> small_holes, perfect_holes;
         std::map<size_t,std::vector<PhysicalManager*> > large_holes;
         std::map<uintptr_t,Range> ranges;
-        std::set<PhysicalManager*> deleted;
         GCPriority current_priority;
-        bool sort_current_priority;
       };
     }; 
 
@@ -2084,7 +2137,7 @@ namespace Legion {
       bool is_no_access_region(unsigned idx) const;
     public:
       ApEvent dispatch_task(Processor target, SingleTask *task, 
-          TaskContext *ctx, ApEvent precondition, PredEvent pred,
+          TaskContext *ctx, ApEvent precondition,
           int priority, Realm::ProfilingRequestSet &requests);
       void dispatch_inline(Processor current, TaskContext *ctx);
     public:
@@ -3086,8 +3139,10 @@ namespace Legion {
                                               Serializer &rez);
       void send_index_partition_child_response(AddressSpaceID target,
                                                Serializer &rez);
+      void send_index_partition_child_replication(AddressSpaceID target,
+                                                  Serializer &rez);
       void send_index_partition_disjoint_update(AddressSpaceID target,
-                                                Serializer &rez);
+          Serializer &rez, RtEvent pre = RtEvent::NO_RT_EVENT);
       void send_index_partition_shard_rects_request(AddressSpaceID target,
                                                     Serializer &rez);
       void send_index_partition_shard_rects_response(AddressSpaceID target,
@@ -3242,6 +3297,7 @@ namespace Legion {
                                                         Serializer &rez);
       void send_create_top_view_request(AddressSpaceID target, Serializer &rez);
       void send_create_top_view_response(AddressSpaceID target,Serializer &rez);
+      void send_view_request(AddressSpaceID target, Serializer &rez);
       void send_view_register_user(AddressSpaceID target, Serializer &rez);
       void send_view_find_copy_preconditions_request(AddressSpaceID target,
                                                      Serializer &rez);
@@ -3461,13 +3517,12 @@ namespace Legion {
       void handle_remote_task_replay(Deserializer &derez);
       void handle_remote_task_profiling_response(Deserializer &derez);
       void handle_shared_ownership(Deserializer &derez);
-      void handle_index_space_request(Deserializer &derez, 
-                                      AddressSpaceID source);
+      void handle_index_space_request(Deserializer &derez); 
       void handle_index_space_response(Deserializer &derez,
                                        AddressSpaceID source);
-      void handle_index_space_return(Deserializer &derez,
-                                     AddressSpaceID source); 
-      void handle_index_space_set(Deserializer &derez, AddressSpaceID source);
+      void handle_index_space_return(Deserializer &derez);
+      void handle_index_space_set(Deserializer &derez,
+                                  AddressSpaceID source);
       void handle_index_space_child_request(Deserializer &derez, 
                                             AddressSpaceID source); 
       void handle_index_space_child_response(Deserializer &derez);
@@ -3483,15 +3538,15 @@ namespace Legion {
       void handle_index_space_generate_color_response(Deserializer &derez);
       void handle_index_space_release_color(Deserializer &derez);
       void handle_index_partition_notification(Deserializer &derez);
-      void handle_index_partition_request(Deserializer &derez,
-                                          AddressSpaceID source);
+      void handle_index_partition_request(Deserializer &derez);
       void handle_index_partition_response(Deserializer &derez,
                                            AddressSpaceID source);
-      void handle_index_partition_return(Deserializer &derez,
-                                         AddressSpaceID source);
+      void handle_index_partition_return(Deserializer &derez);
       void handle_index_partition_child_request(Deserializer &derez,
                                                 AddressSpaceID source);
-      void handle_index_partition_child_response(Deserializer &derez);
+      void handle_index_partition_child_response(Deserializer &derez,
+                                                 AddressSpaceID source);
+      void handle_index_partition_child_replication(Deserializer &derez);
       void handle_index_partition_disjoint_update(Deserializer &derez);
       void handle_index_partition_shard_rects_request(Deserializer &derez);
       void handle_index_partition_shard_rects_response(Deserializer &derez,
@@ -3501,8 +3556,7 @@ namespace Legion {
       void handle_index_partition_remote_interference_response(
                                    Deserializer &derez);
       void handle_field_space_node(Deserializer &derez, AddressSpaceID source);
-      void handle_field_space_request(Deserializer &derez,
-                                      AddressSpaceID source);
+      void handle_field_space_request(Deserializer &derez);
       void handle_field_space_return(Deserializer &derez);
       void handle_field_space_allocator_request(Deserializer &derez,
                                                 AddressSpaceID source);
@@ -3524,8 +3578,7 @@ namespace Legion {
       void handle_local_field_alloc_response(Deserializer &derez);
       void handle_local_field_free(Deserializer &derez);
       void handle_local_field_update(Deserializer &derez);
-      void handle_top_level_region_request(Deserializer &derez,
-                                           AddressSpaceID source);
+      void handle_top_level_region_request(Deserializer &derez);
       void handle_top_level_region_return(Deserializer &derez,
                                           AddressSpaceID source);
       void handle_index_space_destruction(Deserializer &derez,
@@ -3618,7 +3671,7 @@ namespace Legion {
       void handle_create_top_view_request(Deserializer &derez,
                                           AddressSpaceID source);
       void handle_create_top_view_response(Deserializer &derez);
-      void handle_view_request(Deserializer &derez, AddressSpaceID source);
+      void handle_view_request(Deserializer &derez);
       void handle_view_register_user(Deserializer &derez,AddressSpaceID source);
       void handle_view_copy_pre_request(Deserializer &derez,
                                         AddressSpaceID source);
@@ -3633,7 +3686,7 @@ namespace Legion {
       void handle_view_replication_removal(Deserializer &derez, 
                                            AddressSpaceID source);
 #endif
-      void handle_manager_request(Deserializer &derez, AddressSpaceID source);
+      void handle_manager_request(Deserializer &derez);
       void handle_future_result(Deserializer &derez);
       void handle_future_result_size(Deserializer &derez,
                                      AddressSpaceID source);
@@ -3674,8 +3727,7 @@ namespace Legion {
                                                AddressSpaceID source);
       void handle_logical_partition_semantic_info(Deserializer &derez,
                                                   AddressSpaceID source);
-      void handle_remote_context_request(Deserializer &derez,
-                                         AddressSpaceID source);
+      void handle_remote_context_request(Deserializer &derez);
       void handle_remote_context_response(Deserializer &derez);
       void handle_remote_context_physical_request(Deserializer &derez,
                                                   AddressSpaceID source);
@@ -3693,8 +3745,7 @@ namespace Legion {
                                                        AddressSpaceID source);
       void handle_finish_equivalence_sets_subscription(Deserializer &derez,
                                                        AddressSpaceID source);
-      void handle_equivalence_set_request(Deserializer &derez,
-                                          AddressSpaceID source);
+      void handle_equivalence_set_request(Deserializer &derez);
       void handle_equivalence_set_response(Deserializer &derez);
       void handle_equivalence_set_invalidate_trackers(Deserializer &derez);
       void handle_equivalence_set_replication_request(Deserializer &derez,
@@ -4047,6 +4098,7 @@ namespace Legion {
       ReplIndividualTask*   get_available_repl_individual_task(void);
       ReplIndexTask*        get_available_repl_index_task(void);
       ReplMergeCloseOp*     get_available_repl_merge_close_op(void);
+      ReplVirtualCloseOp*   get_available_repl_virtual_close_op(void);
       ReplRefinementOp*     get_available_repl_refinement_op(void);
       ReplFillOp*           get_available_repl_fill_op(void);
       ReplIndexFillOp*      get_available_repl_index_fill_op(void);
@@ -4124,6 +4176,7 @@ namespace Legion {
       void free_repl_individual_task(ReplIndividualTask *task);
       void free_repl_index_task(ReplIndexTask *task);
       void free_repl_merge_close_op(ReplMergeCloseOp *op);
+      void free_repl_virtual_close_op(ReplVirtualCloseOp *op);
       void free_repl_refinement_op(ReplRefinementOp *op);
       void free_repl_fill_op(ReplFillOp *op);
       void free_repl_index_fill_op(ReplIndexFillOp *op);
@@ -4573,6 +4626,7 @@ namespace Legion {
       std::deque<ReplIndividualTask*>   available_repl_individual_tasks;
       std::deque<ReplIndexTask*>        available_repl_index_tasks;
       std::deque<ReplMergeCloseOp*>     available_repl_merge_close_ops;
+      std::deque<ReplVirtualCloseOp*>   available_repl_virtual_close_ops;
       std::deque<ReplRefinementOp*>     available_repl_refinement_ops;
       std::deque<ReplFillOp*>           available_repl_fill_ops;
       std::deque<ReplIndexFillOp*>      available_repl_index_fill_ops;
@@ -4958,7 +5012,9 @@ namespace Legion {
 #ifdef LEGION_TRACE_ALLOCATION
         HandleAllocation<T,HasAllocType<T>::value>::trace_free();
 #endif
-        delete (*it);
+        // Do explicit deletion to keep valgrind happy
+        (*it)->~T();
+        free(*it);
       }
       queue.clear();
     }
@@ -4973,7 +5029,9 @@ namespace Legion {
 #ifdef LEGION_TRACE_ALLOCATION
         HandleAllocation<T,HasAllocType<T>::value>::trace_free();
 #endif
-        delete (operation);
+        // Do explicit deletion to keep valgrind happy
+        operation->~T();
+        free(operation);
       }
       else
         queue.push_front(operation);
@@ -5723,6 +5781,8 @@ namespace Legion {
         case SEND_INDEX_PARTITION_CHILD_REQUEST:
           break;
         case SEND_INDEX_PARTITION_CHILD_RESPONSE:
+          break;
+        case SEND_INDEX_PARTITION_CHILD_REPLICATION:
           break;
         case SEND_INDEX_PARTITION_DISJOINT_UPDATE:
           break;

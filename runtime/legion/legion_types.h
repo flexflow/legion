@@ -314,6 +314,35 @@ namespace Legion {
       DEP_PART_WEIGHTS = 15, // create partition by weights
     };
 
+    // Collective copy kinds
+    enum CollectiveKind {
+      COLLECTIVE_NONE = 0,
+      // Filling a collective instance (both normal and reductions)
+      COLLECTIVE_FILL = 1,
+      // Broadcasting one normal instance to a collective normal instance
+      COLLECTIVE_BROADCAST = 2,
+      // Reducing a collective reduction instance to either a
+      // single normal or a single reduction instance
+      COLLECTIVE_REDUCTION = 3,
+      // Performing an all-reduce from a collective reduction instance
+      // to a collective normal or reduction instance using a butterfly
+      // network reduction (both instances using the same nodes)
+      COLLECTIVE_BUTTERFLY_ALLREDUCE = 4,
+      // Performing an all-reduce by doing a reduction down to a single
+      // instance and then broadcasting the result out from that instance
+      // (instances don't exist on the same set of nodes)
+      COLLECTIVE_HOURGLASS_ALLREDUCE = 5,
+      // Copy from one collective normal instanace to another collective
+      // normal instance for each of the points in the destination
+      COLLECTIVE_POINT_TO_POINT = 6,
+      // Apply a reduction from a single reduction instance to 
+      // a collective normal instance
+      COLLECTIVE_REDUCECAST = 7,
+      // Degenerate case: apply a copy-across from a collective reduction
+      // instance to any kind of other instance without doing an all-reduce
+      COLLECTIVE_HAMMER_REDUCTION = 8,
+    };
+
     // Enumeration of Legion runtime tasks
     enum LgTaskID {
       LG_SCHEDULER_ID,
@@ -343,8 +372,6 @@ namespace Legion {
       LG_TOP_FINISH_TASK_ID,
       LG_MAPPER_TASK_ID,
       LG_DISJOINTNESS_TASK_ID,
-      LG_PART_INDEPENDENCE_TASK_ID,
-      LG_SPACE_INDEPENDENCE_TASK_ID,
       LG_ISSUE_FRAME_TASK_ID,
       LG_MAPPER_CONTINUATION_TASK_ID,
       LG_TASK_IMPL_SEMANTIC_INFO_REQ_TASK_ID,
@@ -358,6 +385,7 @@ namespace Legion {
       LG_PARTITION_SEMANTIC_INFO_REQ_TASK_ID,
       LG_INDEX_SPACE_DEFER_CHILD_TASK_ID,
       LG_INDEX_PART_DEFER_CHILD_TASK_ID,
+      LG_INDEX_PART_DEFER_SHARD_RECTS_TASK_ID,
       LG_DEFERRED_ENQUEUE_TASK_ID,
       LG_DEFER_MAPPER_MESSAGE_TASK_ID,
       LG_REMOTE_VIEW_CREATION_TASK_ID,
@@ -462,8 +490,6 @@ namespace Legion {
         "Top Finish",                                             \
         "Mapper Task",                                            \
         "Disjointness Test",                                      \
-        "Partition Independence Test",                            \
-        "Index Space Independence Test",                          \
         "Issue Frame",                                            \
         "Mapper Continuation",                                    \
         "Task Impl Semantic Request",                             \
@@ -477,6 +503,7 @@ namespace Legion {
         "Partition Semantic Request",                             \
         "Defer Index Space Child Request",                        \
         "Defer Index Partition Child Request",                    \
+        "Defer Index Partition Find Shard Rects",                 \
         "Deferred Enqueue Task",                                  \
         "Deferred Mapper Message",                                \
         "Remote View Creation",                                   \
@@ -746,6 +773,7 @@ namespace Legion {
       SEND_INDEX_PARTITION_RETURN,
       SEND_INDEX_PARTITION_CHILD_REQUEST,
       SEND_INDEX_PARTITION_CHILD_RESPONSE,
+      SEND_INDEX_PARTITION_CHILD_REPLICATION,
       SEND_INDEX_PARTITION_DISJOINT_UPDATE,
       SEND_INDEX_PARTITION_SHARD_RECTS_REQUEST,
       SEND_INDEX_PARTITION_SHARD_RECTS_RESPONSE,
@@ -1009,6 +1037,7 @@ namespace Legion {
         "Send Index Partition Return",                                \
         "Send Index Partition Child Request",                         \
         "Send Index Partition Child Response",                        \
+        "Send Index Partition Child Replication",                     \
         "Send Index Partition Disjoint Update",                       \
         "Send Index Partition Shard Rects Request",                   \
         "Send Index Partition Shard Rects Response",                  \
@@ -1573,7 +1602,7 @@ namespace Legion {
     // Ones that have been commented out are free to be reused
     enum CollectiveIndexLocation {
       //COLLECTIVE_LOC_0 = 0, 
-      //COLLECTIVE_LOC_1 = 1,
+      COLLECTIVE_LOC_1 = 1,
       COLLECTIVE_LOC_2 = 2,
       COLLECTIVE_LOC_3 = 3,
       COLLECTIVE_LOC_4 = 4, 
@@ -1622,7 +1651,7 @@ namespace Legion {
       COLLECTIVE_LOC_47 = 47,
       COLLECTIVE_LOC_48 = 48,
       COLLECTIVE_LOC_49 = 49,
-      //COLLECTIVE_LOC_50 = 50,
+      COLLECTIVE_LOC_50 = 50,
       COLLECTIVE_LOC_51 = 51,
       COLLECTIVE_LOC_52 = 52,
       COLLECTIVE_LOC_53 = 53,
@@ -1639,16 +1668,16 @@ namespace Legion {
       COLLECTIVE_LOC_64 = 64,
       COLLECTIVE_LOC_65 = 65,
       COLLECTIVE_LOC_66 = 66,
-      COLLECTIVE_LOC_67 = 67,
-      COLLECTIVE_LOC_68 = 68,
-      COLLECTIVE_LOC_69 = 69,
+      //COLLECTIVE_LOC_67 = 67,
+      //COLLECTIVE_LOC_68 = 68,
+      //COLLECTIVE_LOC_69 = 69,
       COLLECTIVE_LOC_70 = 70,
       COLLECTIVE_LOC_71 = 71,
       COLLECTIVE_LOC_72 = 72,
       COLLECTIVE_LOC_73 = 73,
       COLLECTIVE_LOC_74 = 74,
       COLLECTIVE_LOC_75 = 75,
-      COLLECTIVE_LOC_76 = 76,
+      //COLLECTIVE_LOC_76 = 76,
       COLLECTIVE_LOC_77 = 77,
       COLLECTIVE_LOC_78 = 78,
       //COLLECTIVE_LOC_79 = 79,
@@ -1958,6 +1987,7 @@ namespace Legion {
     class ReplIndividualTask;
     class ReplIndexTask;
     class ReplMergeCloseOp;
+    class ReplVirtualCloseOp;
     class ReplRefinementOp;
     class ReplFillOp;
     class ReplIndexFillOp;
@@ -1994,6 +2024,7 @@ namespace Legion {
     class AllGatherCollective;
     template<typename T> class BarrierExchangeCollective;
     template<typename T> class ValueBroadcast;
+    template<typename T> class AllReduceCollective;
     class CrossProductCollective;
     class ShardingGatherCollective;
     class FieldDescriptorExchange;
@@ -2003,19 +2034,20 @@ namespace Legion {
     class FutureNameExchange;
     class MustEpochMappingBroadcast;
     class MustEpochMappingExchange;
+    class PredicateCollective;
 
     // Nasty global variable for TLS support of figuring out
     // our context implicitly
-    extern __thread TaskContext *implicit_context;
+    extern thread_local TaskContext *implicit_context;
     // Same thing for the runtime
-    extern __thread Runtime *implicit_runtime;
+    extern thread_local Runtime *implicit_runtime;
     // Another nasty global variable for tracking the fast
     // reservations that we are holding
-    extern __thread AutoLock *local_lock_list;
+    extern thread_local AutoLock *local_lock_list;
     // One more nasty global variable that we use for tracking
     // the provenance of meta-task operations for profiling
     // purposes, this has no bearing on correctness
-    extern __thread ::legion_unique_id_t implicit_provenance;
+    extern thread_local ::legion_unique_id_t implicit_provenance;
     // Use this to track if we're inside of a registration 
     // callback function which we know to be deduplicated
     enum RegistrationCallbackMode {
@@ -2023,20 +2055,20 @@ namespace Legion {
       LOCAL_REGISTRATION_CALLBACK = 1,
       GLOBAL_REGISTRATION_CALLBACK = 2,
     };
-    extern __thread unsigned inside_registration_callback;
+    extern thread_local unsigned inside_registration_callback;
     // This data structure tracks references to any live
     // temporary index space expressions that have been
     // handed back by the region tree inside the execution
     // of a meta-task or a runtime API call. It also tracks
     // changes to remote distributed collectable that can be
     // delayed and batched together.
-    extern __thread ImplicitReferenceTracker *implicit_reference_tracker; 
+    extern thread_local ImplicitReferenceTracker *implicit_reference_tracker; 
 #ifdef DEBUG_LEGION_WAITS
-    extern __thread int meta_task_id;
+    extern thread_local int meta_task_id;
 #endif
 #ifdef DEBUG_LEGION_CALLERS
-    extern __thread LgTaskID implicit_task_kind;
-    extern __thread LgTaskID implicit_task_caller;
+    extern thread_local LgTaskID implicit_task_kind;
+    extern thread_local LgTaskID implicit_task_caller;
 #endif
 
     /**
@@ -2556,6 +2588,9 @@ namespace Legion {
       // Override the wait method so we can have our own implementation
       inline void wait(void) const;
       inline void wait_faultaware(bool &poisoned) const;
+    protected:
+      void begin_context_wait(Context ctx) const;
+      void end_context_wait(Context ctx) const;
     };
 
     class PredEvent : public LgEvent {
@@ -2930,11 +2965,15 @@ namespace Legion {
         // Make a user event and notify all the thread locks
         const Realm::UserEvent done = Realm::UserEvent::create_user_event();
         local_lock_list_copy->advise_sleep_entry(done);
+        if (local_ctx != NULL)
+          begin_context_wait(local_ctx); 
         // Now we can do the wait
         if (!Processor::get_executing_processor().exists())
           Realm::Event::external_wait();
         else
           Realm::Event::wait();
+        if (local_ctx != NULL)
+          end_context_wait(local_ctx);
         // When we wake up, notify that we are done and exited the wait
         local_lock_list_copy->advise_sleep_exit();
         // Trigger the user-event
@@ -2944,10 +2983,14 @@ namespace Legion {
       }
       else // Just do the normal wait
       {
+        if (local_ctx != NULL)
+          begin_context_wait(local_ctx);
         if (!Processor::get_executing_processor().exists())
           Realm::Event::external_wait();
         else
           Realm::Event::wait();
+        if (local_ctx != NULL)
+          end_context_wait(local_ctx);
       }
       // Write the context back
       Internal::implicit_context = local_ctx;
@@ -3003,11 +3046,15 @@ namespace Legion {
         // Make a user event and notify all the thread locks
         const Realm::UserEvent done = Realm::UserEvent::create_user_event();
         local_lock_list_copy->advise_sleep_entry(done);
+        if (local_ctx != NULL)
+          begin_context_wait(local_ctx);
         // Now we can do the wait
         if (!Processor::get_executing_processor().exists())
           Realm::Event::external_wait_faultaware(poisoned);
         else
           Realm::Event::wait_faultaware(poisoned);
+        if (local_ctx != NULL)
+          end_context_wait(local_ctx);
         // When we wake up, notify that we are done and exited the wait
         local_lock_list_copy->advise_sleep_exit();
         // Trigger the user-event
@@ -3017,10 +3064,14 @@ namespace Legion {
       }
       else // Just do the normal wait
       {
+        if (local_ctx != NULL)
+          begin_context_wait(local_ctx);
         if (!Processor::get_executing_processor().exists())
           Realm::Event::external_wait_faultaware(poisoned);
         else
           Realm::Event::wait_faultaware(poisoned);
+        if (local_ctx != NULL)
+          end_context_wait(local_ctx);
       }
       // Write the context back
       Internal::implicit_context = local_ctx;

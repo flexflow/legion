@@ -3679,6 +3679,10 @@ namespace Realm {
 
     virtual RegionInstance get_pointer_instance(void) const;
 
+    virtual const std::vector<RegionInstance>* get_instances(void) const;
+
+    virtual FieldID get_field(void) const;
+
     virtual TransferIterator *create_address_iterator(RegionInstance peer) const;
 
     virtual TransferIterator *create_indirect_iterator(Memory addrs_mem,
@@ -3758,6 +3762,18 @@ namespace Realm {
   RegionInstance IndirectionInfoTyped<N,T,N2,T2>::get_pointer_instance(void) const
   {
     return inst;
+  }
+
+  template <int N, typename T, int N2, typename T2>
+  const std::vector<RegionInstance>* IndirectionInfoTyped<N,T,N2,T2>::get_instances(void) const
+  {
+    return &insts;
+  }
+
+  template <int N, typename T, int N2, typename T2>
+  FieldID IndirectionInfoTyped<N,T,N2,T2>::get_field(void) const
+  {
+    return field_id;
   }
   
   template <int N, typename T, int N2, typename T2>
@@ -3897,6 +3913,7 @@ namespace Realm {
     if(!preconditions.empty()) {
       Event merged = Event::merge_events(preconditions);
       if(merged.exists()) {
+	deferred_analysis.precondition = merged;
         EventImpl::add_waiter(merged, &deferred_analysis);
         return;
       }
@@ -3975,9 +3992,11 @@ namespace Realm {
       // well, we still have to poke pending ops
       std::vector<TransferOperation *> to_alloc;
       {
-	AutoLock<> al(mutex);
-	to_alloc.swap(pending_ops);
-	analysis_complete.store(true);  // release done by mutex
+        AutoLock<> al(mutex);
+        to_alloc.swap(pending_ops);
+        // release before the mutex is released so to_alloc is visible before the
+        // analysis_complete flag is set
+        analysis_complete.store_release(true);
       }
 
       for(size_t i = 0; i < to_alloc.size(); i++)
@@ -4124,10 +4143,19 @@ namespace Realm {
         prof_usage.source = src_mem;
         prof_usage.target = dst_mem;
         prof_usage.size += domain_size * combined_field_size;
+	std::vector<RegionInstance> instinfo_src_insts{srcs[i].inst};
+	std::vector<RegionInstance> instinfo_dst_insts{dsts[i].inst};
+	std::vector<FieldID> instinfo_src_field_ids{srcs[i].field_id};
+	std::vector<FieldID> instinfo_dst_field_ids{dsts[i].field_id};
         prof_cpinfo.inst_info.push_back(ProfilingMeasurements::OperationCopyInfo::InstInfo {
-          srcs[i].inst,
-          dsts[i].inst,
-          1 /*num_fields*/,
+	  instinfo_src_insts,
+	  instinfo_dst_insts,
+	  RegionInstance::NO_INST,
+	  RegionInstance::NO_INST,
+	  instinfo_src_field_ids,
+	  instinfo_dst_field_ids,
+	  0,
+	  0,
           ProfilingMeasurements::OperationCopyInfo::REDUCE,
           unsigned(pathlen) });
         fld_start += 1;
@@ -4201,10 +4229,19 @@ namespace Realm {
         prof_usage.source = Memory::NO_MEMORY;
         prof_usage.target = dst_mem;
         prof_usage.size += domain_size * combined_field_size;
+	std::vector<RegionInstance> instinfo_src_insts;
+	std::vector<RegionInstance> instinfo_dst_insts{dsts[i].inst};
+	std::vector<FieldID> instinfo_src_field_ids;
+	std::vector<FieldID> instinfo_dst_field_ids{dsts[i].field_id};
         prof_cpinfo.inst_info.push_back(ProfilingMeasurements::OperationCopyInfo::InstInfo {
-              RegionInstance::NO_INST,
-              dsts[i].inst,
-              1 /*num_fields*/,
+	      instinfo_src_insts,
+	      instinfo_dst_insts,
+	      RegionInstance::NO_INST,
+	      RegionInstance::NO_INST,
+	      instinfo_src_field_ids,
+	      instinfo_dst_field_ids,
+	      0,
+	      0,
               ProfilingMeasurements::OperationCopyInfo::FILL,
               unsigned(pathlen) });
         fld_start += 1;
@@ -4326,10 +4363,17 @@ namespace Realm {
             prof_usage.source = src_mem;
             prof_usage.target = dst_mem;
             prof_usage.size += domain_size * combined_field_size;
+	    std::vector<RegionInstance> instinfo_src_insts{srcs[i].inst};
+	    std::vector<RegionInstance> instinfo_dst_insts{dsts[i].inst};
             prof_cpinfo.inst_info.push_back(ProfilingMeasurements::OperationCopyInfo::InstInfo {
-                 srcs[i].inst,
-                 dsts[i].inst,
-                 num_fields,
+		 instinfo_src_insts,
+		 instinfo_dst_insts,
+		 RegionInstance::NO_INST,
+		 RegionInstance::NO_INST,
+		 src_field_ids,
+		 dst_field_ids,
+		 0,
+		 0,
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(pathlen) });
             fld_start += num_fields;
@@ -4353,10 +4397,22 @@ namespace Realm {
             prof_usage.source = src_mem;
             prof_usage.target = Memory::NO_MEMORY;
             prof_usage.size += domain_size * combined_field_size;
+	    std::vector<RegionInstance> instinfo_src_insts{srcs[i].inst};
+	    std::vector<RegionInstance> instinfo_dst_insts;
+	    if (scatter_info->get_instances()) {
+	      instinfo_dst_insts = *(scatter_info->get_instances());
+	    }
+	    std::vector<FieldID> instinfo_src_field_ids{srcs[i].field_id};
+	    std::vector<FieldID> instinfo_dst_field_ids{dsts[i].field_id};
             prof_cpinfo.inst_info.push_back(ProfilingMeasurements::OperationCopyInfo::InstInfo {
-                 srcs[i].inst,
-                 RegionInstance::NO_INST,
-                 1 /*num_fields*/,
+		 instinfo_src_insts,
+		 instinfo_dst_insts,
+		 RegionInstance::NO_INST,
+		 scatter_info->get_pointer_instance(),
+		 instinfo_src_field_ids,
+		 instinfo_dst_field_ids,
+		 0,
+		 scatter_info->get_field(),
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(graph.xd_nodes.size() - prev_nodes) });
             fld_start += 1;
@@ -4382,10 +4438,22 @@ namespace Realm {
             prof_usage.source = Memory::NO_MEMORY;
             prof_usage.target = dst_mem;
             prof_usage.size += domain_size * combined_field_size;
+	    std::vector<RegionInstance> instinfo_src_insts;
+	    if (gather_info->get_instances()) {
+	      instinfo_src_insts = *(gather_info->get_instances());
+	    }
+	    std::vector<RegionInstance> instinfo_dst_insts{dsts[i].inst};
+	    std::vector<FieldID> instinfo_src_field_ids{srcs[i].field_id};
+	    std::vector<FieldID> instinfo_dst_field_ids{dsts[i].field_id};
             prof_cpinfo.inst_info.push_back(ProfilingMeasurements::OperationCopyInfo::InstInfo {
-                 RegionInstance::NO_INST,
-                 dsts[i].inst,
-                 1 /*num_fields*/,
+		 instinfo_src_insts,
+		 instinfo_dst_insts,
+		 gather_info->get_pointer_instance(),
+		 RegionInstance::NO_INST,
+		 instinfo_src_field_ids,
+		 instinfo_dst_field_ids,
+		 gather_info->get_field(),
+		 0,
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(graph.xd_nodes.size() - prev_nodes) });
             fld_start += 1;
@@ -4431,10 +4499,25 @@ namespace Realm {
             prof_usage.source = Memory::NO_MEMORY;
             prof_usage.target = Memory::NO_MEMORY;
             prof_usage.size += domain_size * combined_field_size;
+	    std::vector<RegionInstance> instinfo_src_insts;
+	    if (gather_info->get_instances()) {
+	      instinfo_src_insts = *(gather_info->get_instances());
+	    }
+	    std::vector<RegionInstance> instinfo_dst_insts;
+	    if (scatter_info->get_instances()) {
+	      instinfo_dst_insts = *(scatter_info->get_instances());
+	    }
+	    std::vector<FieldID> instinfo_src_field_ids{srcs[i].field_id};
+	    std::vector<FieldID> instinfo_dst_field_ids{dsts[i].field_id};
             prof_cpinfo.inst_info.push_back(ProfilingMeasurements::OperationCopyInfo::InstInfo {
-                 RegionInstance::NO_INST,
-                 RegionInstance::NO_INST,
-                 1 /*num_fields*/,
+		 instinfo_src_insts,
+		 instinfo_dst_insts,
+		 gather_info->get_pointer_instance(),
+		 scatter_info->get_pointer_instance(),
+		 instinfo_src_field_ids,
+		 instinfo_dst_field_ids,
+		 gather_info->get_field(),
+		 scatter_info->get_field(),
                  ProfilingMeasurements::OperationCopyInfo::COPY,
                  unsigned(graph.xd_nodes.size() - prev_nodes) });
             fld_start += 1;
@@ -4491,11 +4574,32 @@ namespace Realm {
     {
       AutoLock<> al(mutex);
       to_alloc.swap(pending_ops);
-      analysis_complete.store(true);  // release done by mutex
+      analysis_successful = true;
+      // release before the mutex is released so to_alloc is visible before the
+      // analysis_complete flag is set
+      analysis_complete.store_release(true);
     }
 
     for(size_t i = 0; i < to_alloc.size(); i++)
       to_alloc[i]->allocate_ibs();
+  }
+
+  void TransferDesc::cancel_analysis(Event failed_precondition)
+  {
+    // mark that the analysis is failed and see if there are any pending
+    //  ops that need to also fail
+    std::vector<TransferOperation *> to_alloc;
+    {
+      AutoLock<> al(mutex);
+      to_alloc.swap(pending_ops);
+      analysis_successful = false;
+      // release before the mutex is released so to_alloc is visible before the
+      // analysis_complete flag is set
+      analysis_complete.store_release(true);
+    }
+
+    for(size_t i = 0; i < to_alloc.size(); i++)
+      to_alloc[i]->handle_poisoned_precondition(failed_precondition);
   }
 
 
@@ -4511,10 +4615,11 @@ namespace Realm {
   void TransferDesc::DeferredAnalysis::event_triggered(bool poisoned,
 						       TimeLimit work_until)
   {
-    assert(!poisoned);
     // TODO: respect time limit
-
-    desc->perform_analysis();
+    if(poisoned)
+      desc->cancel_analysis(precondition);
+    else
+      desc->perform_analysis();
   }
 
   void TransferDesc::DeferredAnalysis::print(std::ostream& os) const
@@ -4567,10 +4672,14 @@ namespace Realm {
 
     bool poisoned;
     if(!precondition.has_triggered_faultaware(poisoned)) {
+      deferred_start.precondition = precondition;
       EventImpl::add_waiter(precondition, &deferred_start);
       return;
     }
-    assert(!poisoned);
+    if(poisoned) {
+      handle_poisoned_precondition(precondition);
+      return;
+    }
 
     // see if we need to wait for the transfer description analysis
     if(desc.request_analysis(this)) {
@@ -4619,6 +4728,12 @@ namespace Realm {
     bool ok_to_run = mark_ready();
     if(!ok_to_run) {
       mark_finished(false /*!successful*/);
+      return;
+    }
+
+    // if the transfer analysis was not successful, we can't continue
+    if(!desc.analysis_successful) {
+      mark_terminated(0, ByteArray());
       return;
     }
 
@@ -5181,15 +5296,17 @@ namespace Realm {
   void TransferOperation::DeferredStart::event_triggered(bool poisoned,
 							 TimeLimit work_until)
   {
-    assert(!poisoned);
     // TODO: respect time limit
-
-    // see if we need to wait for the transfer description analysis
-    if(op->desc.request_analysis(op)) {
-      // it's ready - go ahead and do ib creation
-      op->allocate_ibs();
+    if(poisoned) {
+      op->handle_poisoned_precondition(precondition);
     } else {
-      // do nothing - the TransferDesc will call us when it's ready
+      // see if we need to wait for the transfer description analysis
+      if(op->desc.request_analysis(op)) {
+	// it's ready - go ahead and do ib creation
+	op->allocate_ibs();
+      } else {
+	// do nothing - the TransferDesc will call us when it's ready
+      }
     }
   }
 
@@ -5229,7 +5346,6 @@ namespace Realm {
                                                   finish_event,
                                                   ID(ev).event_generation(),
                                                   priority);
-    get_runtime()->optable.add_local_operation(ev, op);
     op->start_or_defer();
 
     // remove our reference to the description (op holds one)

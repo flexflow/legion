@@ -67,6 +67,14 @@ TESTS += extres_alias
 TESTS += reservations
 TESTS += multiaffine
 
+ifeq ($(strip $(USE_CUDA)),1)
+TESTS += task_stream
+endif
+
+ifeq ($(strip $(USE_HIP)),1)
+TESTS += task_stream
+endif
+
 # can set arguments to be passed to a test when running
 TESTARGS_ctxswitch := -ll:io 1 -t 30 -i 10000
 TESTARGS_proc_group := -ll:cpu 4
@@ -74,6 +82,7 @@ TESTARGS_compqueue := -ll:cpu 4
 TESTARGS_event_subscribe := -ll:cpu 4
 TESTARGS_deferred_allocs := -ll:gsize 0 -all
 TESTARGS_scatter := -p1 2 -p2 2
+TESTARGS_alltoall := -ll:csize 1024
 TESTARGS_sparse_construct := -verbose
 
 REALM_OBJS := $(patsubst %.cc,%.o,$(notdir $(REALM_SRC))) \
@@ -116,10 +125,12 @@ ifeq ($(strip $(USE_CUDA)),1)
 EXTRAOBJS_memspeed := memspeed_gpu.o
 EXTRAOBJS_simple_reduce := simple_reduce_gpu.o
 EXTRAOBJS_multiaffine := multiaffine_gpu.o
-TEST_OBJS += $(EXTRAOBJS_memspeed) $(EXTRAOBJS_simple_reduce) $(EXTRAOBJS_multiaffine)
+EXTRAOBJS_task_stream := task_stream_gpu.o
+TEST_OBJS += $(EXTRAOBJS_memspeed) $(EXTRAOBJS_simple_reduce) $(EXTRAOBJS_multiaffine) $(EXTRAOBJS_task_stream)
 memspeed : memspeed_gpu.o
 simple_reduce : simple_reduce_gpu.o
 multiaffine : multiaffine_gpu.o
+task_stream : task_stream_gpu.o
 
 %.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
 	$(NVCC) -o $@ -c $< $(INC_FLAGS) $(NVCC_FLAGS)
@@ -128,18 +139,17 @@ endif
 ifeq ($(strip $(USE_HIP)),1)
 EXTRAOBJS_memspeed := memspeed_gpu.o
 EXTRAOBJS_simple_reduce := simple_reduce_gpu.o
-TEST_OBJS += $(EXTRAOBJS_memspeed) $(EXTRAOBJS_simple_reduce)
+# FIXME: https://github.com/StanfordLegion/legion/issues/1476
+# EXTRAOBJS_multiaffine := multiaffine_gpu.o
+EXTRAOBJS_task_stream := task_stream_gpu.o
+TEST_OBJS += $(EXTRAOBJS_memspeed) $(EXTRAOBJS_simple_reduce) $(EXTRAOBJS_multiaffine) $(EXTRAOBJS_task_stream)
 memspeed : memspeed_gpu.o
 simple_reduce : simple_reduce_gpu.o
+# multiaffine : multiaffine_gpu.o
+task_stream : task_stream_gpu.o
 
-ifeq ($(strip $(HIP_TARGET)),ROCM)
 %.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
 	$(HIPCC) -o $@ -c $< $(INC_FLAGS) $(HIPCC_FLAGS)
-endif
-ifeq ($(strip $(HIP_TARGET)),CUDA)
-%.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)
-	$(NVCC) -o $@ -c $< $(INC_FLAGS) $(NVCC_FLAGS)
-endif
 endif
 
 %.o : %.cc $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)

@@ -30,9 +30,6 @@
 namespace Legion {
   namespace Internal {
 
-    // Special typedef for predicates
-    typedef PredicateImpl PredicateOp;  
-
     /**
      * \class Provenance
      */
@@ -1022,60 +1019,6 @@ namespace Legion {
     };
 
     /**
-     * \class PredicateWaiter
-     * An interface class for speculative operations
-     * and compound predicates that allows them to
-     * be notified when their constituent predicates
-     * have been resolved.
-     */
-    class PredicateWaiter {
-    public:
-      virtual void notify_predicate_value(GenerationID gen, bool value) = 0;
-    };
-
-    /**
-     * \class Predicate 
-     * A predicate operation is an abstract class that
-     * contains a method that allows other operations to
-     * sample their values and see if they are resolved
-     * or whether they are speculated values.
-     */
-    class PredicateImpl : public Operation {
-    public:
-      PredicateImpl(Runtime *rt);
-    public:
-      virtual void activate(void);
-      virtual void deactivate(bool free);
-    public:
-      void add_predicate_reference(void);
-      void remove_predicate_reference(void);
-      virtual void trigger_complete(void);
-      virtual void trigger_commit(void);
-      virtual bool invalidates_physical_trace_template(bool &exec_fence) const
-        { return false; }
-    public:
-      bool register_waiter(PredicateWaiter *waiter, 
-                           GenerationID gen, bool &value);
-      PredEvent get_true_guard(void);
-      PredEvent get_false_guard(void);
-      void get_predicate_guards(PredEvent &true_guard, PredEvent &false_guard);
-      Future get_future_result(void);
-    protected:
-      void set_resolved_value(GenerationID pred_gen, bool value);
-    protected:
-      bool predicate_resolved;
-      bool predicate_value;
-      std::map<PredicateWaiter*,GenerationID> waiters;
-    protected:
-      RtUserEvent collect_predicate;
-      unsigned predicate_references;
-      PredUserEvent true_guard, false_guard;
-    protected:
-      Future result_future;
-      bool can_result_future_complete;
-    };
-
-    /**
      * \class MemoizableOp
      * A memoizable operation is an abstract class
      * that serves as the basis for operation whose
@@ -1171,14 +1114,12 @@ namespace Legion {
      * will be executed with a predicate value. 
      * Note that all speculative operations are also memoizable operations.
      */
-    class PredicatedOp : public MemoizableOp, public PredicateWaiter {
+    class PredicatedOp : public MemoizableOp {
     public:
       enum PredState {
-        PENDING_ANALYSIS_STATE,
-        WAITING_MAPPING_STATE,
-        SPECULATIVE_MAPPING_STATE,
-        RESOLVE_TRUE_STATE,
-        RESOLVE_FALSE_STATE,
+        PENDING_PREDICATE_STATE,
+        PREDICATED_TRUE_STATE,
+        PREDICATED_FALSE_STATE,
       };
     public:
       PredicatedOp(Runtime *rt);
@@ -1195,29 +1136,16 @@ namespace Legion {
       // needs to wait for the value
       bool get_predicate_value(void);
     public:
-      // Call this method for inheriting classes 
-      // to determine whether they should speculate 
-      virtual bool query_speculate(void) = 0;
-    public:
-      // Every speculative operation will always get exactly one
-      // call back to one of these methods after the predicate has
-      // resolved. The 'speculated' parameter indicates whether the
-      // operation was speculated by the mapper. The 'launch' parameter
-      // indicates whether the operation has been issued into the 
-      // pipeline for execution yet
-      virtual void resolve_true(bool speculated, bool launched) = 0;
-      virtual void resolve_false(bool speculated, bool launched) = 0;
-    public:
-      virtual void notify_predicate_value(GenerationID gen, bool value);
+      // This method gets invoked if a predicate for a predicated
+      // operation resolves to false before we try to map the operation 
+      virtual void predicate_false(void) = 0;
     protected:
-      PredState    predication_state;
-      PredicateOp *predicate;
+      PredState     predication_state;
+      PredicateImpl *predicate;
     public:
       // For managing predication
       PredEvent true_guard;
       PredEvent false_guard;
-    protected:
-      RtUserEvent predicate_waiter; // used only when needed
     };
 
     /**
@@ -1231,7 +1159,6 @@ namespace Legion {
       Predicated(Runtime *rt) : Memoizable<OP>(rt) {}
       virtual ~Predicated(void) { }
     public:
-      virtual void trigger_prepipeline_stage(void) override;
       virtual void trigger_dependence_analysis(void) override;
       virtual void trigger_ready(void) override;
     };
@@ -1388,6 +1315,9 @@ namespace Legion {
         GATHER_REQ = 2,
         SCATTER_REQ = 3,
       };
+    private:
+      static constexpr size_t REQ_COUNT = SCATTER_REQ + 1;
+      static const ReqType req_types[REQ_COUNT];
     public:
       struct DeferredCopyAcross : public LgTaskArgs<DeferredCopyAcross>,
                                   public PhysicalTraceInfo {
@@ -1473,9 +1403,7 @@ namespace Legion {
           const InstanceSet &instances, const RegionRequirement &req,
           std::vector<IndirectRecord> &records, const bool sources);
     public:
-      virtual bool query_speculate(void);
-      virtual void resolve_true(bool speculated, bool launched);
-      virtual void resolve_false(bool speculated, bool launched);
+      virtual void predicate_false(void);
     public:
       virtual unsigned find_parent_index(unsigned idx);
       virtual void select_sources(const unsigned index, PhysicalManager *target,
@@ -1549,30 +1477,83 @@ namespace Legion {
       // Separate function for this so it can be called by derived classes
       RtEvent perform_local_versioning_analysis(void);
     public:
-      std::vector<RegionTreePath>           src_privilege_paths;
-      std::vector<RegionTreePath>           dst_privilege_paths;
-      std::vector<unsigned>                 src_parent_indexes;
-      std::vector<unsigned>                 dst_parent_indexes;
-      LegionVector<VersionInfo>             src_versions;
-      LegionVector<VersionInfo>             dst_versions;
-      std::vector<IndexSpaceExpression*>    copy_expressions;
-    public: // These are only used for indirect copies
-      std::vector<RegionTreePath>           gather_privilege_paths;
-      std::vector<RegionTreePath>           scatter_privilege_paths;
-      std::vector<unsigned>                 gather_parent_indexes;
-      std::vector<unsigned>                 scatter_parent_indexes;
-      std::vector<bool>                     gather_is_range;
-      std::vector<bool>                     scatter_is_range;
-      LegionVector<VersionInfo>             gather_versions;
-      LegionVector<VersionInfo>             scatter_versions;
-      std::vector<std::vector<IndirectRecord> > src_indirect_records;
-      std::vector<std::vector<IndirectRecord> > dst_indirect_records;
+      struct Operand
+      {
+        Operand(unsigned copy_index,
+                ReqType type,
+                unsigned req_index,
+                RegionRequirement &requirement)
+          :copy_index(copy_index),
+           type(type),
+           req_index(req_index),
+           requirement(requirement)
+        {}
+
+        // from CopyLauncher
+        const unsigned copy_index;
+        const ReqType type;
+        const unsigned req_index;
+        RegionRequirement &requirement;
+
+        // calculated in CopyOp
+        RegionTreePath privilege_path;
+        unsigned parent_index;
+        VersionInfo version;
+      };
+
+      struct SingleCopy
+      {
+        SingleCopy(unsigned copy_index,
+                   Operand *src,
+                   Operand *dst,
+                   Operand *src_indirect,
+                   Operand *dst_indirect,
+                   Grant *grant,
+                   PhaseBarrier *wait_barrier,
+                   PhaseBarrier *arrive_barrier,
+                   bool gather_is_range,
+                   bool scatter_is_range);
+
+        // from CopyLauncher
+        const unsigned copy_index;
+        Operand * const src;
+        Operand * const dst;
+        Operand * const src_indirect;
+        Operand * const gather;
+        Operand * const dst_indirect;
+        Operand * const scatter;
+        Grant * const grant;
+        PhaseBarrier * const wait_barrier;
+        PhaseBarrier * const arrive_barrier;
+        bool gather_is_range;
+        bool scatter_is_range;
+
+        // calculated in CopyOp
+        std::vector<IndirectRecord> src_indirect_records;
+        std::vector<IndirectRecord> dst_indirect_records;
+        std::map<Reservation,bool> atomic_locks;
+      };
+
+    protected:
+      template<typename T>
+      void initialize_copies_with_launcher(const T &launcher);
+      void initialize_copies_with_copies(std::vector<SingleCopy> &other);
+
+    private: // used internally for initialization
+      template <typename T> class InitField;
+      struct InitInfo;
+
+      void initialize_copies(InitInfo &info);
+      std::vector<RegionRequirement> &get_reqs_by_type(ReqType type);
+
+    public: // per-operand and per-copy data
+      LegionVector<Operand> operands;
+      std::vector<SingleCopy> copies;
     protected: // for support with mapping
       MapperManager*              mapper;
     protected:
       std::vector<PhysicalManager*>         across_sources;
       std::map<PhysicalManager*,unsigned> acquired_instances;
-      std::vector<std::map<Reservation,bool> > atomic_locks;
       std::set<RtEvent> map_applied_conditions;
     protected:
       struct CopyProfilingInfo : public Mapping::Mapper::CopyProfilingInfo {
@@ -2372,9 +2353,7 @@ namespace Legion {
       virtual void trigger_ready(void);
       virtual void trigger_mapping(void);
     public:
-      virtual bool query_speculate(void);
-      virtual void resolve_true(bool speculated, bool launched);
-      virtual void resolve_false(bool speculated, bool launched);
+      virtual void predicate_false(void);
     public:
       virtual void trigger_commit(void);
       virtual unsigned find_parent_index(unsigned idx);
@@ -2487,9 +2466,7 @@ namespace Legion {
       virtual void trigger_ready(void);
       virtual void trigger_mapping(void);
     public:
-      virtual bool query_speculate(void);
-      virtual void resolve_true(bool speculated, bool launched);
-      virtual void resolve_false(bool speculated, bool launched);
+      virtual void predicate_false(void);
     public:
       virtual void trigger_commit(void);
       virtual unsigned find_parent_index(unsigned idx);
@@ -2602,9 +2579,9 @@ namespace Legion {
 
     /**
      * \class FuturePredOp
-     * A class for making predicates out of futures.
+     * A class for making predicates out of futures or vice versa.
      */
-    class FuturePredOp : public PredicateOp {
+    class FuturePredOp : public Operation {
     public:
       static const AllocationType alloc_type = FUTURE_PRED_OP_ALLOC;
     public:
@@ -2614,7 +2591,10 @@ namespace Legion {
     public:
       FuturePredOp& operator=(const FuturePredOp &rhs);
     public:
-      void initialize(InnerContext *ctx, Future f, Provenance *provenance);
+      Predicate initialize(InnerContext *ctx, 
+                           const Future &f, Provenance *provenance);
+      Future initialize(InnerContext *ctx,
+                        const Predicate &p, Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(bool free = true);
@@ -2626,13 +2606,15 @@ namespace Legion {
       virtual void trigger_execution(void);
     protected:
       Future future;
+      Predicate predicate;
+      bool to_predicate;
     };
 
     /**
      * \class NotPredOp
      * A class for negating other predicates
      */
-    class NotPredOp : public PredicateOp, PredicateWaiter {
+    class NotPredOp : public Operation {
     public:
       static const AllocationType alloc_type = NOT_PRED_OP_ALLOC;
     public:
@@ -2642,8 +2624,8 @@ namespace Legion {
     public:
       NotPredOp& operator=(const NotPredOp &rhs);
     public:
-      void initialize(InnerContext *task, const Predicate &p,
-                      Provenance *provenance);
+      Predicate initialize(InnerContext *task, const Predicate &p,
+                           Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(bool free = true);
@@ -2652,16 +2634,16 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
-      virtual void notify_predicate_value(GenerationID gen, bool value);
+      virtual void trigger_execution(void);
     protected:
-      PredicateOp *pred_op;
+      Predicate previous, to_set;
     };
 
     /**
      * \class AndPredOp
      * A class for and-ing other predicates
      */
-    class AndPredOp : public PredicateOp, PredicateWaiter {
+    class AndPredOp : public Operation {
     public:
       static const AllocationType alloc_type = AND_PRED_OP_ALLOC;
     public:
@@ -2671,9 +2653,9 @@ namespace Legion {
     public:
       AndPredOp& operator=(const AndPredOp &rhs);
     public:
-      void initialize(InnerContext *task, 
-                      const std::vector<Predicate> &predicates,
-                      Provenance *provenance);
+      Predicate initialize(InnerContext *task, 
+                           std::vector<Predicate> &predicates,
+                           Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(bool free = true);
@@ -2682,18 +2664,17 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
-      virtual void notify_predicate_value(GenerationID pred_gen, bool value);
+      virtual void trigger_execution(void);
     protected:
-      std::vector<PredicateOp*> previous;
-      unsigned                  true_count;
-      bool                      false_short;
+      std::vector<Predicate> previous;
+      Predicate              to_set;
     };
 
     /**
      * \class OrPredOp
      * A class for or-ing other predicates
      */
-    class OrPredOp : public PredicateOp, PredicateWaiter {
+    class OrPredOp : public Operation {
     public:
       static const AllocationType alloc_type = OR_PRED_OP_ALLOC;
     public:
@@ -2703,9 +2684,9 @@ namespace Legion {
     public:
       OrPredOp& operator=(const OrPredOp &rhs);
     public:
-      void initialize(InnerContext *task, 
-                      const std::vector<Predicate> &predicates,
-                      Provenance *provenance);
+      Predicate initialize(InnerContext *task, 
+                           std::vector<Predicate> &predicates,
+                           Provenance *provenance);
     public:
       virtual void activate(void);
       virtual void deactivate(bool free = true);
@@ -2714,11 +2695,10 @@ namespace Legion {
     public:
       virtual void trigger_dependence_analysis(void);
       virtual void trigger_ready(void);
-      virtual void notify_predicate_value(GenerationID pred_gen, bool value);
+      virtual void trigger_execution(void);
     protected:
-      std::vector<PredicateOp*> previous;
-      unsigned                  false_count;
-      bool                      true_short;
+      std::vector<Predicate> previous;
+      Predicate              to_set;
     };
 
     /**
@@ -2988,12 +2968,10 @@ namespace Legion {
         virtual ~PendingPartitionThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest) = 0;
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards) = 0;
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures) = 0;
         virtual void perform_logging(PendingPartitionOp* op) = 0;
-        virtual bool need_all_futures(void) const { return false; }
+        virtual bool is_cross_product(void) const { return false; }
       };
       class EqualPartitionThunk : public PendingPartitionThunk {
       public:
@@ -3002,13 +2980,9 @@ namespace Legion {
         virtual ~EqualPartitionThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_equal_partition(op, pid, granularity); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_equal_partition(op, pid, granularity,
-                                                shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp* op);
       protected:
         IndexPartition pid;
@@ -3016,24 +2990,18 @@ namespace Legion {
       };
       class WeightPartitionThunk : public PendingPartitionThunk {
       public:
-        WeightPartitionThunk(IndexPartition id, const FutureMap &w, size_t g)
-          : pid(id), weights(w), granularity(g) { }
+        WeightPartitionThunk(IndexPartition id, size_t g)
+          : pid(id), granularity(g) { }
         virtual ~WeightPartitionThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_partition_by_weights(op, pid, 
-                                        weights, granularity); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_partition_by_weights(op, pid, weights,
-                                      granularity, shard, total_shards); }
+                                        futures, granularity); }
         virtual void perform_logging(PendingPartitionOp *op);
-        virtual bool need_all_futures(void) const { return true; }
       protected:
         IndexPartition pid;
-        FutureMap weights;
         size_t granularity;
       };
       class UnionPartitionThunk : public PendingPartitionThunk {
@@ -3044,13 +3012,9 @@ namespace Legion {
         virtual ~UnionPartitionThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_partition_by_union(op, pid, handle1, handle2); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_partition_by_union(op, pid, handle1, handle2,
-                                                   shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp* op);
       protected:
         IndexPartition pid;
@@ -3065,14 +3029,10 @@ namespace Legion {
         virtual ~IntersectionPartitionThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_partition_by_intersection(op, pid, handle1,
                                                           handle2); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_partition_by_intersection(op, pid, handle1,
-                                              handle2, shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp* op);
       protected:
         IndexPartition pid;
@@ -3086,14 +3046,10 @@ namespace Legion {
         virtual ~IntersectionWithRegionThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_partition_by_intersection(op, pid, 
                                                           part, dominates); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_partition_by_intersection(op, pid, part,
-                                              dominates, shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp* op);
       protected:
         IndexPartition pid;
@@ -3108,14 +3064,10 @@ namespace Legion {
         virtual ~DifferencePartitionThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_partition_by_difference(op, pid, handle1,
                                                         handle2); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_partition_by_difference(op, pid, handle1, 
-                                          handle2, shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp* op);
       protected:
         IndexPartition pid;
@@ -3132,14 +3084,10 @@ namespace Legion {
           { free(transform); free(extent); }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_partition_by_restriction(pid, 
                                               transform, extent); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_partition_by_restriction(pid, transform,
-                                            extent, shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp *op);
       protected:
         IndexPartition pid;
@@ -3149,44 +3097,42 @@ namespace Legion {
       class FutureMapThunk : public PendingPartitionThunk {
       public:
         FutureMapThunk(IndexPartition id, const FutureMap &fm, bool inter)
-          : pid(id), future_map(fm), perform_intersections(inter) { }
+          : pid(id), future_map_domain(fm.impl->get_domain()),
+            perform_intersections(inter) { }
         virtual ~FutureMapThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
-        { return forest->create_partition_by_domain(op, pid, future_map,
-                                              perform_intersections); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_partition_by_domain(op, pid, future_map,
-                            perform_intersections, shard, total_shards); }
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
+        { return forest->create_partition_by_domain(op, pid, futures,
+                            future_map_domain, perform_intersections); }
         virtual void perform_logging(PendingPartitionOp *op);
       protected:
         IndexPartition pid;
-        FutureMap future_map;
+        const Domain future_map_domain;
         bool perform_intersections;
       };
       class CrossProductThunk : public PendingPartitionThunk {
       public:
-        CrossProductThunk(IndexPartition b, IndexPartition s, LegionColor c)
-          : base(b), source(s), part_color(c) { }
+        CrossProductThunk(IndexPartition b, IndexPartition s, LegionColor c,
+                          ShardID local, const ShardMapping *mapping)
+          : base(b), source(s), part_color(c), local_shard(local),
+            shard_mapping(mapping) { }
         virtual ~CrossProductThunk(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->create_cross_product_partitions(op, base, source, 
-                                                         part_color); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->create_cross_product_partitions(op, base, source,
-                                        part_color, shard, total_shards); }
+                                part_color, local_shard, shard_mapping); }
         virtual void perform_logging(PendingPartitionOp* op);
+        virtual bool is_cross_product(void) const { return true; }
       protected:
         IndexPartition base;
         IndexPartition source;
         LegionColor part_color;
+        ShardID local_shard;
+        const ShardMapping *shard_mapping;
       };
       class ComputePendingSpace : public PendingPartitionThunk {
       public:
@@ -3198,21 +3144,13 @@ namespace Legion {
         virtual ~ComputePendingSpace(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { if (is_partition)
             return forest->compute_pending_space(op, target, handle, is_union);
           else
             return forest->compute_pending_space(op, target, 
                                                  handles, is_union); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { if (is_partition)
-            return forest->compute_pending_space(op, target, handle, is_union,
-                                                 shard, total_shards);
-          else
-            return forest->compute_pending_space(op, target, handles, 
-                                               is_union, shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp* op);
       protected:
         bool is_union, is_partition;
@@ -3228,13 +3166,9 @@ namespace Legion {
         virtual ~ComputePendingDifference(void) { }
       public:
         virtual ApEvent perform(PendingPartitionOp *op,
-                                RegionTreeForest *forest)
+            RegionTreeForest *forest,
+            const std::map<DomainPoint,FutureImpl*> &futures)
         { return forest->compute_pending_space(op, target, initial, handles); }
-        virtual ApEvent perform_shard(PendingPartitionOp *op,
-                                      RegionTreeForest *forest,
-                                      ShardID shard, size_t total_shards)
-        { return forest->compute_pending_space(op, target, initial, handles,
-                                               shard, total_shards); }
         virtual void perform_logging(PendingPartitionOp* op);
       protected:
         IndexSpace target, initial;
@@ -3285,7 +3219,9 @@ namespace Legion {
                                 Provenance *provenance);
       void initialize_cross_product(InnerContext *ctx, IndexPartition base, 
                                     IndexPartition source, LegionColor color,
-                                    Provenance *provenance);
+                                    Provenance *provenance,
+                                    ShardID local_shard = 0,
+                                    const ShardMapping *shard_mapping = NULL);
       void initialize_index_space_union(InnerContext *ctx, IndexSpace target, 
                                         const std::vector<IndexSpace> &handles,
                                         Provenance *provenance);
@@ -3318,7 +3254,8 @@ namespace Legion {
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
     protected:
-      virtual void populate_sources(const FutureMap &fm);
+      virtual void populate_sources(const FutureMap &fm,
+          IndexPartition pid, bool need_all_futures);
       void request_future_buffers(std::set<RtEvent> &mapped_events,
                                   std::set<RtEvent> &ready_events);
     protected:
@@ -3358,13 +3295,16 @@ namespace Legion {
         virtual ~DepPartThunk(void) { }
       public:
         virtual ApEvent perform(DependentPartitionOp *op,
-            RegionTreeForest *forest, ApEvent instances_ready,
-            const std::vector<FieldDataDescriptor> &instances) = 0;
+            RegionTreeForest *forest, FieldID fid, ApEvent instances_ready,
+            std::vector<FieldDataDescriptor> &instances,
+            const std::map<DomainPoint,Domain> *remote_targets = NULL,
+            std::vector<DeppartResult> *results = NULL) = 0;
         virtual PartitionKind get_kind(void) const = 0;
         virtual IndexPartition get_partition(void) const = 0;
+        virtual IndexPartition get_projection(void) const = 0;
         virtual bool safe_projection(IndexPartition p) const { return false; }
-        // This method should only be used by control replication thunks
-        virtual void elide_collectives(void) { assert(false); }
+        virtual bool is_image(void) const { return false; }
+        virtual bool is_preimage(void) const { return false; }
       };
       class ByFieldThunk : public DepPartThunk {
       public:
@@ -3372,10 +3312,14 @@ namespace Legion {
           : pid(p) { }
       public:
         virtual ApEvent perform(DependentPartitionOp *op,
-            RegionTreeForest *forest, ApEvent instances_ready,
-            const std::vector<FieldDataDescriptor> &instances);
+            RegionTreeForest *forest, FieldID fid, ApEvent instances_ready,
+            std::vector<FieldDataDescriptor> &instances,
+            const std::map<DomainPoint,Domain> *remote_targets = NULL,
+            std::vector<DeppartResult> *results = NULL);
         virtual PartitionKind get_kind(void) const { return BY_FIELD; }
         virtual IndexPartition get_partition(void) const { return pid; }
+        virtual IndexPartition get_projection(void) const 
+          { return IndexPartition::NO_PART; }
       protected:
         IndexPartition pid;
       };
@@ -3385,12 +3329,16 @@ namespace Legion {
           : pid(p), projection(proj) { }
       public:
         virtual ApEvent perform(DependentPartitionOp *op,
-            RegionTreeForest *forest, ApEvent instances_ready,
-            const std::vector<FieldDataDescriptor> &instances);
+            RegionTreeForest *forest, FieldID fid, ApEvent instances_ready,
+            std::vector<FieldDataDescriptor> &instances,
+            const std::map<DomainPoint,Domain> *remote_targets = NULL,
+            std::vector<DeppartResult> *results = NULL);
         virtual PartitionKind get_kind(void) const { return BY_IMAGE; }
         virtual IndexPartition get_partition(void) const { return pid; }
+        virtual IndexPartition get_projection(void) const { return projection; }
         virtual bool safe_projection(IndexPartition p) const 
           { return (p == projection); }
+        virtual bool is_image(void) const { return true; }
       protected:
         IndexPartition pid;
         IndexPartition projection;
@@ -3401,12 +3349,16 @@ namespace Legion {
           : pid(p), projection(proj) { }
       public:
         virtual ApEvent perform(DependentPartitionOp *op,
-            RegionTreeForest *forest, ApEvent instances_ready,
-            const std::vector<FieldDataDescriptor> &instances);
+            RegionTreeForest *forest, FieldID fid, ApEvent instances_ready,
+            std::vector<FieldDataDescriptor> &instances,
+            const std::map<DomainPoint,Domain> *remote_targets = NULL,
+            std::vector<DeppartResult> *results = NULL);
         virtual PartitionKind get_kind(void) const { return BY_IMAGE_RANGE; }
         virtual IndexPartition get_partition(void) const { return pid; }
+        virtual IndexPartition get_projection(void) const { return projection; }
         virtual bool safe_projection(IndexPartition p) const
           { return (p == projection); }
+        virtual bool is_image(void) const { return true; }
       protected:
         IndexPartition pid;
         IndexPartition projection;
@@ -3417,10 +3369,14 @@ namespace Legion {
           : pid(p), projection(proj) { }
       public:
         virtual ApEvent perform(DependentPartitionOp *op,
-            RegionTreeForest *forest, ApEvent instances_ready,
-            const std::vector<FieldDataDescriptor> &instances);
+            RegionTreeForest *forest, FieldID fid, ApEvent instances_ready,
+            std::vector<FieldDataDescriptor> &instances,
+            const std::map<DomainPoint,Domain> *remote_targets = NULL,
+            std::vector<DeppartResult> *results = NULL);
         virtual PartitionKind get_kind(void) const { return BY_PREIMAGE; }
         virtual IndexPartition get_partition(void) const { return pid; }
+        virtual IndexPartition get_projection(void) const { return projection; }
+        virtual bool is_preimage(void) const { return true; }
       protected:
         IndexPartition pid;
         IndexPartition projection;
@@ -3431,10 +3387,14 @@ namespace Legion {
           : pid(p), projection(proj) { }
       public:
         virtual ApEvent perform(DependentPartitionOp *op,
-            RegionTreeForest *forest, ApEvent instances_ready,
-            const std::vector<FieldDataDescriptor> &instances);
+            RegionTreeForest *forest, FieldID fid, ApEvent instances_ready,
+            std::vector<FieldDataDescriptor> &instances,
+            const std::map<DomainPoint,Domain> *remote_targets = NULL,
+            std::vector<DeppartResult> *results = NULL);
         virtual PartitionKind get_kind(void) const { return BY_PREIMAGE_RANGE; }
         virtual IndexPartition get_partition(void) const { return pid; }
+        virtual IndexPartition get_projection(void) const { return projection; }
+        virtual bool is_preimage(void) const { return true; }
       protected:
         IndexPartition pid;
         IndexPartition projection;
@@ -3445,10 +3405,14 @@ namespace Legion {
           : domain(d), range(r) { }
       public:
         virtual ApEvent perform(DependentPartitionOp *op,
-            RegionTreeForest *forest, ApEvent instances_ready,
-            const std::vector<FieldDataDescriptor> &instances);
+            RegionTreeForest *forest, FieldID fid, ApEvent instances_ready,
+            std::vector<FieldDataDescriptor> &instances,
+            const std::map<DomainPoint,Domain> *remote_targets = NULL,
+            std::vector<DeppartResult> *results = NULL);
         virtual PartitionKind get_kind(void) const { return BY_ASSOCIATION; }
         virtual IndexPartition get_partition(void) const
+          { return IndexPartition::NO_PART; }
+        virtual IndexPartition get_projection(void) const
           { return IndexPartition::NO_PART; }
       protected:
         IndexSpace domain;
@@ -3524,7 +3488,8 @@ namespace Legion {
       virtual void finalize_mapping(void);
       virtual ApEvent trigger_thunk(IndexSpace handle, ApEvent insts_ready,
                                     const InstanceSet &mapped_instances,
-                                    const PhysicalTraceInfo &info);
+                                    const PhysicalTraceInfo &info,
+                                    const DomainPoint &color);
       virtual unsigned find_parent_index(unsigned idx);
       virtual bool is_partition_op(void) const { return true; }
       virtual void select_partition_projection(void);
@@ -3585,22 +3550,18 @@ namespace Legion {
       std::map<PhysicalManager*,unsigned> acquired_instances;
       std::set<RtEvent> map_applied_conditions;
       DepPartThunk *thunk;
-      ApEvent partition_ready;
     protected:
       MapperManager *mapper;
     protected:
       // For index versions of this operation
       IndexSpaceNode*                   launch_space;
       std::vector<FieldDataDescriptor>  instances;
-      std::set<ApEvent>                 index_preconditions;
+      std::vector<ApEvent>              index_preconditions;
       std::vector<PointDepPartOp*>      points; 
       unsigned                          points_committed;
       bool                              commit_request;
       std::set<RtEvent>                 commit_preconditions;
-#ifdef LEGION_SPY
-      // Special helper event to make things look right for Legion Spy
       ApUserEvent                       intermediate_index_event;
-#endif
     protected:
       struct PartitionProfilingInfo :
         public Mapping::Mapper::PartitionProfilingInfo {
@@ -3640,7 +3601,8 @@ namespace Legion {
       virtual void trigger_dependence_analysis(void);
       virtual ApEvent trigger_thunk(IndexSpace handle, ApEvent insts_ready,
                                     const InstanceSet &mapped_instances,
-                                    const PhysicalTraceInfo &trace_info);
+                                    const PhysicalTraceInfo &trace_info,
+                                    const DomainPoint &color);
       virtual void trigger_commit(void);
       virtual PartitionKind get_partition_kind(void) const;
       virtual void record_completion_effect(ApEvent effect);
@@ -3728,9 +3690,7 @@ namespace Legion {
       // This is a helper method for ReplFillOp
       virtual RtEvent finalize_complete_mapping(RtEvent event) { return event; }
     public:
-      virtual bool query_speculate(void);
-      virtual void resolve_true(bool speculated, bool launched);
-      virtual void resolve_false(bool speculated, bool launched);
+      virtual void predicate_false(void);
     public:
       virtual unsigned find_parent_index(unsigned idx);
       virtual void trigger_commit(void);

@@ -118,6 +118,10 @@ namespace Realm {
   // signal handlers
   //
 
+  namespace ThreadLocal {
+    static REALM_THREAD_LOCAL int error_signal_value = 0;
+  };
+
   static void register_error_signal_handler(void (*handler)(int))
   {
 #if defined(REALM_ON_LINUX) || defined(REALM_ON_MACOS) || defined(REALM_ON_FREEBSD)
@@ -650,6 +654,16 @@ namespace Realm {
       return result;
     }
 
+    Module *Runtime::get_module_untyped(const char *name)
+    {
+      if(runtime_singleton) {
+	return runtime_singleton->get_module_untyped(name);
+      } else {
+	// modules don't exist if we're not initialized yet
+	return 0;
+      }
+    }
+
 
   ////////////////////////////////////////////////////////////////////////
   //
@@ -819,6 +833,7 @@ namespace Realm {
 #ifdef NODE_LOGGING
 	prefix("."),
 #endif
+  num_untriggered_events(0),
 	nodes(0),
 	local_event_free_list(0), local_barrier_free_list(0),
 	local_reservation_free_list(0),
@@ -1636,7 +1651,7 @@ namespace Realm {
       DiskMemory *diskmem;
       if(disk_mem_size > 0) {
         char file_name[30];
-        sprintf(file_name, "disk_file%d.tmp", Network::my_node_id);
+        snprintf(file_name, sizeof file_name, "disk_file%d.tmp", Network::my_node_id);
         Memory m = get_runtime()->next_local_memory_id();
         diskmem = new DiskMemory(m,
                                  disk_mem_size,
@@ -2307,6 +2322,14 @@ namespace Realm {
 	log_runtime.info() << "local processor shutdown tasks complete";
       }
 
+      {
+        size_t n = num_untriggered_events.load();
+        if (n != 0) {
+          log_runtime.fatal() << n << " pending operations during shutdown!";
+          abort();
+        }
+      }
+
       // the operation tables on every rank should be clear of work
       optable.shutdown_check();
 
@@ -2782,6 +2805,16 @@ namespace Realm {
     /*static*/
     void RuntimeImpl::realm_backtrace(int signal)
     {
+      // the signal handler has been called before, it is called again because
+      // an error is occured during printing the trace, to avoid handling signals 
+      // recursively, we just exit.
+      if (ThreadLocal::error_signal_value != 0) {
+        std::cerr << "Signal " << signal 
+                  << " raised inside realm signal handler, previous caught signal " << ThreadLocal::error_signal_value
+                  << std::endl;
+        unregister_error_signal_handler();
+        abort();
+      }
 #if defined(REALM_ON_LINUX) || defined(REALM_ON_MACOS) || defined(REALM_ON_FREEBSD)
       assert((signal == SIGILL) || (signal == SIGFPE) ||
              (signal == SIGABRT) || (signal == SIGSEGV) ||
@@ -2849,7 +2882,7 @@ namespace Realm {
       free(buffer);
       free(funcname);
 #endif
-      unregister_error_signal_handler();
+      ThreadLocal::error_signal_value = signal;
       std::cerr << "Signal " << signal << " received by node " << Network::my_node_id
 #ifdef REALM_ON_WINDOWS
                 << ", process " << GetCurrentProcessId()

@@ -897,40 +897,6 @@ namespace Legion {
     } 
 
     //--------------------------------------------------------------------------
-    bool TaskOp::query_speculate(void)
-    //--------------------------------------------------------------------------
-    {
-      if (mapper == NULL)  
-        mapper = runtime->find_mapper(current_proc, map_id);
-      Mapper::SpeculativeOutput output;
-      output.speculate = false;
-      output.speculate_mapping_only = true;
-      mapper->invoke_task_speculate(this, &output);
-      if (output.speculate && output.speculate_mapping_only)
-      {
-        // Switch any write-discard privileges back to read-write
-        // so we can make sure we get the right data if we end up
-        // predicating false
-        for (unsigned idx = 0; idx < regions.size(); idx++)
-        {
-          RegionRequirement &req = regions[idx];
-          if (HAS_WRITE_DISCARD(req))
-            req.privilege &= ~LEGION_DISCARD_MASK;
-        }
-        return true;
-      }
-      else
-        return false;
-    }
-
-    //--------------------------------------------------------------------------
-    void TaskOp::resolve_true(bool speculated, bool launched)
-    //--------------------------------------------------------------------------
-    {
-      // Nothing to do
-    }
-
-    //--------------------------------------------------------------------------
     void TaskOp::select_sources(const unsigned index, PhysicalManager *target,
                                 const std::vector<InstanceView*> &sources,
                                 std::vector<unsigned> &ranking,
@@ -3525,12 +3491,18 @@ namespace Legion {
           get_depth(), false/*is inner*/, regions, output_regions,
           parent_req_indexes, virtual_mapped, ApEvent::NO_AP_EVENT,
           0/*did*/, false/*inline*/, true/*implicit*/);
-      if (mapper == NULL)
-        mapper = runtime->find_mapper(current_proc, map_id);
-      inner_ctx->configure_context(mapper, task_priority);
       execution_context = inner_ctx;
       execution_context->add_base_gc_ref(SINGLE_TASK_REF);
       return inner_ctx;
+    }
+
+    //--------------------------------------------------------------------------
+    void SingleTask::configure_execution_context(InnerContext *inner_ctx)
+    //--------------------------------------------------------------------------
+    {
+      if (mapper == NULL)
+        mapper = runtime->find_mapper(current_proc, map_id);
+      inner_ctx->configure_context(mapper, task_priority);
     }
 
     //--------------------------------------------------------------------------
@@ -4590,33 +4562,30 @@ namespace Legion {
               is_output_global(idx), is_output_valid(idx));
 
         // Initialize any region tree contexts
-        std::set<RtEvent> execution_events;
         execution_context->initialize_region_tree_contexts(clone_requirements,
-                                version_infos, unmap_events, execution_events);
+                                                  version_infos, unmap_events);
         // Update the physical regions with any padding they might have
         if (variant->needs_padding)
           execution_context->record_padded_fields(variant);
-        // Execution events come from copying over virtual mapping state
-        // which needs to be done before the child task starts
-        if (!execution_events.empty())
-          for (std::set<RtEvent>::const_iterator it = 
-                execution_events.begin(); it != execution_events.end(); it++)
-            wait_on_events.insert(ApEvent(*it));
       }
+      // If we have a predicate event then merge that in here as well
+      if (true_guard.exists())
+        wait_on_events.insert(ApEvent(true_guard));
       // Merge together all the events for the start condition 
       ApEvent start_condition = Runtime::merge_events(NULL, wait_on_events);
-      // Take all the locks in order in the proper way
+      // Need a copy of any locks to release on the stack since the 
+      // atomic_locks cannot be touched after we launch the task
+      std::vector<Reservation> to_release;
       if (!atomic_locks.empty())
       {
+        // Take all the locks in order in the proper way
+        to_release.reserve(atomic_locks.size());
         for (std::map<Reservation,bool>::const_iterator it = 
               atomic_locks.begin(); it != atomic_locks.end(); it++)
         {
           start_condition = Runtime::acquire_ap_reservation(it->first, 
                                           it->second, start_condition);
-          // We can also issue the release now dependent on this
-          // task being complete, this way we do it before we launch
-          // the task and the atomic_locks might be cleaned up
-          Runtime::release_reservation(it->first, single_task_termination);
+          to_release.push_back(it->first);
         }
       }
       // STEP 3: Finally we get to launch the task
@@ -4651,7 +4620,7 @@ namespace Legion {
           if ((*it) < Mapping::PMID_LEGION_FIRST)
             realm_measurements.insert((Realm::ProfilingMeasurementID)(*it));
           else if ((*it) == Mapping::PMID_RUNTIME_OVERHEAD)
-            execution_context->initialize_overhead_tracker();
+            execution_context->initialize_overhead_profiler();
           else
             assert(false); // should never get here
         }
@@ -4678,6 +4647,14 @@ namespace Legion {
           }
         }
       }
+      // Make a RtEvent copy of the false_guard in the case that we
+      // are going to execute this task with a predicate and we'll
+      // need to launch the misspeculation task after we launch the 
+      // actual task itself. We have to pull this onto the stack before 
+      // launching the task itself as the task might ultimately be cleaned
+      // up before we're done executing this function so we can't touch 
+      // any member variables after we launch it
+      const RtEvent misspeculation_precondition = RtEvent(false_guard);
       if (runtime->legion_spy_enabled)
       {
         LegionSpy::log_variant_decision(unique_op_id, selected_variant);
@@ -4689,10 +4666,7 @@ namespace Legion {
         for (unsigned idx = 0; idx < futures.size(); idx++)
         {
           FutureImpl *impl = futures[idx].impl;
-          if (impl == NULL)
-            continue;
-          if (impl->get_ready_event().exists())
-            LegionSpy::log_future_use(unique_op_id, impl->get_ready_event());
+          LegionSpy::log_future_use(unique_op_id, impl->did);
         }
       }
       // If this is a leaf task variant, then we can immediately trigger
@@ -4718,13 +4692,59 @@ namespace Legion {
             !start_condition.has_triggered_faultaware(poisoned))
           start_condition.wait_faultaware(poisoned);
         if (poisoned)
-          execution_context->raise_poison_exception();
-        variant->dispatch_inline(launch_processor, execution_context);
+        {
+          // Check to see if we were poisoned because of prediation
+          // or because of an actual fault
+          bool mispredicated = false;
+          true_guard.has_triggered_faultaware(mispredicated);
+          if (!mispredicated)
+            execution_context->raise_poison_exception();
+          // No need to release the reservations because they were
+          // poisoned out from being executed
+        }
+        else
+        {
+          variant->dispatch_inline(launch_processor, execution_context);
+          // Release any reservations that we took on behalf of this task
+          if (!to_release.empty())
+          {
+            for (std::vector<Reservation>::const_iterator it = 
+                  to_release.begin(); it != to_release.end(); it++)
+              Runtime::release_reservation(*it);
+          }
+        }
       }
       else
+      {
         task_launch_event = variant->dispatch_task(launch_processor, this,
-                            execution_context, start_condition, true_guard,
+                            execution_context, start_condition,
                             task_priority, profiling_requests);
+        // Release any reservations that we took on behalf of this task
+        // Note this happens before protection of the event for predication
+        // because the acquires were also subject to poisoning so we either
+        // want all the releases to be done or poisoned the same as the acquires
+        if (!to_release.empty())
+        {
+          for (std::vector<Reservation>::const_iterator it = 
+                to_release.begin(); it != to_release.end(); it++)
+            Runtime::release_reservation(*it, task_launch_event);
+        }
+        // If this task was predicated then we need to protect everything that
+        // comes after this from the predication poison
+        if (true_guard.exists())
+        {
+          task_launch_event = Runtime::ignorefaults(task_launch_event);
+          // Also merge in the original preconditions so that is reflected 
+          // downstream in the event chain still for things like postconditions
+          // Make sure to prune out the true guard that we added here
+          wait_on_events.erase(ApEvent(true_guard));
+          if (!wait_on_events.empty())
+          {
+            wait_on_events.insert(task_launch_event);
+            task_launch_event = Runtime::merge_events(NULL, wait_on_events);
+          }
+        }
+      }
       if (chain_task_termination.exists())
       {
         if (chain_precondition.exists())
@@ -4736,13 +4756,13 @@ namespace Legion {
       // Finally if this is a predicated task and we have a speculative
       // guard then we need to launch a meta task to handle the case
       // where the task misspeculates
-      if (false_guard.exists())
+      if (misspeculation_precondition.exists())
       {
         MisspeculationTaskArgs args(this);
         // Make sure this runs on an application processor where the
         // original task was going to go 
         runtime->issue_runtime_meta_task(args, LG_LATENCY_WORK_PRIORITY, 
-                                         RtEvent(false_guard));
+                                         misspeculation_precondition);
         // Fun little trick here: decrement the outstanding meta-task
         // counts for the mis-speculation task in case it doesn't run
         // If it does run, we'll increment the counts again
@@ -4826,14 +4846,15 @@ namespace Legion {
           rez.serialize(orig_task);
           rez.serialize(orig_length);
           rez.serialize(orig, orig_length);
-          if (execution_context->overhead_tracker)
+          if (execution_context->overhead_profiler)
           {
             rez.serialize<bool>(true);
-            rez.serialize(*execution_context->overhead_tracker);
+            // Only pack the bits that we need for the profiling response
+            rez.serialize((const void*)execution_context->overhead_profiler,
+                sizeof(Mapping::ProfilingMeasurements::RuntimeOverhead));
           }
           else
             rez.serialize<bool>(false);
-          
         }
         runtime->send_remote_task_profiling_response(orig_proc, rez);
       }
@@ -4859,12 +4880,12 @@ namespace Legion {
             memcpy(info.buffer, orig, orig_length);
             if (info.task_response)
             {
-              // If we had an overhead tracker 
+              // If we had an overhead profiler
               // see if this is the callback for the task
-              if (execution_context->overhead_tracker != NULL)
+              if (execution_context->overhead_profiler != NULL)
                 // This is the callback for the task itself
                 info.profiling_responses.attach_overhead(
-                    execution_context->overhead_tracker);
+                    execution_context->overhead_profiler);
             }
             return;
           }
@@ -4878,12 +4899,12 @@ namespace Legion {
         info.fill_response = task_prof->fill;
         if (info.task_response)
         {
-          // If we had an overhead tracker 
+          // If we had an overhead profiler
           // see if this is the callback for the task
-          if (execution_context->overhead_tracker != NULL)
+          if (execution_context->overhead_profiler!= NULL)
             // This is the callback for the task itself
             info.profiling_responses.attach_overhead(
-                execution_context->overhead_tracker);
+                execution_context->overhead_profiler);
         }
         mapper->invoke_task_report_profiling(this, &info);
       }
@@ -5016,9 +5037,7 @@ namespace Legion {
           get_depth(), v->is_inner(), regions, output_regions,
           parent_req_indexes, virtual_mapped, execution_fence_event, 0/*did*/, 
           inline_task, concurrent_task || parent_ctx->is_concurrent_context());
-      if (mapper == NULL)
-        mapper = runtime->find_mapper(current_proc, map_id);
-      inner_ctx->configure_context(mapper, task_priority);
+      configure_execution_context(inner_ctx);
       inner_ctx->add_base_gc_ref(SINGLE_TASK_REF);
       return inner_ctx;
     }
@@ -5199,7 +5218,6 @@ namespace Legion {
                       "call on mapper %s. Mapper failed to specify an slices "
                       "for task %s (ID %lld).", mapper->get_mapper_name(),
                       get_task_name(), get_unique_id())
-
 #ifdef DEBUG_LEGION
       size_t total_points = 0;
 #endif
@@ -5358,12 +5376,12 @@ namespace Legion {
       this->redop = rhs->redop;
       if (this->redop != 0)
       {
+        this->reduction_op = rhs->reduction_op;
         this->deterministic_redop = rhs->deterministic_redop;
         if (!this->deterministic_redop)
         {
           // Only need to initialize this if we're not doing a 
           // deterministic reduction operation
-          this->reduction_op = rhs->reduction_op;
           this->serdez_redop_fns = rhs->serdez_redop_fns;
         }
       }
@@ -5555,12 +5573,12 @@ namespace Legion {
       derez.deserialize(redop);
       if (redop > 0)
       {
+        reduction_op = Runtime::get_reduction_op(redop);
         derez.deserialize(deterministic_redop);
-        // Only need to fill these in if we're not doing a 
-        // deterministic reduction operation
         if (!deterministic_redop)
         {
-          reduction_op = Runtime::get_reduction_op(redop);
+          // Only need to fill this in if we're not doing a 
+          // deterministic reduction operation
           serdez_redop_fns = Runtime::get_serdez_redop_fns(redop);
         }
       }
@@ -5897,7 +5915,7 @@ namespace Legion {
               parent_ctx->get_depth(), get_provenance());
       if (runtime->legion_spy_enabled)
         LegionSpy::log_future_creation(unique_op_id, 
-                impl->get_ready_event(), index_point);
+                                       impl->did, index_point);
       return Future(impl);
     }
 
@@ -6083,12 +6101,10 @@ namespace Legion {
     } 
 
     //--------------------------------------------------------------------------
-    void IndividualTask::resolve_false(bool speculated, bool launched)
+    void IndividualTask::predicate_false(void)
     //--------------------------------------------------------------------------
     {
-      // If we already launched, then return, otherwise continue
-      // through and do the work to clean up the task 
-      if (launched || elide_future_return)
+      if (elide_future_return)
         return;
       // Set the future to the false result
       if (predicate_false_future.impl != NULL)
@@ -6520,7 +6536,7 @@ namespace Legion {
         rez.serialize<bool>(valid_output_regions[idx]);
       rez.serialize(orig_task);
       rez.serialize(remote_unique_id);
-      rez.serialize(parent_ctx->did);
+      parent_ctx->pack_task_context(rez);
       rez.serialize(top_level_task);
       if (!elide_future_return)
       {
@@ -6566,8 +6582,9 @@ namespace Legion {
       derez.deserialize(orig_task);
       derez.deserialize(remote_unique_id);
       set_current_proc(current);
-      DistributedID context_did;
-      derez.deserialize(context_did);
+      // Figure out what our parent context is
+      RtEvent ctx_ready;
+      parent_ctx = InnerContext::unpack_task_context(derez, runtime, ctx_ready);
       derez.deserialize(top_level_task);
       // Quick check to see if we've been sent back to our original node
       if (!is_remote())
@@ -6590,10 +6607,6 @@ namespace Legion {
         deactivate();
         return false;
       }
-      // Figure out what our parent context is
-      RtEvent ctx_ready;
-      parent_ctx = 
-        runtime->find_or_request_inner_context(context_did, ctx_ready);
       if (!elide_future_return)
       {
         result = FutureImpl::unpack_future(runtime, derez);
@@ -7111,7 +7124,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void PointTask::resolve_false(bool speculated, bool launched)
+    void PointTask::predicate_false(void)
     //--------------------------------------------------------------------------
     {
       // should never be called
@@ -7668,8 +7681,6 @@ namespace Legion {
       current_proc = proc;
       shard_manager = manager;
       shard_barrier = shard_manager->get_shard_task_barrier();
-      if (manager->original_task != NULL)
-        context_did = manager->original_task->get_context()->did;
       // Only make our termination event on the node where the shard will run
       if (runtime->find_address_space(proc) == runtime->address_space)
         single_task_termination = Runtime::create_ap_user_event(NULL);
@@ -7766,7 +7777,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ShardTask::resolve_false(bool speculated, bool launched)
+    void ShardTask::predicate_false(void)
     //--------------------------------------------------------------------------
     {
       assert(false);
@@ -7931,7 +7942,7 @@ namespace Legion {
     {
       RezCheck z(rez);
       pack_single_task(rez, target);
-      rez.serialize(context_did);
+      parent_ctx->pack_task_context(rez);
       return false;
     }
 
@@ -7947,18 +7958,15 @@ namespace Legion {
       // Save this on the stack to prevent it being overwritten by unpack_single
       const ApUserEvent temp_single_task_termination = single_task_termination;
       unpack_single_task(derez, ready_events);
+      RtEvent ctx_ready;
+      parent_ctx = InnerContext::unpack_task_context(derez, runtime, ctx_ready);
+      if (ctx_ready.exists())
+        ready_events.insert(ctx_ready);
       // Restore the single task termination event
 #ifdef DEBUG_LEGION
       assert(!single_task_termination.exists());
 #endif
       single_task_termination = temp_single_task_termination;
-      derez.deserialize(context_did);
-      // Figure out what our parent context is
-      RtEvent ctx_ready;
-      parent_ctx = 
-        runtime->find_or_request_inner_context(context_did, ctx_ready);
-      if (ctx_ready.exists())
-        ready_events.insert(ctx_ready);
       return false;
     }
 
@@ -8038,9 +8046,6 @@ namespace Legion {
           parent_req_indexes, virtual_mapped, execution_fence_event,
           shard_manager, false/*inline task*/, true/*implicit*/);
       repl_ctx->add_base_gc_ref(SINGLE_TASK_REF);
-      if (mapper == NULL)
-        mapper = runtime->find_mapper(current_proc, map_id);
-      repl_ctx->configure_context(mapper, task_priority);
       // Save the execution context early since we'll need it
       execution_context = repl_ctx;
       // Wait until all the other shards are ready too
@@ -8580,8 +8585,7 @@ namespace Legion {
           lo[dim] = extents[c];
           hi[dim] = extents[c + 1] - 1;
         }
-        forest->set_pending_space_domain(
-          child->handle, Domain(lo, hi), runtime->address_space);
+        forest->set_pending_space_domain(child->handle, Domain(lo, hi));
       }
 
       // Finally, compute the extents of the root index space and return it
@@ -8625,14 +8629,13 @@ namespace Legion {
             << ")] setting " << root_domain << " to index space " << std::hex
             << parent->handle.get_id();
 
-          if (parent->set_domain(root_domain, runtime->address_space))
+          if (parent->set_domain(root_domain))
             delete parent;
         }
         // For locally indexed output regions, sizes of subregions are already
         // set when they are fianlized by the point tasks. So we only need to
         // initialize the root index space by taking a union of subspaces.
-        else if (parent->set_output_union(all_output_sizes[idx],
-                                          runtime->address_space))
+        else if (parent->set_output_union(all_output_sizes[idx]))
           delete parent;
       }
     }
@@ -8899,7 +8902,7 @@ namespace Legion {
           LegionSpy::log_phase_barrier_wait(unique_op_id, e);
         }
         LegionSpy::log_future_creation(unique_op_id, 
-              reduction_future.impl->get_ready_event(), index_point);
+              reduction_future.impl->did, index_point);
       }
       return reduction_future;
     }
@@ -9345,13 +9348,9 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void IndexTask::resolve_false(bool speculated, bool launched)
+    void IndexTask::predicate_false(void)
     //--------------------------------------------------------------------------
     {
-      // If we already launched, then we can just return
-      // otherwise continue through to do the cleanup work
-      if (launched)
-        return;
       RtEvent execution_condition;
       // Fill in the index task map with the default future value
       if (redop == 0)
@@ -9644,7 +9643,7 @@ namespace Legion {
       if (redop != 0)
       {
         // Set the future if we actually ran the task or we speculated
-        if (predication_state != RESOLVE_FALSE_STATE)
+        if (predication_state != PREDICATED_FALSE_STATE)
         {
 #ifdef DEBUG_LEGION
           assert(!reduction_instances.empty());
@@ -10899,7 +10898,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void SliceTask::resolve_false(bool speculated, bool launched)
+    void SliceTask::predicate_false(void)
     //--------------------------------------------------------------------------
     {
       // should never be called
@@ -11109,7 +11108,7 @@ namespace Legion {
       rez.serialize(index_owner);
       rez.serialize(remote_unique_id);
       rez.serialize(origin_mapped);
-      rez.serialize(parent_ctx->did);
+      parent_ctx->pack_task_context(rez);
       rez.serialize(internal_space);
       if (!elide_future_return)
       {
@@ -11182,8 +11181,8 @@ namespace Legion {
       derez.deserialize(index_owner);
       derez.deserialize(remote_unique_id); 
       derez.deserialize(origin_mapped);
-      DistributedID context_did;
-      derez.deserialize(context_did);
+      RtEvent ctx_ready;
+      parent_ctx = InnerContext::unpack_task_context(derez, runtime, ctx_ready);
       derez.deserialize(internal_space);
       if (runtime->legion_spy_enabled)
         LegionSpy::log_slice_slice(remote_unique_id, get_unique_id());
@@ -11195,18 +11194,9 @@ namespace Legion {
       num_uncommitted_points = num_points;
       // Remote slice tasks are always resolved
       resolved = true;
-      // Check to see if we ended up back on the original node
       // We have to do this before unpacking the points
-      if (is_remote())
-      {
-        RtEvent ctx_ready;
-        parent_ctx =
-          runtime->find_or_request_inner_context(context_did, ctx_ready);
-        if (ctx_ready.exists() && !ctx_ready.has_triggered())
-          ctx_ready.wait();
-      }
-      else
-        parent_ctx = index_owner->parent_ctx;
+      if (ctx_ready.exists() && !ctx_ready.has_triggered())
+        ctx_ready.wait();
       if (!elide_future_return)
       {
         if (redop == 0)
@@ -11556,7 +11546,17 @@ namespace Legion {
       assert(!elide_future_return);
 #endif
       FutureInstance *result = NULL;
-      if (predicate_false_future.impl != NULL)
+      if (reduction_op != NULL)
+      {
+#ifdef DEBUG_LEGION
+        assert(reduction_op->identity != NULL);
+        assert(predicate_false_future.impl == NULL);
+        assert(predicate_false_size == 0);
+#endif
+        result = FutureInstance::create_local(reduction_op->identity,
+            reduction_op->sizeof_rhs, false/*own*/, runtime);
+      }
+      else if (predicate_false_future.impl != NULL)
       {
         FutureInstance *canonical =
           predicate_false_future.impl->get_canonical_instance();

@@ -74,7 +74,6 @@ ifeq ($(shell uname -s),Darwin)
   ifeq ($(findstring Apple,$(shell $(CXX) --version)),Apple)
     APPLECLANG = 1
     REALM_LIMIT_SYMBOL_VISIBILITY=0
-    $(warning "Apple Clang is a weird compiler and untested by Legion CI. Tread lightly...")
   else
     APPLECLANG = 0
   endif
@@ -499,7 +498,7 @@ ifeq ($(strip $(USE_HIP)),1)
       HIPCC_FLAGS	+= -O2
     endif
     ifneq ($(strip $(HIP_ARCH)),)
-      HIPCC_FLAGS	+= --offload-target=$(HIP_ARCH)
+      HIPCC_FLAGS	+= --offload-arch=$(HIP_ARCH)
     endif
     LEGION_LD_FLAGS	+= -lm -L$(HIP_PATH)/lib -lamdhip64
   else ifeq ($(strip $(HIP_TARGET)),CUDA)
@@ -656,10 +655,14 @@ ifeq ($(strip $(GPU_ARCH)),ampere)
 override GPU_ARCH = 80
 NVCC_FLAGS	+= -DAMPERE_ARCH
 endif
+ifeq ($(strip $(GPU_ARCH)),hopper)
+override GPU_ARCH = 90
+NVCC_FLAGS	+= -DHOPPER_ARCH
+endif
 
 ifeq ($(strip $(GPU_ARCH)),auto)
   # detect based on what nvcc supports
-  ALL_ARCHES = 20 30 32 35 37 50 52 53 60 61 62 70 72 75 80
+  ALL_ARCHES = 20 30 32 35 37 50 52 53 60 61 62 70 72 75 80 90
   override GPU_ARCH = $(shell for X in $(ALL_ARCHES) ; do \
     $(NVCC) -gencode arch=compute_$$X,code=sm_$$X -cuda -x c++ /dev/null -o /dev/null 2> /dev/null && echo $$X; \
   done)
@@ -813,6 +816,35 @@ ifeq ($(strip $(USE_ZLIB)),1)
   LEGION_CC_FLAGS += -DLEGION_USE_ZLIB
   LEGION_LD_FLAGS += -l$(ZLIB_LIBNAME)
   SLIB_LEGION_DEPS += -l$(ZLIB_LIBNAME)
+endif
+
+# capture backtrace using unwind
+REALM_BACKTRACE_USE_UNWIND ?= 1
+ifeq ($(strip $(REALM_BACKTRACE_USE_UNWIND)),1)
+  REALM_CC_FLAGS += -DREALM_USE_UNWIND
+endif
+
+# analyze backtrace using libdw
+REALM_BACKTRACE_USE_LIBDW ?= 0
+ifeq ($(strip $(REALM_BACKTRACE_USE_LIBDW)),1)
+  ifndef LIBDW_PATH
+    # we try to find header in /usr/include and lib in /usr/lib/x86_64-linux-gnu
+    LIBDW_HEADER := $(wildcard /usr/include/elfutils/libdwfl.h)
+    ifeq ($(LIBDW_HEADER),)
+      $(error Can not find elfutils/libdwfl.h in /usr/include, please set LIBDW_PATH explicitly)
+    endif
+    LIBDW_LIBRARY := $(wildcard /usr/lib/*/libdw.so)
+    ifeq ($(LIBDW_LIBRARY),)
+      $(error Can not find libdw in /usr/lib/x86_64-linux-gnu, please set LIBDW_PATH explicitly)
+    endif
+    LIBDW_PATH = /usr
+    LIBDW_LIBRARY_PATH := $(abspath $(dir $(LIBDW_LIBRARY)))
+  else
+    LIBDW_LIBRARY_PATH := $(LIBDW_PATH)/lib
+  endif
+  REALM_CC_FLAGS += -DREALM_USE_LIBDW
+  INC_FLAGS += -I$(LIBDW_PATH)/include
+  LEGION_LD_FLAGS += -L$(LIBDW_LIBRARY_PATH) -ldw
 endif
 
 

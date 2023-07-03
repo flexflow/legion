@@ -40,6 +40,7 @@ namespace Realm {
     /*static*/ const Processor Processor::NO_PROC = { 0 }; 
 
   namespace ThreadLocal {
+    // Assume zero initialized
     REALM_THREAD_LOCAL Processor current_processor = { 0 };
     
     // if nonzero, prevents application thread from yielding execution
@@ -133,12 +134,6 @@ namespace Realm {
 				   const void *user_data /*= 0*/,
 				   size_t user_data_len /*= 0*/) const
     {
-      // some sanity checks first
-      if(codedesc.type() != TypeConv::from_cpp_type<TaskFuncPtr>()) {
-	log_taskreg.fatal() << "attempt to register a task function of improper type: " << codedesc.type();
-	assert(0);
-      }
-
       // TODO: special case - registration on a local processor with a raw function pointer and no
       //  profiling requests - can be done immediately and return NO_EVENT
 
@@ -150,7 +145,6 @@ namespace Realm {
 						   finish_event_impl,
 						   ID(finish_event).event_generation(),
 						   prs);
-      get_runtime()->optable.add_local_operation(finish_event, tro);
       // we haven't told anybody about this operation yet, so cancellation really shouldn't
       //  be possible
 #ifndef NDEBUG
@@ -246,12 +240,6 @@ namespace Realm {
 						      const void *user_data /*= 0*/,
 						      size_t user_data_len /*= 0*/)
     {
-      // some sanity checks first
-      if(codedesc.type() != TypeConv::from_cpp_type<TaskFuncPtr>()) {
-	log_taskreg.fatal() << "attempt to register a task function of improper type: " << codedesc.type();
-	assert(0);
-      }
-
       // TODO: special case - registration on local processord with a raw function pointer and no
       //  profiling requests - can be done immediately and return NO_EVENT
 
@@ -263,7 +251,6 @@ namespace Realm {
 						   finish_event_impl,
 						   ID(finish_event).event_generation(),
 						   prs);
-      get_runtime()->optable.add_local_operation(finish_event, tro);
       // we haven't told anybody about this operation yet, so cancellation really shouldn't
       //  be possible
 #ifndef NDEBUG
@@ -472,7 +459,7 @@ namespace Realm {
 
     ProcessorImpl::ProcessorImpl(Processor _me, Processor::Kind _kind,
                                  int _num_cores)
-      : me(_me), kind(_kind), num_cores(_num_cores)
+      : free_local_events(get_runtime()->local_events, Network::my_node_id, get_runtime()->local_event_free_list), me(_me), kind(_kind), num_cores(_num_cores)
     {
     }
 
@@ -486,6 +473,23 @@ namespace Realm {
 
     void ProcessorImpl::shutdown(void)
     {
+    }
+
+    GenEventImpl* ProcessorImpl::create_genevent(void)
+    {
+      GenEventImpl *impl = nullptr;
+      
+      impl = free_local_events.alloc_entry();
+      assert(impl != nullptr);
+      // Remember the processor that allocated it
+      impl->owning_processor = this;
+      return impl;
+    }
+
+    void ProcessorImpl::free_genevent(GenEventImpl *e)
+    {
+      assert(e->owning_processor == this);
+      free_local_events.free_entry(e);
     }
 
     void ProcessorImpl::execute_task(Processor::TaskFuncID func_id,
@@ -784,8 +788,6 @@ namespace Realm {
       // create a task object and insert it into the queue
       Task *task = new Task(me, func_id, args, arglen, reqs,
                             start_event, finish_event, finish_gen, priority);
-      get_runtime()->optable.add_local_operation(finish_event->make_event(finish_gen),
-						 task);
 
       enqueue_or_defer_task(task, start_event, &deferred_spawn_cache);
     }
@@ -1052,8 +1054,6 @@ namespace Realm {
     // create a task object for this
     Task *task = new Task(me, func_id, args, arglen, reqs,
 			  start_event, finish_event, finish_gen, priority);
-    get_runtime()->optable.add_local_operation(finish_event->make_event(finish_gen),
-					       task);
 
     enqueue_or_defer_task(task, start_event, &deferred_spawn_cache);
   }
@@ -1062,6 +1062,12 @@ namespace Realm {
 					 CodeDescriptor& codedesc,
 					 const ByteArrayRef& user_data)
   {
+    // make sure we have a function of the right type
+    if(codedesc.type() != TypeConv::from_cpp_type<Processor::TaskFuncPtr>()) {
+      log_taskreg.fatal() << "attempt to register a task function of improper type: " << codedesc.type();
+      assert(0);
+    }
+
     // see if we have a function pointer to register
     Processor::TaskFuncPtr fnptr;
     const FunctionPointerImplementation *fpi = codedesc.find_impl<FunctionPointerImplementation>();

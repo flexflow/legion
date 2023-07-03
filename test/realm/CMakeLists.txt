@@ -63,6 +63,9 @@ if(Legion_USE_CUDA)
 
   list(APPEND REALM_TESTS cuda_arrays)
   set(CUDASRC_cuda_arrays cuda_arrays_gpu.cu)
+
+  list(APPEND REALM_TESTS task_stream)
+  set(CUDASRC_task_stream task_stream_gpu.cu)
 endif()
 
 if(Legion_USE_HIP)
@@ -73,10 +76,15 @@ if(Legion_USE_HIP)
   # some tests have HIP source files too
   set(HIPSRC_memspeed memspeed_gpu.cu)
   set(HIPSRC_simple_reduce simple_reduce_gpu.cu)
+  # FIXME: https://github.com/StanfordLegion/legion/issues/1476
+  # set(HIPSRC_multiaffine multiaffine_gpu.cu)
 
   # FIXME: https://github.com/StanfordLegion/legion/issues/1308
   # list(APPEND REALM_TESTS cuda_arrays)
   # set(HIPSRC_cuda_arrays cuda_arrays_gpu.cu)
+
+  list(APPEND REALM_TESTS task_stream)
+  set(HIPSRC_task_stream task_stream_gpu.cu)
 endif()
 
 foreach(test IN LISTS REALM_TESTS)
@@ -112,6 +120,7 @@ set(TESTARGS_compqueue         -ll:cpu 4)
 set(TESTARGS_event_subscribe   -ll:cpu 4)
 set(TESTARGS_deferred_allocs   -ll:gsize 0 -all)
 set(TESTARGS_scatter           -p1 2 -p2 2)
+set(TESTARGS_alltoall          -ll:csize 1024)
 set(TESTARGS_simple_reduce     -all)
 set(TESTARGS_sparse_construct  -verbose)
 set(TESTARGS_cuda_arrays       -ll:gpu 1)

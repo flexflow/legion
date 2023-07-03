@@ -405,15 +405,60 @@ endif()
 #------------------------------------------------------------------------------#
 option(Legion_USE_CUDA "Enable support for the CUDA runtime" OFF)
 if(Legion_USE_CUDA)
+  find_package(CUDA REQUIRED)
   set(Legion_CUDA_ARCH "" CACHE STRING "Comma-separated list of CUDA architectures to build for (e.g. 60,70)")
   option(Legion_CUDA_DYNAMIC_LOAD "Load cuda libraries at runtime" OFF)
+
+  # Fill in the most compatible set of architectures we support
+  if("${Legion_CUDA_ARCH}" STREQUAL "")
+    if (${CUDA_VERSION_STRING} VERSION_LESS "11.5")
+      # Prior to 11.5, we don't have -arch=all and have to list the architectures out manually
+      if (${CUDA_VERSION_STRING} VERSION_GREATER_EQUAL "3.2" AND ${CUDA_VERSION_STRING} VERSION_LESS "9.0")
+        list(APPEND Legion_CUDA_ARCH 20)
+      endif ()
+      if (${CUDA_VERSION_STRING} VERSION_GREATER_EQUAL "5.0" AND ${CUDA_VERSION_STRING} VERSION_LESS "11.0")
+        list(APPEND Legion_CUDA_ARCH 30)
+      endif ()
+      if (${CUDA_VERSION_STRING} VERSION_GREATER_EQUAL "5.0" AND ${CUDA_VERSION_STRING} VERSION_LESS "12.0")
+        list(APPEND Legion_CUDA_ARCH 35)
+      endif ()
+      if (${CUDA_VERSION_STRING} VERSION_GREATER_EQUAL "6.0" AND ${CUDA_VERSION_STRING} VERSION_LESS "12.0")
+        list(APPEND Legion_CUDA_ARCH 50)
+      endif ()
+      if (${CUDA_VERSION_STRING} VERSION_GREATER_EQUAL "8.0")
+        list(APPEND Legion_CUDA_ARCH 60)
+      endif ()
+      if (${CUDA_VERSION_STRING} VERSION_GREATER_EQUAL "9.0")
+        list(APPEND Legion_CUDA_ARCH 70)
+      endif ()
+      if (${CUDA_VERSION_STRING} VERSION_GREATER_EQUAL "11.0")
+        list(APPEND Legion_CUDA_ARCH 80)
+      endif ()
+    else ()
+        # New with 11.5, nvcc supports 'all-major' which does all this for us
+        set(CUDA_GENCODE "-arch all-major")
+    endif ()
+  else ()
+      # If the user specified a specific gencode to use, use that
+      string(REPLACE "," ";" Legion_CUDA_ARCH "${Legion_CUDA_ARCH}")
+  endif ()
+
+  if (Legion_CUDA_ARCH)
+    list(SORT Legion_CUDA_ARCH)
+    set(CUDA_GENCODE "${Legion_CUDA_ARCH}")
+    # Add all the specified architectures we support
+    string(REGEX REPLACE "([0-9]+)" "-gencode arch=compute_\\1,code=sm_\\1" CUDA_GENCODE "${CUDA_GENCODE}")
+    list(GET Legion_CUDA_ARCH -1 COMPUTE_ARCH)
+    # For the last architecture we support, add PTX
+    list(APPEND CUDA_GENCODE "-gencode arch=compute_${COMPUTE_ARCH},code=compute_${COMPUTE_ARCH}")
+  endif ()
 
   if(NOT BUILD_SHARED_LIBS)
     set(CUDA_USE_STATIC_CUDA_RUNTIME ON)
   else()
     set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
   endif()
-  find_package(CUDA REQUIRED)
+
   install(FILES ${Legion_SOURCE_DIR}/cmake/FindCUDA.cmake
     DESTINATION ${CMAKE_INSTALL_DATADIR}/Legion/cmake
   )
@@ -464,25 +509,41 @@ set(Legion_HIP_TARGET "ROCM" CACHE STRING "Select HIP target ${Legion_HIP_TARGET
 set_property(CACHE Legion_HIP_TARGET PROPERTY STRINGS ${Legion_HIP_TARGETS})
 if(Legion_USE_HIP)
   if (Legion_HIP_TARGET STREQUAL "CUDA")
+    find_package(CUDA REQUIRED)
     set(Legion_CUDA_ARCH "" CACHE STRING "Comma-separated list of CUDA architectures to build for (e.g. 60,70)")
+
+    if("${Legion_CUDA_ARCH}" STREQUAL "")
+      set(CUDA_GENCODE "")
+    else()
+      string(REPLACE "," ";" CUDA_GENCODE "${Legion_CUDA_ARCH}")
+      string(REGEX REPLACE "([0-9]+)" "-gencode arch=compute_\\1,code=sm_\\1" CUDA_GENCODE "${CUDA_GENCODE}")
+    endif()
 
     if(NOT BUILD_SHARED_LIBS)
       set(CUDA_USE_STATIC_CUDA_RUNTIME ON)
     else()
       set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
     endif()
-    find_package(CUDA REQUIRED)
+
     install(FILES ${Legion_SOURCE_DIR}/cmake/FindCUDA.cmake
       DESTINATION ${CMAKE_INSTALL_DATADIR}/Legion/cmake
     )
     install(FILES ${Legion_SOURCE_DIR}/cmake/newcmake/FindCUDA.cmake
       DESTINATION ${CMAKE_INSTALL_DATADIR}/Legion/cmake/newcmake
     )
-  set(HIPCC_FLAGS "${HIPCC_FLAGS} -D__HIP_PLATFORM_NVCC__")
+    set(HIPCC_FLAGS "${HIPCC_FLAGS} -D__HIP_PLATFORM_NVCC__")
   endif()
 
   if (Legion_HIP_TARGET STREQUAL "ROCM")
+    find_package(HIP REQUIRED)
     set(Legion_HIP_ARCH "" CACHE STRING "Comma-separated list of HIP architectures to build for (e.g. gfx906,gfx908)")
+
+    set(HIPCC_FLAGS "-fno-strict-aliasing")
+    if("${Legion_HIP_ARCH}" STREQUAL "")
+      set(HIP_GENCODE "")
+    else()
+      set(HIP_GENCODE "--offload-arch=${Legion_HIP_ARCH}")
+    endif()
 
     if(BUILD_SHARED_LIBS)
       set(HIPCC_FLAGS "${HIPCC_FLAGS} -fPIC")
@@ -491,21 +552,12 @@ if(Legion_USE_HIP)
     install(FILES ${Legion_SOURCE_DIR}/cmake/FindHIP.cmake
       DESTINATION ${CMAKE_INSTALL_DATADIR}/Legion/cmake
     )
-    set(HIPCC_FLAGS "-fno-strict-aliasing")
-    if("${Legion_HIP_ARCH}" STREQUAL "")
-      set(HIP_GENCODE "")
-    else()
-      set(HIP_GENCODE "--offload-target=${Legion_HIP_ARCH}")
-    endif()
   endif()
-
-  # find the hip library
-  find_package(HIP REQUIRED)
 
   # define variable for legion_defines.h
   set(LEGION_USE_HIP ON)
 
-  option(Legion_GPU_REDUCTIONS "Support reductions natively on GPU" ON)
+  option(Legion_GPU_REDUCTIONS "Support reductions natively on GPU" OFF)
   if(Legion_GPU_REDUCTIONS)
     set(LEGION_GPU_REDUCTIONS ON)
   endif()
@@ -677,6 +729,19 @@ if(Legion_USE_NVTX)
   endif()
 endif()
 
+# Backtrace configuration
+#------------------------------------------------------------------------------#
+option(Legion_BACKTRACE_USE_UNWIND "Use unwind to capture backtrace" ON)
+if(Legion_BACKTRACE_USE_UNWIND)
+  set(REALM_USE_UNWIND ON)
+endif()
+
+option(Legion_BACKTRACE_USE_LIBDW "Use libdw to analyze backtrace" OFF)
+if(Legion_BACKTRACE_USE_LIBDW)
+  find_package(LIBDW)
+  set(REALM_USE_LIBDW ON)
+endif()
+
 #------------------------------------------------------------------------------#
 # Miscelaneous other options
 #------------------------------------------------------------------------------#
@@ -692,6 +757,8 @@ set(REALM_MAX_DIM ${Legion_MAX_DIM})
 #  sure they're big enough for your use case
 set(Legion_MAX_FIELDS 512 CACHE STRING
     "Maximum number of fields allocated to a single field space -- MUST be a power of two.")
+set(Legion_DEFAULT_LOCAL_FIELDS 4 CACHE STRING
+    "Number of slots in a field space reserved for local fields -- MUST be smaller than or equal to Legion_MAX_FIELDS")
 set(Legion_MAX_NUM_NODES 1024 CACHE STRING
     "Maximum number of nodes supported by the runtime -- MUST be a power of two.")
 set(Legion_MAX_NUM_PROCS 64 CACHE STRING
@@ -715,6 +782,10 @@ if (NOT is_pow_two)
   message(FATAL_ERROR "Legion_MAX_FIELDS must be a power of two.")
 endif()
 
+if (${Legion_DEFAULT_LOCAL_FIELDS} GREATER ${Legion_MAX_FIELDS})
+  message(FATAL_ERROR "Legion_DEFAULT_LOCAL_FIELDS must be smaller than or equal to Legion_MAX_FIELDS.")
+endif()
+
 is_power_of_two(${Legion_MAX_NUM_NODES} is_pow_two)
 if (NOT is_pow_two)
   message(FATAL_ERROR "Legion_MAX_NUM_NODES must be a power of two.")
@@ -727,6 +798,7 @@ endif()
 
 # define variables for legion_defines.h
 set(LEGION_MAX_FIELDS ${Legion_MAX_FIELDS})
+set(LEGION_DEFAULT_LOCAL_FIELDS "(${Legion_DEFAULT_LOCAL_FIELDS})")
 set(LEGION_MAX_NUM_NODES ${Legion_MAX_NUM_NODES})
 set(LEGION_MAX_NUM_PROCS ${Legion_MAX_NUM_PROCS})
 
@@ -880,6 +952,7 @@ if(Legion_BUILD_ALL OR Legion_BUILD_APPS OR Legion_BUILD_BINDINGS OR Legion_BUIL
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} $<$<BOOL:${PROP}>:-D$<JOIN:${PROP}, -D>>")
     set(PROP $<TARGET_PROPERTY:Legion::Legion,INTERFACE_INCLUDE_DIRECTORIES>)
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} $<$<BOOL:${PROP}>:-I$<JOIN:${PROP}, -I>>")
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} ${CUDA_GENCODE}")
   endif()
 
   if(Legion_HIP_TARGET STREQUAL "CUDA")
@@ -889,7 +962,7 @@ if(Legion_BUILD_ALL OR Legion_BUILD_APPS OR Legion_BUILD_BINDINGS OR Legion_BUIL
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} $<$<BOOL:${PROP}>:-D$<JOIN:${PROP}, -D>>")
     set(PROP $<TARGET_PROPERTY:Legion::Legion,INTERFACE_INCLUDE_DIRECTORIES>)
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} $<$<BOOL:${PROP}>:-I$<JOIN:${PROP}, -I>>")
-    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} ${HIPCC_FLAGS}")
+    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} ${HIPCC_FLAGS} ${CUDA_GENCODE}")
   endif()
 
   if(Legion_HIP_TARGET STREQUAL "ROCM")
