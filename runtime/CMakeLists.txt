@@ -773,7 +773,7 @@ if(Legion_USE_CUDA)
   )
 endif()
 
-if(Legion_USE_HIP AND Legion_GPU_REDUCTIONS)
+if(Legion_USE_HIP)
   list(APPEND LEGION_HIP_SRC
     legion/legion_redop.cu
   )
