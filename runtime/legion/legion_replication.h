@@ -318,14 +318,17 @@ namespace Legion {
       virtual void pack_collective(Serializer &rez) const;
       virtual void unpack_collective(Deserializer &derez);
       virtual void elide_collective(void);
+      virtual RtEvent post_broadcast(void) { return postcondition; }
     public:
       RtEvent async_broadcast(FutureInstance *instance, 
-          ApEvent precondition = ApEvent::NO_AP_EVENT);
+          ApEvent precondition = ApEvent::NO_AP_EVENT,
+          RtEvent postcondition = RtEvent::NO_RT_EVENT);
     public:
       Operation *const op;
       const ApUserEvent finished;
     protected:
       FutureInstance *instance;
+      RtEvent postcondition;
     };
 
     /**
@@ -726,8 +729,7 @@ namespace Legion {
       inline ApEvent get_done_event(void) { return done_event; }
     public:
       std::vector<DeppartResult> &results;
-      mutable ApEvent done_event;
-      mutable bool renamed;
+      const ApUserEvent done_event;
     };
 
     /**
@@ -2098,7 +2100,7 @@ namespace Legion {
               std::vector<DeletedPartition> &deleted_partitions,
               std::set<RtEvent> &preconditions);
     public:
-      void map_replicate_tasks(void) const;
+      void map_replicate_tasks(void);
       void distribute_replicate_tasks(void);
     public:
       void initialize_replication(ReplicateContext *ctx);

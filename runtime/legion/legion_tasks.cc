@@ -780,10 +780,6 @@ namespace Legion {
       }
       if (!options.check_collective_regions.empty() && is_index_space)
       {
-        // We might already have added some region requirements in here
-        // from IndexTask::trigger_prepipeline stage, if so we'll need to
-        // resort and remove duplicates afterwards
-        const bool need_uniquify = !check_collective_regions.empty();
         for (std::set<unsigned>::const_iterator it =
               options.check_collective_regions.begin(); it !=
               options.check_collective_regions.end(); it++)
@@ -802,13 +798,28 @@ namespace Legion {
           else
             check_collective_regions.push_back(*it);
         }
-        if (need_uniquify)
+        if (!check_collective_regions.empty())
         {
-          std::sort(check_collective_regions.begin(), 
-              check_collective_regions.end());
-          std::vector<unsigned>::iterator last = std::unique(
-              check_collective_regions.begin(), check_collective_regions.end());
-          check_collective_regions.erase(last, check_collective_regions.end());
+          // Check to make sure that there are no invertible projection functors
+          // in this index space launch on writing requirements which might
+          // cause point tasks to be interfering. If there are then we can't
+          // perform any collective rendezvous here so the tasks map together
+          for (unsigned idx = 0; idx < regions.size(); idx++)
+          {
+            const RegionRequirement &req = regions[idx];
+            if (!IS_WRITE(req))
+              continue;
+            if (((req.projection == 0) &&
+                (req.handle_type == LEGION_REGION_PROJECTION)) ||
+                runtime->find_projection_function(
+                  req.projection)->is_invertible)
+            {
+              // Has potential dependences between the points so we can't
+              // assume that this is safe
+              check_collective_regions.clear();
+              break;
+            }
+          }
         }
       }
       if (options.inline_task)
@@ -1680,7 +1691,9 @@ namespace Legion {
             std::vector<LogicalRegion> regions_to_check(1, 
                                 regions[it->first].region);
             PhysicalManager *phy = manager->as_physical_manager();
-            if (!phy->meets_regions(regions_to_check, true/*tight*/))
+            if (!phy->meets_regions(regions_to_check,
+                  constraints->specialized_constraint.is_exact(),
+                  &constraints->padding_constraint.delta))
             {
               if (constraints->specialized_constraint.is_exact())
                 conflict_constraint = &constraints->specialized_constraint;
@@ -4188,6 +4201,15 @@ namespace Legion {
           delete remote_trace_recorder;
         remote_trace_recorder = NULL;
       }
+      if (must_epoch_op != NULL)
+      {
+        // If we are part of a must epoch operation, then report the 
+        // event that describes when all of our mapping activies are done
+        RtEvent mapping_applied;
+        if (!map_applied_conditions.empty())
+          mapping_applied = Runtime::merge_events(map_applied_conditions);
+        must_epoch_op->record_mapped_event(index_point, mapping_applied);
+      }
       return RtEvent::NO_RT_EVENT;
     }
 
@@ -5150,6 +5172,7 @@ namespace Legion {
         delete launch_space;
       if ((future_handles != NULL) && future_handles->remove_reference())
         delete future_handles;
+      redop_initial_value = Future();
       // Remove our reference to the future map
       future_map = FutureMap();
       if (reduction_instance != NULL)
@@ -5207,7 +5230,7 @@ namespace Legion {
         input.sharding_is = sharding_space;
       else
         input.sharding_is = launch_space->handle;
-      runtime->forest->find_launch_space_domain(internal_space, input.domain);
+      runtime->forest->find_domain(internal_space, input.domain);
       output.verify_correctness = false;
       if (mapper == NULL)
         mapper = runtime->find_mapper(current_proc, map_id);
@@ -5248,7 +5271,7 @@ namespace Legion {
         // Check to make sure the domain is not empty
         Domain &d = slice.domain;
         if ((d == Domain::NO_DOMAIN) && slice.domain_is.exists())
-          runtime->forest->find_launch_space_domain(slice.domain_is, d);
+          runtime->forest->find_domain(slice.domain_is, d);
         bool empty = false;
 	size_t volume = d.get_volume();
 	if (volume == 0)
@@ -5414,7 +5437,7 @@ namespace Legion {
       assert(internal_space.exists());
 #endif
       Domain result;
-      runtime->forest->find_launch_space_domain(internal_space, result);
+      runtime->forest->find_domain(internal_space, result);
       return result; 
     }
 
@@ -5511,7 +5534,7 @@ namespace Legion {
         // Only pack the IDs for our local points
         IndexSpaceNode *node = runtime->forest->get_node(internal_space);
         Domain local_domain;
-        node->get_launch_space_domain(local_domain);
+        node->get_domain(local_domain);
         size_t local_size = local_domain.get_volume();
         rez.serialize(local_size);
         const std::map<DomainPoint,DistributedID> &handles =
@@ -5696,7 +5719,7 @@ namespace Legion {
           reduction_inst_precondition = 
             reduction_instance->reduce_from(instance, this, redop,
                 reduction_op, true/*exclusive*/, reduction_inst_precondition);
-          return reduction_inst_precondition.has_triggered();
+          return reduction_inst_precondition.exists();
         }
       }
     } 
@@ -5927,8 +5950,11 @@ namespace Legion {
       assert(must_epoch != NULL);
 #endif
       set_origin_mapped(true);
-      FutureMap map = must_epoch->get_future_map();
-      result = map.impl->get_future(index_point, true/*internal only*/);
+      if (!elide_future_return)
+      {
+        FutureMap map = must_epoch->get_future_map();
+        result = map.impl->get_future(index_point, true/*internal only*/);
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -6104,30 +6130,31 @@ namespace Legion {
     void IndividualTask::predicate_false(void)
     //--------------------------------------------------------------------------
     {
-      if (elide_future_return)
-        return;
-      // Set the future to the false result
-      if (predicate_false_future.impl != NULL)
+      if (!elide_future_return)
       {
-        FutureInstance *canonical = 
-          predicate_false_future.impl->get_canonical_instance();
-        if (canonical != NULL)
+        // Set the future to the false result
+        if (predicate_false_future.impl != NULL)
         {
-          const Memory target = 
-            runtime->find_local_memory(current_proc, canonical->memory.kind());
-          result.impl->set_result(ApEvent::NO_AP_EVENT,
-              parent_ctx->copy_to_future_inst(target, canonical));
+          FutureInstance *canonical = 
+            predicate_false_future.impl->get_canonical_instance();
+          if (canonical != NULL)
+          {
+            const Memory target = 
+              runtime->find_local_memory(current_proc,canonical->memory.kind());
+            result.impl->set_result(ApEvent::NO_AP_EVENT,
+                parent_ctx->copy_to_future_inst(target, canonical));
+          }
+          else
+            result.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
         }
         else
-          result.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
-      }
-      else
-      {
-        if (predicate_false_size > 0)
-          result.impl->set_local(predicate_false_result,
-                                 predicate_false_size, false/*own*/);
-        else
-          result.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
+        {
+          if (predicate_false_size > 0)
+            result.impl->set_local(predicate_false_result,
+                                   predicate_false_size, false/*own*/);
+          else
+            result.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
+        }
       }
       // Then clean up this task instance
       complete_mapping();
@@ -6230,6 +6257,8 @@ namespace Legion {
                    bool has_return_type_size, std::set<RtEvent> &applied_events)
     //--------------------------------------------------------------------------
     {
+      if (elide_future_return)
+        return;
       if (is_remote())
       {
         const RtUserEvent done_event = Runtime::create_rt_user_event();
@@ -7207,6 +7236,8 @@ namespace Legion {
                    bool has_return_type_size, std::set<RtEvent> &applied_events)
     //--------------------------------------------------------------------------
     {
+      if (elide_future_return)
+        return;
       if (has_return_type_size)
         slice_owner->handle_future_size(return_type_size,
                                         index_point, applied_events);
@@ -8487,10 +8518,8 @@ namespace Legion {
 
       // First, we collect all the extents of local outputs.
       // While doing this, we also check the alignment.
-      ApEvent ready = ApEvent::NO_AP_EVENT;
-      Domain color_space = part->color_space->get_domain(ready, true);
-      if (ready.exists() && !ready.has_triggered())
-        ready.wait();
+      Domain color_space;
+      part->color_space->get_domain(color_space);
 #ifdef DEBUG_LEGION
       assert(color_space.dense());
 #endif
@@ -8652,7 +8681,7 @@ namespace Legion {
       parent_ctx = ctx;
       task_id = launcher.task_id;
       indexes = launcher.index_requirements;
-      regions = launcher.region_requirements;
+      initialize_regions(launcher.region_requirements);
       futures = launcher.futures;
       // If the task has any output requirements, we create fresh region and
       // partition names and return them back to the user
@@ -8705,7 +8734,7 @@ namespace Legion {
       launch_space = runtime->forest->get_node(launch_sp);
       add_launch_space_reference(launch_space);
       if (!launcher.launch_domain.exists())
-        launch_space->get_launch_space_domain(index_domain);
+        launch_space->get_domain(index_domain);
       else
         index_domain = launcher.launch_domain;
       internal_space = launch_space->handle;
@@ -8785,7 +8814,7 @@ namespace Legion {
       parent_ctx = ctx;
       task_id = launcher.task_id;
       indexes = launcher.index_requirements;
-      regions = launcher.region_requirements;
+      initialize_regions(launcher.region_requirements);
       futures = launcher.futures;
       // If the task has any output requirements, we create fresh region and
       // partition names and return them back to the user
@@ -8838,7 +8867,7 @@ namespace Legion {
       launch_space = runtime->forest->get_node(launch_sp);
       add_launch_space_reference(launch_space);
       if (!launcher.launch_domain.exists())
-        launch_space->get_launch_space_domain(index_domain);
+        launch_space->get_domain(index_domain);
       else
         index_domain = launcher.launch_domain;
       internal_space = launch_space->handle;
@@ -8846,6 +8875,7 @@ namespace Legion {
       need_intra_task_alias_analysis = !launcher.independent_requirements;
       redop = redop_id;
       reduction_op = Runtime::get_reduction_op(redop);
+      redop_initial_value = launcher.initial_value;
       deterministic_redop = deterministic;
       serdez_redop_fns = Runtime::get_serdez_redop_fns(redop);
       if (!reduction_op->identity)
@@ -8908,6 +8938,23 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void IndexTask::initialize_regions(const std::vector<RegionRequirement> &rs)
+    //--------------------------------------------------------------------------
+    {
+      regions = rs;
+      // Rewrite any singular region requirements to projections
+      for (std::vector<RegionRequirement>::iterator it =
+            regions.begin(); it != regions.end(); it++)
+      {
+        if (it->handle_type == LEGION_SINGULAR_PROJECTION)
+        {
+          it->handle_type = LEGION_REGION_PROJECTION;
+          it->projection = 0; // identity
+        }
+      }
+    }
+
+    //--------------------------------------------------------------------------
     void IndexTask::initialize_predicate(const Future &pred_future,
                                          const UntypedBuffer &pred_arg)
     //--------------------------------------------------------------------------
@@ -8938,8 +8985,11 @@ namespace Legion {
       assert(must_epoch != NULL);
 #endif
       set_origin_mapped(true);
-      future_map = must_epoch->get_future_map(); 
-      enumerate_futures(index_domain);
+      if (!elide_future_return)
+      {
+        future_map = must_epoch->get_future_map(); 
+        enumerate_futures(index_domain);
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -8950,47 +9000,6 @@ namespace Legion {
       compute_parent_indexes(); 
       // Count how many total points we need for this index space task
       total_points = index_domain.get_volume();
-      for (unsigned idx = 0; idx < regions.size(); idx++)
-      {
-        RegionRequirement &req = regions[idx];
-        // any region requirements which were marked singular need to
-        // be promoted up to being a region projection with depth 0
-        if (req.handle_type == LEGION_SINGULAR_PROJECTION)
-        {
-          req.handle_type = LEGION_REGION_PROJECTION;
-          req.projection = 0;
-          // If we're reading or reducing then make a collective view
-          if (IS_READ_ONLY(req) || IS_REDUCE(req))
-            check_collective_regions.push_back(idx);
-        }
-        // If all the points are using the same logical region then
-        // record that we should do a collective rendezvous
-        else if ((req.handle_type == LEGION_REGION_PROJECTION) &&
-            (req.projection == 0) && (IS_READ_ONLY(req) || IS_REDUCE(req)))
-          check_collective_regions.push_back(idx);
-      }
-      if (!check_collective_regions.empty())
-      {
-        // Check to make sure that there are no invertible projection functors
-        // in this index space launch on writing requirements which might cause
-        // point tasks to be interfering. If there are then we can't perform 
-        // any collective rendezvous here so the tasks can map together 
-        for (unsigned idx = 0; idx < regions.size(); idx++)
-        {
-          const RegionRequirement &req = regions[idx];
-          if (!IS_WRITE(req))
-            continue;
-          if (((req.projection == 0) && 
-              (req.handle_type == LEGION_REGION_PROJECTION)) ||
-              runtime->find_projection_function(req.projection)->is_invertible)
-          {
-            // Has potential dependences between the points so we can't
-            // assume that this is safe
-            check_collective_regions.clear();
-            break;
-          }
-        }
-      }
       // Initialize the privilege paths
       privilege_paths.resize(get_region_count());
       for (unsigned idx = 0; idx < logical_regions.size(); idx++)
@@ -9070,11 +9079,10 @@ namespace Legion {
               idx, get_task_name(), get_unique_op_id(), req.projection);
 
 #ifdef DEBUG_LEGION
-          ApEvent ready = ApEvent::NO_AP_EVENT;
           IndexSpaceNode* node = runtime->forest->get_node(color_space);
-          Domain color_domain = node->get_domain(ready, true);
-          if (ready.exists() && !ready.has_triggered())
-            ready.wait();
+          Domain color_domain;
+          node->get_domain(color_domain);
+          // No need to wait on the ready event since it is tight
 
           if (req.global_indexing && !color_domain.dense())
             REPORT_LEGION_ERROR(ERROR_INVALID_OUTPUT_REGION_PROJECTION,
@@ -9353,81 +9361,87 @@ namespace Legion {
     {
       RtEvent execution_condition;
       // Fill in the index task map with the default future value
-      if (redop == 0)
+      if (!elide_future_return)
       {
-        // Only need to do this if the internal domain exists, it
-        // might not in a control replication context
-        if (internal_space.exists())
+        if (redop == 0)
         {
-          // Get the domain that we will have to iterate over
-          Domain local_domain;
-          runtime->forest->find_launch_space_domain(internal_space, 
-                                                    local_domain);
-          // Handling the future map case
+          // Only need to do this if the internal domain exists, it
+          // might not in a control replication context
+          if (internal_space.exists())
+          {
+            // Get the domain that we will have to iterate over
+            Domain local_domain;
+            runtime->forest->find_domain(internal_space, local_domain);
+            // Handling the future map case
+            if (predicate_false_future.impl != NULL)
+            {
+              FutureInstance *canonical = 
+                predicate_false_future.impl->get_canonical_instance();
+              if (canonical != NULL)
+              {
+                const Memory target = runtime->find_local_memory(
+                 parent_ctx->get_executing_processor(), 
+                 canonical->memory.kind());
+                for (Domain::DomainPointIterator itr(local_domain);
+                      itr; itr++)
+                {
+                  Future f = future_map.impl->get_future(itr.p, 
+                                              true/*internal*/);
+                  f.impl->set_result(ApEvent::NO_AP_EVENT,
+                      parent_ctx->copy_to_future_inst(target, canonical));
+                }
+              }
+              else
+              {
+                for (Domain::DomainPointIterator itr(local_domain);
+                      itr; itr++)
+                {
+                  Future f = future_map.impl->get_future(itr.p, 
+                                              true/*internal*/);
+                  f.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
+                }
+              }
+            }
+            else
+            {
+              for (Domain::DomainPointIterator itr(local_domain); itr; itr++)
+              {
+                Future f = future_map.impl->get_future(itr.p, true/*internal*/);
+                if (predicate_false_size > 0)
+                  f.impl->set_local(predicate_false_result,
+                                    predicate_false_size, false/*own*/);
+                else
+                  f.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
+              }
+            }
+          }
+        }
+        else
+        {
+          // Handling a reduction case
           if (predicate_false_future.impl != NULL)
           {
             FutureInstance *canonical = 
               predicate_false_future.impl->get_canonical_instance();
             if (canonical != NULL)
             {
-              const Memory target = runtime->find_local_memory(
-               parent_ctx->get_executing_processor(), canonical->memory.kind());
-              for (Domain::DomainPointIterator itr(local_domain);
-                    itr; itr++)
-              {
-                Future f = future_map.impl->get_future(itr.p, true/*internal*/);
-                f.impl->set_result(ApEvent::NO_AP_EVENT,
-                    parent_ctx->copy_to_future_inst(target, canonical));
-              }
+              const Memory target = 
+                runtime->find_local_memory(current_proc,
+                    canonical->memory.kind());
+              reduction_future.impl->set_result(ApEvent::NO_AP_EVENT,
+                  parent_ctx->copy_to_future_inst(target, canonical));
             }
             else
-            {
-              for (Domain::DomainPointIterator itr(local_domain);
-                    itr; itr++)
-              {
-                Future f = future_map.impl->get_future(itr.p, true/*internal*/);
-                f.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
-              }
-            }
+              reduction_future.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
           }
           else
           {
-            for (Domain::DomainPointIterator itr(local_domain); itr; itr++)
-            {
-              Future f = future_map.impl->get_future(itr.p, true/*internal*/);
-              if (predicate_false_size > 0)
-                f.impl->set_local(predicate_false_result,
-                                  predicate_false_size, false/*own*/);
-              else
-                f.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
-            }
+            if (predicate_false_size > 0)
+              reduction_future.impl->set_local(predicate_false_result,
+                                    predicate_false_size, false/*own*/);
+            else
+              reduction_future.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
           }
-        }
-      }
-      else
-      {
-        // Handling a reduction case
-        if (predicate_false_future.impl != NULL)
-        {
-          FutureInstance *canonical = 
-            predicate_false_future.impl->get_canonical_instance();
-          if (canonical != NULL)
-          {
-            const Memory target = 
-              runtime->find_local_memory(current_proc,canonical->memory.kind());
-            reduction_future.impl->set_result(ApEvent::NO_AP_EVENT,
-                parent_ctx->copy_to_future_inst(target, canonical));
-          }
-          else
-            reduction_future.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
-        }
-        else
-        {
-          if (predicate_false_size > 0)
-            reduction_future.impl->set_local(predicate_false_result,
-                                  predicate_false_size, false/*own*/);
-          else
-            reduction_future.impl->set_result(ApEvent::NO_AP_EVENT, NULL);
         }
       }
       // Then clean up this task execution
@@ -9537,6 +9551,15 @@ namespace Legion {
       }
       else
         serdez_redop_targets.swap(target_mems);
+
+      if (!redop_initial_value.is_empty() &&
+          parent_ctx->get_task()->get_shard_id() == 0)
+      {
+        // Initialize the future to the user-specified initial value
+        FutureImpl *impl = redop_initial_value.impl;
+        FutureInstance *inst = impl->get_canonical_instance();
+        fold_reduction_future(inst, reduction_effects, deterministic_redop);
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -10453,8 +10476,7 @@ namespace Legion {
       else if (!elide_future_return)
       {
         Domain internal_domain;
-        runtime->forest->find_launch_space_domain(internal_space,
-                                                  internal_domain);
+        runtime->forest->find_domain(internal_space, internal_domain);
         enumerate_futures(internal_domain);
       }
       // Prepare any setup for performing the concurrent analysis
@@ -11506,7 +11528,7 @@ namespace Legion {
     {
       DETAILED_PROFILER(runtime, SLICE_ENUMERATE_POINTS_CALL);
       Domain internal_domain;
-      runtime->forest->find_launch_space_domain(internal_space,internal_domain);
+      runtime->forest->find_domain(internal_space, internal_domain);
       const size_t num_points = internal_domain.get_volume();
 #ifdef DEBUG_LEGION
       assert(num_points > 0);
@@ -11781,6 +11803,7 @@ namespace Legion {
       if (redop > 0)
         return;
 #ifdef DEBUG_LEGION
+      assert(!elide_future_return);
       assert(future_handles != NULL);
 #endif
       const std::map<DomainPoint,DistributedID> &handles = 

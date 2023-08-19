@@ -747,6 +747,7 @@ namespace Legion {
     };
 
     enum MessageKind {
+      SEND_STARTUP_BARRIER,
       TASK_MESSAGE,
       STEAL_MESSAGE,
       ADVERTISEMENT_MESSAGE,
@@ -968,7 +969,6 @@ namespace Legion {
       SEND_CONSTRAINT_REQUEST,
       SEND_CONSTRAINT_RESPONSE,
       SEND_CONSTRAINT_RELEASE,
-      SEND_TOP_LEVEL_TASK_REQUEST,
       SEND_TOP_LEVEL_TASK_COMPLETE,
       SEND_MPI_RANK_EXCHANGE,
       SEND_REPLICATE_LAUNCH,
@@ -1011,6 +1011,7 @@ namespace Legion {
 
 #define LG_MESSAGE_DESCRIPTIONS(name)                                 \
       const char *name[LAST_SEND_KIND] = {                            \
+        "Send Startup Barrier",                                       \
         "Task Message",                                               \
         "Steal Message",                                              \
         "Advertisement Message",                                      \
@@ -1232,7 +1233,6 @@ namespace Legion {
         "Send Constraint Request",                                    \
         "Send Constraint Response",                                   \
         "Send Constraint Release",                                    \
-        "Top Level Task Request",                                     \
         "Top Level Task Complete",                                    \
         "Send MPI Rank Exchange",                                     \
         "Send Replication Launch",                                    \
@@ -1274,21 +1274,19 @@ namespace Legion {
 
     // Runtime task numbering 
     enum {
-      LG_INITIALIZE_TASK_ID   = Realm::Processor::TASK_ID_PROCESSOR_INIT,
+      LG_STARTUP_TASK_ID      = Realm::Processor::TASK_ID_PROCESSOR_INIT,
       LG_SHUTDOWN_TASK_ID     = Realm::Processor::TASK_ID_PROCESSOR_SHUTDOWN,
       LG_TASK_ID              = Realm::Processor::TASK_ID_FIRST_AVAILABLE,
 #ifdef LEGION_SEPARATE_META_TASKS
       LG_LEGION_PROFILING_ID  = LG_TASK_ID+LG_LAST_TASK_ID+LAST_SEND_KIND,
-      LG_STARTUP_TASK_ID      = LG_TASK_ID+LG_LAST_TASK_ID+LAST_SEND_KIND+1,
-      LG_ENDPOINT_TASK_ID     = LG_TASK_ID+LG_LAST_TASK_ID+LAST_SEND_KIND+2,
-      LG_APP_PROC_TASK_ID     = LG_TASK_ID+LG_LAST_TASK_ID+LAST_SEND_KIND+3,
+      LG_ENDPOINT_TASK_ID     = LG_TASK_ID+LG_LAST_TASK_ID+LAST_SEND_KIND+1,
+      LG_APP_PROC_TASK_ID     = LG_TASK_ID+LG_LAST_TASK_ID+LAST_SEND_KIND+2,
       LG_TASK_ID_AVAILABLE    = LG_APP_PROC_TASK_ID+LG_LAST_TASK_ID,
 #else
       LG_LEGION_PROFILING_ID  = LG_TASK_ID+1,
-      LG_STARTUP_TASK_ID      = LG_TASK_ID+2,
-      LG_ENDPOINT_TASK_ID     = LG_TASK_ID+3,
-      LG_APP_PROC_TASK_ID     = LG_TASK_ID+4,
-      LG_TASK_ID_AVAILABLE    = LG_TASK_ID+5,
+      LG_ENDPOINT_TASK_ID     = LG_TASK_ID+2,
+      LG_APP_PROC_TASK_ID     = LG_TASK_ID+3,
+      LG_TASK_ID_AVAILABLE    = LG_TASK_ID+4,
 #endif
     };
 
@@ -2632,14 +2630,11 @@ namespace Legion {
           return has_triggered_faultaware(poisoned); }
       inline void wait_faultignorant(void) const
         { bool poisoned = false; LgEvent::wait_faultaware(poisoned); }
-      // TODO: enable this to ensure we are always checking for faults
-#if 0
     private:
       // Make these private because we always want to be conscious of faults
       // when testing or waiting on application events
       inline bool has_triggered(void) const { return LgEvent::has_triggered(); }
       inline void wait(void) const { LgEvent::wait(); }
-#endif
     };
 
     class ApUserEvent : public ApEvent {

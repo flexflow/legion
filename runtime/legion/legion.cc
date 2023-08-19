@@ -2487,13 +2487,14 @@ namespace Legion {
         REPORT_LEGION_ERROR(ERROR_CONFUSED_USER,
             "Creating Legion Future objects from a buffer is only permitted "
             "to be performed inside of Legion tasks.")
-      return Internal::implicit_context->from_value(value, value_size, 
-                                                    owned, NULL/*provenance*/);
+      return Internal::implicit_context->from_value(value, value_size,
+          owned, NULL/*provenance*/, false/*shard local*/);
     }
 
     //--------------------------------------------------------------------------
     /*static*/ Future Future::from_untyped_pointer(
-             const void *value, size_t value_size, bool owned, const char *prov)
+             const void *value, size_t value_size, bool owned, 
+             const char *prov, bool shard_local)
     //--------------------------------------------------------------------------
     {
       if (Internal::implicit_context == NULL)
@@ -2502,14 +2503,14 @@ namespace Legion {
             "to be performed inside of Legion tasks.")
       Internal::AutoProvenance provenance(prov);
       return Internal::implicit_context->from_value(value, value_size,
-                                                    owned, provenance);
+                                        owned, provenance, shard_local);
     }
 
     //--------------------------------------------------------------------------
     /*static*/ Future Future::from_value(const void *buffer, size_t size,
         bool owned, const Realm::ExternalInstanceResource &resource,
         void (*freefunc)(const Realm::ExternalInstanceResource&),
-        const char *prov)
+        const char *prov, bool shard_local)
     //--------------------------------------------------------------------------
     {
       if (Internal::implicit_context == NULL)
@@ -2518,7 +2519,7 @@ namespace Legion {
             "to be performed inside of Legion tasks.")
       Internal::AutoProvenance provenance(prov);
       return Internal::implicit_context->from_value(buffer, size, owned,
-                                        resource, freefunc, provenance);
+                            resource, freefunc, provenance, shard_local);
     }
 
     /////////////////////////////////////////////////////////////
@@ -6332,12 +6333,13 @@ namespace Legion {
     Future Runtime::reduce_future_map(Context ctx, const FutureMap &future_map,
                                       ReductionOpID redop, bool deterministic,
                                       MapperID map, MappingTagID tag,
-                                      const char *prov)
+                                      const char *prov,
+                                      Future initial_value)
     //--------------------------------------------------------------------------
     {
       Internal::AutoProvenance provenance(prov);
       return ctx->reduce_future_map(future_map, redop, deterministic,
-                                    map, tag, provenance);
+                                    map, tag, provenance, initial_value);
     }
 
     //--------------------------------------------------------------------------
@@ -7667,17 +7669,19 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     /*static*/ int Runtime::start(int argc, char **argv, bool background,
-                                  bool default_mapper)
+                                  bool default_mapper, bool filter)
     //--------------------------------------------------------------------------
     {
-      return Internal::Runtime::start(argc, argv, background, default_mapper);
+      return Internal::Runtime::start(argc, argv, background, 
+                                      default_mapper, filter);
     }
 
     //--------------------------------------------------------------------------
-    /*static*/ void Runtime::initialize(int *argc, char ***argv, bool filter)
+    /*static*/ void Runtime::initialize(int *argc, char ***argv, 
+                                        bool filter, bool parse)
     //--------------------------------------------------------------------------
     {
-      Internal::Runtime::initialize(argc, argv, filter);
+      Internal::Runtime::initialize(argc, argv, parse, filter);
     }
 
     //--------------------------------------------------------------------------

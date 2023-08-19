@@ -59,6 +59,7 @@ list(APPEND REALM_SRC
   realm/mem_impl.h          realm/mem_impl.cc
   realm/metadata.h          realm/metadata.cc
   realm/module.h            realm/module.cc
+  realm/module_config.h     realm/module_config.inl realm/module_config.cc
   realm/nodeset.h           realm/nodeset.inl      realm/nodeset.cc
   realm/numa/numa_module.h  realm/numa/numa_module.cc
   realm/numa/numasysif.h    realm/numa/numasysif.cc
@@ -293,11 +294,11 @@ endif()
 set_target_properties(RealmRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set_target_properties(RealmRuntime PROPERTIES SOVERSION ${SOVERSION})
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(RealmRuntime PROPERTIES BUILD_RPATH "\$ORIGIN")
-  set_target_properties(RealmRuntime PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_property(TARGET RealmRuntime APPEND PROPERTY BUILD_RPATH "\$ORIGIN")
+  set_property(TARGET RealmRuntime APPEND PROPERTY INSTALL_RPATH "\$ORIGIN")
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-  set_target_properties(RealmRuntime PROPERTIES BUILD_RPATH "@loader_path")
-  set_target_properties(RealmRuntime PROPERTIES INSTALL_RPATH "@loader_path")
+  set_property(TARGET RealmRuntime APPEND PROPERTY BUILD_RPATH "@loader_path")
+  set_property(TARGET RealmRuntime APPEND PROPERTY INSTALL_RPATH "@loader_path")
 endif ()
 
 if(REALM_LIMIT_SYMBOL_VISIBILITY)
@@ -900,6 +901,11 @@ if(LEGION_HIP_SRC)
       target_compile_definitions(LegionRuntime PRIVATE __HIP_PLATFORM_AMD__)
     endif()
   endif()
+else()
+  if (Legion_HIP_TARGET STREQUAL "ROCM")
+    target_include_directories(LegionRuntime PRIVATE ${HIP_INCLUDE_DIRS})
+    target_compile_definitions(LegionRuntime PRIVATE __HIP_PLATFORM_AMD__)
+  endif()
 endif()
 
 target_link_libraries(LegionRuntime PUBLIC RealmRuntime)
@@ -910,11 +916,11 @@ set_target_properties(LegionRuntime PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set_target_properties(LegionRuntime PROPERTIES OUTPUT_NAME "legion${INSTALL_SUFFIX}")
 set_target_properties(LegionRuntime PROPERTIES SOVERSION ${SOVERSION})
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(LegionRuntime PROPERTIES BUILD_RPATH "\$ORIGIN")
-  set_target_properties(LegionRuntime PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_property(TARGET LegionRuntime APPEND PROPERTY BUILD_RPATH "\$ORIGIN")
+  set_property(TARGET LegionRuntime APPEND PROPERTY INSTALL_RPATH "\$ORIGIN")
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-  set_target_properties(LegionRuntime PROPERTIES BUILD_RPATH "@loader_path")
-  set_target_properties(LegionRuntime PROPERTIES INSTALL_RPATH "@loader_path")
+  set_property(TARGET LegionRuntime APPEND PROPERTY BUILD_RPATH "@loader_path")
+  set_property(TARGET LegionRuntime APPEND PROPERTY INSTALL_RPATH "@loader_path")
 endif ()
 
 target_compile_options(LegionRuntime PRIVATE ${CXX_BUILD_WARNING_FLAGS})

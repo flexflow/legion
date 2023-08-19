@@ -75,6 +75,7 @@ legion_cxx_tests = [
     ['examples/local_function_tasks/local_function_tasks', []],
     ['examples/provenance/provenance', []],
     ['examples/tiling/tiling', []],
+    ['examples/machine_config/machine_config', []],
     ['examples/future_map_transforms/future_map_transforms', []],
     ['examples/concurrent_tasks/concurrent', ['-ll:cpu', '4']],
     # Comment this test out until it works everywhere
@@ -92,6 +93,7 @@ legion_cxx_tests = [
     ['test/output_requirements/output_requirements', ['-empty', '-index']],
     ['test/output_requirements/output_requirements', ['-empty', '-index', '-replicate']],
     ['test/disjoint_complete/disjoint_complete', []],
+    ['test/reduce_future/reduce_future', ['-ll:cpu', '4']],
 
     # Tutorial/realm
     ['tutorial/realm/hello_world/realm_hello_world', []],

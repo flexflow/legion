@@ -119,7 +119,6 @@ namespace Realm {
       std::vector<size_t> logical_peer_bandwidth;
       std::vector<size_t> logical_peer_latency;
 
-
       #ifdef REALM_USE_CUDART_HIJACK
       cudaDeviceProp prop;
       #endif
@@ -678,6 +677,7 @@ namespace Realm {
 
       struct CudaIpcMapping {
         NodeID owner;
+        GPU *src_gpu;
         Memory mem;
         uintptr_t local_base;
         uintptr_t address_offset; // add to convert from original to local base
@@ -820,7 +820,7 @@ namespace Realm {
 
     class GPUFBMemory : public LocalManagedMemory {
     public:
-      GPUFBMemory(Memory _me, GPU *_gpu, CUdeviceptr _base, size_t _size);
+      GPUFBMemory(Memory _me, GPU *_gpu, CUdeviceptr _base, size_t _size, bool isMemmapped = false);
 
       virtual ~GPUFBMemory(void);
 
@@ -847,6 +847,7 @@ namespace Realm {
       GPU *gpu;
       CUdeviceptr base;
       NetworkSegment local_segment;
+      bool isMemmapedMemory;
     };
 
     class GPUDynamicFBMemory : public MemoryImpl {
@@ -1118,7 +1119,7 @@ namespace Realm {
 
       // override this because we have to be picky about which reduction ops
       //  we support
-      virtual uint64_t supports_path(Memory src_mem, Memory dst_mem,
+      virtual uint64_t supports_path(ChannelCopyInfo channel_copy_info,
                                      CustomSerdezID src_serdez_id,
                                      CustomSerdezID dst_serdez_id,
                                      ReductionOpID redop_id,
@@ -1173,7 +1174,7 @@ namespace Realm {
 
       GPUreduceRemoteChannel(uintptr_t _remote_ptr);
 
-      virtual uint64_t supports_path(Memory src_mem, Memory dst_mem,
+      virtual uint64_t supports_path(ChannelCopyInfo channel_copy_info,
                                      CustomSerdezID src_serdez_id,
                                      CustomSerdezID dst_serdez_id,
                                      ReductionOpID redop_id,
@@ -1284,6 +1285,16 @@ namespace Realm {
   __op__(cuStreamCreateWithPriority);                                          \
   __op__(cuStreamDestroy);                                                     \
   __op__(cuStreamSynchronize);                                                 \
+  __op__(cuMemAddressReserve);                                                 \
+  __op__(cuMemAddressFree);                                                    \
+  __op__(cuMemCreate);                                                         \
+  __op__(cuMemRelease);                                                        \
+  __op__(cuMemMap);                                                            \
+  __op__(cuMemUnmap);                                                          \
+  __op__(cuMemSetAccess);                                                      \
+  __op__(cuMemGetAllocationGranularity);                                       \
+  __op__(cuMemExportToShareableHandle);                                        \
+  __op__(cuMemImportFromShareableHandle);                                      \
   __op__(cuStreamWaitEvent)
 
   #if CUDA_VERSION >= 11030

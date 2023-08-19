@@ -2661,6 +2661,19 @@ extern "C" {
   /**
    * @return Caller takes ownership of return value.
    *
+   * @see Legion::Future::from_untyped_pointer()
+   */
+  legion_future_t
+  legion_future_from_untyped_pointer_detailed(legion_runtime_t runtime,
+                                              const void *buffer,
+                                              size_t size,
+                                              bool take_ownership,
+                                              const char *provenance,
+                                              bool shard_local);
+
+  /**
+   * @return Caller takes ownership of return value.
+   *
    * @see Legion::Future::Future()
    */
   legion_future_t
@@ -2779,6 +2792,22 @@ extern "C" {
                            bool deterministic,
                            legion_mapper_id_t map_id,
                            legion_mapping_tag_id_t tag);
+
+  /**
+   * @return Caller takes ownership of return value
+   *
+   * @see Legion::Runtime::reduce_future_map
+   */
+  legion_future_t
+  legion_future_map_reduce_with_initial_value(legion_runtime_t runtime,
+                                              legion_context_t ctx,
+                                              legion_future_map_t handle,
+                                              legion_reduction_op_id_t redop,
+                                              bool deterministic,
+                                              legion_mapper_id_t map_id,
+                                              legion_mapping_tag_id_t tag,
+                                              const char *provenance,
+                                              legion_future_t initial_value);
 
   /**
    * @return Caller takes ownership of return value
@@ -3472,6 +3501,13 @@ extern "C" {
   void
   legion_index_launcher_set_concurrent(legion_index_launcher_t launcher,
                                        bool concurrent);
+
+  /**
+   * @see Legion::IndexTaskLauncher::initial_value
+   */
+  void
+  legion_index_launcher_set_initial_value(legion_index_launcher_t launcher,
+                                          legion_future_t initial_value);
 
   // -----------------------------------------------------------------------
   // Inline Mapping Operations

@@ -971,6 +971,7 @@ REALM_SRC 	+= $(LG_RT_DIR)/realm/runtime_impl.cc \
 	           $(LG_RT_DIR)/realm/transfer/ib_memory.cc \
 	           $(LG_RT_DIR)/realm/mutex.cc \
 	           $(LG_RT_DIR)/realm/module.cc \
+		   $(LG_RT_DIR)/realm/module_config.cc \
 	           $(LG_RT_DIR)/realm/threads.cc \
 	           $(LG_RT_DIR)/realm/faults.cc \
 		   $(LG_RT_DIR)/realm/operation.cc \
@@ -1166,6 +1167,9 @@ INSTALL_HEADERS += legion.h \
 		   realm/machine.h \
 		   realm/machine.inl \
 		   realm/runtime.h \
+		   realm/module.h \
+		   realm/module_config.h \
+       realm/module_config.inl \
 		   realm/indexspace.h \
 		   realm/indexspace.inl \
 		   realm/codedesc.h \

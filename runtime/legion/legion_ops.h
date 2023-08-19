@@ -1805,7 +1805,6 @@ namespace Legion {
       static const AllocationType alloc_type = CREATION_OP_ALLOC;
     public:
       enum CreationKind {
-        FENCE_CREATION,
         INDEX_SPACE_CREATION,
         FIELD_ALLOCATION,
         FUTURE_MAP_CREATION,
@@ -1817,21 +1816,17 @@ namespace Legion {
     public:
       CreationOp& operator=(const CreationOp &rhs);
     public:
-      void initialize_fence(InnerContext *ctx, RtEvent precondition,
-                            Provenance *provenance);
       void initialize_index_space(InnerContext *ctx, IndexSpaceNode *node, 
                             const Future &future, Provenance *provenance,
                             bool owner = true, 
                             const CollectiveMapping *mapping = NULL);
       void initialize_field(InnerContext *ctx, FieldSpaceNode *node,
                             FieldID fid, const Future &field_size,
-                            RtEvent precondition, Provenance *provenance,
-                            bool owner = true);
+                            Provenance *provenance, bool owner = true);
       void initialize_fields(InnerContext *ctx, FieldSpaceNode *node,
                              const std::vector<FieldID> &fids,
                              const std::vector<Future> &field_sizes,
-                             RtEvent precondition, Provenance *provenance,
-                             bool owner = true);
+                             Provenance *provenance, bool owner = true);
       void initialize_map(InnerContext *ctx, Provenance *provenance,
                           const std::map<DomainPoint,Future> &futures);
     public:
@@ -1849,7 +1844,6 @@ namespace Legion {
       FieldSpaceNode *field_space_node;
       std::vector<Future> futures;
       std::vector<FieldID> fields;
-      RtEvent mapping_precondition;
       const CollectiveMapping *mapping;
       bool owner;
     };
@@ -2886,9 +2880,9 @@ namespace Legion {
       virtual void map_and_distribute(std::set<RtEvent> &tasks_mapped,
                                       std::set<ApEvent> &tasks_complete);
       // Make this virtual so we can override it for control replication
-      void map_tasks(void) const;
-      void map_single_task(SingleTask *task);
+      void map_tasks(void);
     public:
+      void record_mapped_event(const DomainPoint &point, RtEvent mapped);
       static void handle_map_task(const void *args);
     protected:
       void distribute_tasks(void);
@@ -2932,6 +2926,7 @@ namespace Legion {
         unsigned/*op idx*/,unsigned/*req idx*/> > > internal_dependences;
       std::map<SingleTask*,unsigned/*single task index*/> single_task_map;
       std::vector<std::set<unsigned/*single task index*/> > mapping_dependences;
+      std::map<DomainPoint,RtUserEvent> mapped_events;
     protected:
       std::map<UniqueID,RtUserEvent> slice_version_events;
     protected:
@@ -4290,7 +4285,8 @@ namespace Legion {
       Future initialize(InnerContext *ctx, const FutureMap &future_map,
                         ReductionOpID redop, bool deterministic,
                         MapperID mapper_id, MappingTagID tag,
-                        Provenance *provenance);
+                        Provenance *provenance,
+                        Future initial_value);
     public:
       virtual void activate(void);
       virtual void deactivate(bool free = true);
@@ -4317,6 +4313,14 @@ namespace Legion {
       virtual void all_reduce_serdez(void);
       virtual RtEvent all_reduce_redop(void);
     protected:
+      ApEvent init_redop_target(FutureInstance *target);
+      void fold_serdez(FutureImpl *impl);
+    private:
+      void prepare_future(std::vector<RtEvent> &preconditions,
+                          FutureImpl *future);
+      void subscribe_to_future(std::vector<RtEvent> &ready_events,
+                               FutureImpl *future);
+    protected:
       FutureMap future_map;
       ReductionOpID redop_id;
       const ReductionOp *redop; 
@@ -4330,6 +4334,7 @@ namespace Legion {
       MapperID mapper_id;
       MappingTagID tag;
       bool deterministic;
+      Future initial_value;
     };
 
     /**

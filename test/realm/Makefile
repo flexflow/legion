@@ -66,6 +66,7 @@ TESTS += memmodel
 TESTS += extres_alias
 TESTS += reservations
 TESTS += multiaffine
+TESTS += machine_config
 
 ifeq ($(strip $(USE_CUDA)),1)
 TESTS += task_stream
@@ -84,6 +85,7 @@ TESTARGS_deferred_allocs := -ll:gsize 0 -all
 TESTARGS_scatter := -p1 2 -p2 2
 TESTARGS_alltoall := -ll:csize 1024
 TESTARGS_sparse_construct := -verbose
+TESTARGS_task_stream := -ll:gpu 1
 
 REALM_OBJS := $(patsubst %.cc,%.o,$(notdir $(REALM_SRC))) \
               $(patsubst %.cc.o,%.o,$(notdir $(REALM_INST_OBJS))) \

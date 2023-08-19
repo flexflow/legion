@@ -3356,7 +3356,8 @@ namespace Legion {
       rez.serialize(size);
       // Check to see if we can just pass this future instance by value
       if (is_meta_visible && (size <= LEGION_MAX_RETURN_SIZE) &&
-          ((other_ready && (!ready.exists() || ready.has_triggered())) ||
+          ((other_ready && (!ready.exists() || 
+                            ready.has_triggered_faultignorant())) ||
            (!other_ready && (!ready_event.exists() || 
                               ready_event.has_triggered_faultignorant()))))
       {
@@ -3597,9 +3598,7 @@ namespace Legion {
           register_now, mapping),
         context(ctx), op(o), op_ctx_index(o->get_ctx_index()),
         op_gen(o->get_generation()), op_depth(o->get_context()->get_depth()),
-#ifdef LEGION_SPY
         op_uid(o->get_unique_op_id()),
-#endif
         provenance(prov), future_map_domain(domain),
         completion_event(o->get_completion_event())
     //--------------------------------------------------------------------------
@@ -3625,10 +3624,8 @@ namespace Legion {
           LEGION_DISTRIBUTED_HELP_ENCODE(did, FUTURE_MAP_DC),
           register_now, mapping),
         context(ctx), op(NULL), op_ctx_index(index), op_gen(0), op_depth(0),
-#ifdef LEGION_SPY
-        op_uid(0),
-#endif
-        provenance(prov), future_map_domain(d), completion_event(completion)
+        op_uid(0), provenance(prov), future_map_domain(d), 
+        completion_event(completion)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -3645,20 +3642,15 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     FutureMapImpl::FutureMapImpl(TaskContext *ctx, Operation *o, size_t index,
-                                 GenerationID gen, int depth,
-#ifdef LEGION_SPY
-                                 UniqueID uid,
-#endif
+                                 GenerationID gen, int depth, UniqueID uid,
                                  IndexSpaceNode *domain, Runtime *rt,
                                  DistributedID did, ApEvent completion,
                                  Provenance *prov)
       : DistributedCollectable(rt, 
           LEGION_DISTRIBUTED_HELP_ENCODE(did, FUTURE_MAP_DC)), 
         context(ctx), op(o), op_ctx_index(index), op_gen(gen), op_depth(depth),
-#ifdef LEGION_SPY
-        op_uid(uid),
-#endif
-        provenance(prov), future_map_domain(domain),completion_event(completion)
+        op_uid(uid), provenance(prov), future_map_domain(domain),
+        completion_event(completion)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -3671,20 +3663,6 @@ namespace Legion {
       log_garbage.info("GC Future Map %lld %d", 
           LEGION_DISTRIBUTED_ID_FILTER(this->did), local_space);
 #endif
-    }
-
-    //--------------------------------------------------------------------------
-    FutureMapImpl::FutureMapImpl(const FutureMapImpl &rhs)
-      : DistributedCollectable(rhs), context(NULL), op(NULL), op_ctx_index(0),
-        op_gen(0), op_depth(0),
-#ifdef LEGION_SPY
-        op_uid(0),
-#endif
-        provenance(NULL), future_map_domain(NULL)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
     }
 
     //--------------------------------------------------------------------------
@@ -3703,15 +3681,6 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    FutureMapImpl& FutureMapImpl::operator=(const FutureMapImpl &rhs)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
-      return *this;
-    }
-
-    //--------------------------------------------------------------------------
     void FutureMapImpl::notify_local(void)
     //--------------------------------------------------------------------------
     {
@@ -3725,7 +3694,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       Domain result;
-      future_map_domain->get_launch_space_domain(result);
+      future_map_domain->get_domain(result);
       return result;
     }
 
@@ -3803,8 +3772,7 @@ namespace Legion {
         result->add_nested_resource_ref(did);
         futures[point] = result;
         if (runtime->legion_spy_enabled)
-          LegionSpy::log_future_creation(op->get_unique_op_id(),
-                                         result->did, point);
+          LegionSpy::log_future_creation(op_uid, result->did, point);
         return Future(result);
       }
     }
@@ -3853,7 +3821,11 @@ namespace Legion {
             (warning_string == NULL) ? "" : warning_string)
       if ((op != NULL) && (Internal::implicit_context != NULL))
         Internal::implicit_context->record_blocking_call();
-      completion_event.wait();
+      bool poisoned = false;
+      if (!completion_event.has_triggered_faultaware(poisoned))
+        completion_event.wait_faultaware(poisoned);
+      if (poisoned)
+        implicit_context->raise_poison_exception();
     }
 
     //--------------------------------------------------------------------------
@@ -3936,7 +3908,7 @@ namespace Legion {
       assert(is_owner());
 #endif
       Domain domain;
-      future_map_domain->get_launch_space_domain(domain);
+      future_map_domain->get_domain(domain);
       const size_t needed = domain.get_volume();
       AutoLock fm_lock(future_map_lock);
 #ifdef DEBUG_LEGION
@@ -4145,10 +4117,7 @@ namespace Legion {
                               IndexSpaceNode *domain, PointTransformFnptr fnptr,
                               Provenance *prov)
       : FutureMapImpl(prev->context, prev->op, prev->op_ctx_index, prev->op_gen,
-          prev->op_depth,
-#ifdef LEGION_SPY
-          prev->op_uid,
-#endif
+          prev->op_depth, prev->op_uid,
           domain, prev->runtime, prev->runtime->get_available_distributed_id(),
           prev->completion_event, prov),
         previous(prev), own_functor(false), is_functor(false)
@@ -4163,10 +4132,7 @@ namespace Legion {
           IndexSpaceNode *domain, PointTransformFunctor *functor, bool own_func,
           Provenance *prov)
       : FutureMapImpl(prev->context, prev->op, prev->op_ctx_index, prev->op_gen,
-          prev->op_depth,
-#ifdef LEGION_SPY
-          prev->op_uid,
-#endif
+          prev->op_depth, prev->op_uid,
           domain, prev->runtime, prev->runtime->get_available_distributed_id(),
           prev->completion_event, prov),
         previous(prev), own_functor(own_func), is_functor(true)
@@ -4177,16 +4143,6 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    TransformFutureMapImpl::TransformFutureMapImpl(
-                                              const TransformFutureMapImpl &rhs)
-      : FutureMapImpl(rhs), previous(NULL), own_functor(false),is_functor(false)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
-    }
-
-    //--------------------------------------------------------------------------
     TransformFutureMapImpl::~TransformFutureMapImpl(void)
     //--------------------------------------------------------------------------
     {
@@ -4194,16 +4150,6 @@ namespace Legion {
         delete previous;
       if (own_functor)
         delete transform.functor;
-    }
-
-    //--------------------------------------------------------------------------
-    TransformFutureMapImpl& TransformFutureMapImpl::operator=(
-                                              const TransformFutureMapImpl &rhs)
-    //--------------------------------------------------------------------------
-    {
-      // should never be called
-      assert(false);
-      return *this;
     }
 
     //--------------------------------------------------------------------------
@@ -4222,8 +4168,8 @@ namespace Legion {
       assert(future_map_domain->contains_point(point));
 #endif
       Domain domain, range;
-      future_map_domain->get_launch_space_domain(domain);
-      previous->future_map_domain->get_launch_space_domain(range);
+      future_map_domain->get_domain(domain);
+      previous->future_map_domain->get_domain(range);
       if (is_functor)
       {
         const DomainPoint transformed = 
@@ -4251,8 +4197,8 @@ namespace Legion {
       std::map<DomainPoint,FutureImpl*> previous_futures;
       previous->get_all_futures(previous_futures);
       Domain domain, range;
-      future_map_domain->get_launch_space_domain(domain);
-      previous->future_map_domain->get_launch_space_domain(range);
+      future_map_domain->get_domain(domain);
+      previous->future_map_domain->get_domain(range);
       if (is_functor)
       {
         for (Domain::DomainPointIterator itr(domain); itr; itr++)
@@ -4306,8 +4252,8 @@ namespace Legion {
       assert(future_map_domain->contains_point(point));
 #endif
       Domain domain, range;
-      future_map_domain->get_launch_space_domain(domain);
-      previous->future_map_domain->get_launch_space_domain(range);
+      future_map_domain->get_domain(domain);
+      previous->future_map_domain->get_domain(range);
       if (is_functor)
       {
         const DomainPoint transformed = 
@@ -4335,8 +4281,8 @@ namespace Legion {
       std::map<DomainPoint,FutureImpl*> previous_futures;
       previous->get_shard_local_futures(shard, previous_futures);
       Domain domain, range;
-      future_map_domain->get_launch_space_domain(domain);
-      previous->future_map_domain->get_launch_space_domain(range);
+      future_map_domain->get_domain(domain);
+      previous->future_map_domain->get_domain(range);
       if (is_functor)
       {
         if (transform.functor->is_invertible())
@@ -4402,9 +4348,8 @@ namespace Legion {
       : FutureMapImpl(ctx, op, domain, rt, did, prov,
                       false/*register now*/, mapping),
         shard_manager(man), shard_domain(shard_dom),
-        op_depth(ctx->get_depth()), op_uid(op->get_unique_op_id()),
-        sharding_function(NULL), own_sharding_function(false),
-        collective_performed(false)
+        op_depth(ctx->get_depth()), sharding_function(NULL), 
+        own_sharding_function(false), collective_performed(false)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -4423,9 +4368,8 @@ namespace Legion {
       : FutureMapImpl(ctx, rt, domain, did, index, completion, prov, 
                       false/*register now*/, mapping),
         shard_manager(man), shard_domain(shard_dom),
-        op_depth(ctx->get_depth()), op_uid(ctx->get_unique_id()),
-        sharding_function(NULL), own_sharding_function(false),
-        collective_performed(false)
+        op_depth(ctx->get_depth()), sharding_function(NULL),
+        own_sharding_function(false), collective_performed(false)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -4469,7 +4413,7 @@ namespace Legion {
           wait_on.wait();
       }
       Domain domain;
-      shard_domain->get_launch_space_domain(domain);
+      shard_domain->get_domain(domain);
       const ShardID owner_shard = 
         sharding_function.load()->find_owner(point, domain);
       // Figure out which node has this future
@@ -4525,8 +4469,7 @@ namespace Legion {
         result->add_nested_resource_ref(did);
         futures[point] = result;
         if (runtime->legion_spy_enabled)
-          LegionSpy::log_future_creation(op->get_unique_op_id(),
-                                         result->did, point);
+          LegionSpy::log_future_creation(op_uid, result->did, point);
         return Future(result);
       }
     }
@@ -4614,7 +4557,11 @@ namespace Legion {
       }
       const ApBarrier wait_bar = repl_ctx->get_next_future_map_wait_barrier();
       Runtime::phase_barrier_arrive(wait_bar, 1/*count*/, completion_event);
-      wait_bar.wait();
+      bool poisoned = false;
+      if (!wait_bar.has_triggered_faultaware(poisoned))
+        wait_bar.wait_faultaware(poisoned);
+      if (poisoned)
+        implicit_context->raise_poison_exception();
     }
 
     //--------------------------------------------------------------------------
@@ -4623,7 +4570,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       Domain sharding_domain;
-      shard_domain->get_launch_space_domain(sharding_domain);
+      shard_domain->get_domain(sharding_domain);
       if (sharding_function == NULL)
       {
         RtEvent wait_on = get_sharding_function_ready();
@@ -4638,7 +4585,7 @@ namespace Legion {
         return;
       IndexSpaceNode *local_points = runtime->forest->get_node(local_space);
       Domain domain;
-      local_points->get_launch_space_domain(domain);
+      local_points->get_domain(domain);
       std::vector<RtEvent> ready_events;
       for (Domain::DomainPointIterator itr(domain); itr; itr++)
       {
@@ -5357,32 +5304,38 @@ namespace Legion {
           if (need_padded_bounds)
           {
             Domain domain;
-            bounds->get_launch_space_domain(domain);
+            bounds->get_domain(domain);
 #ifdef DEBUG_LEGION
             assert(domain.dense());
 #endif
-            // Now we can compute the bounds on this instance
-            const Domain &delta= 
-              manager->layout->constraints->padding_constraint.delta;
-#ifdef DEBUG_LEGION
-            assert(domain.get_dim() == delta.get_dim());
-#endif
-            const Domain padded_bounds =
-              Domain(domain.lo() - delta.lo(), domain.hi() + delta.hi());
-            switch (domain.get_dim())
+            // Do not add padding to empty domains
+            if (!domain.empty())
             {
+              // Now we can compute the bounds on this instance
+              const Domain &delta= 
+                manager->layout->constraints->padding_constraint.delta;
+#ifdef DEBUG_LEGION
+              assert(domain.get_dim() == delta.get_dim());
+#endif
+              const Domain padded_bounds =
+                Domain(domain.lo() - delta.lo(), domain.hi() + delta.hi());
+              switch (domain.get_dim())
+              {
 #define DIMFUNC(DIM) \
-              case DIM: \
-                { \
-                  RealmSpaceConverter<DIM,Realm::DIMTYPES>::convert_to( \
+                case DIM: \
+                  { \
+                    RealmSpaceConverter<DIM,Realm::DIMTYPES>::convert_to( \
                       padded_bounds, realm_is, type_tag, "get_instance_info"); \
-                  break; \
-                }
-              LEGION_FOREACH_N(DIMFUNC)
+                    break; \
+                  }
+                LEGION_FOREACH_N(DIMFUNC)
 #undef DIMFUNC
-              default:
-                assert(false);
+                default:
+                  assert(false);
+              }
             }
+            else
+              bounds->get_index_space_domain(realm_is, type_tag);
           }
           return manager->get_instance();
         }
@@ -5462,21 +5415,25 @@ namespace Legion {
           // If this is a padded instance, then we know that this is an affine
           // instance so we can get it's index space expression and it should
           // be dense so then we can just add the offsets
-          ApEvent dom_ready;
-          Domain bounds = 
-            manager->instance_domain->get_domain(dom_ready,true/*tight*/);
+          Domain bounds;
+          manager->instance_domain->get_domain(bounds);
 #ifdef DEBUG_LEGION
           assert(bounds.dense());
 #endif
           if (inner != NULL)
             *inner = bounds;
-          // Now we can compute the bounds on this instance
-          const Domain &delta= 
-            manager->layout->constraints->padding_constraint.delta;
+          if (!bounds.empty())
+          {
+            // Now we can compute the bounds on this instance
+            const Domain &delta= 
+              manager->layout->constraints->padding_constraint.delta;
 #ifdef DEBUG_LEGION
-          assert(bounds.get_dim() == delta.get_dim());
+            assert(bounds.get_dim() == delta.get_dim());
 #endif
-          outer = Domain(bounds.lo() - delta.lo(), bounds.hi() + delta.hi());
+            outer = Domain(bounds.lo() - delta.lo(), bounds.hi() + delta.hi());
+          }
+          else
+            outer = bounds;
           return manager->get_instance();
         }
       }
@@ -6171,10 +6128,7 @@ namespace Legion {
             // For a globally indexed output region, the domain has
             // already been initialized once we reach here, so
             // we just retrieve it.
-            ApEvent ready = ApEvent::NO_AP_EVENT;
-            domain = node->get_domain(ready, true);
-            if (ready.exists())
-              ready.wait();
+            node->get_domain(domain);
           }
         }
         else
@@ -6186,7 +6140,7 @@ namespace Legion {
         }
       }
       else
-        node->get_launch_space_domain(domain);
+        node->get_domain(domain);
 
       // Create a Realm instance and update the physical manager
       // for each output field
@@ -7440,21 +7394,6 @@ namespace Legion {
           delete it->second.first;
       }
       mappers.clear();
-    }
-
-    //--------------------------------------------------------------------------
-    void ProcessorManager::startup_mappers(void)
-    //--------------------------------------------------------------------------
-    {
-      // No one can be modifying the mapper set here so 
-      // there is no to hold the lock
-      std::multimap<Processor,MapperID> stealing_targets;
-      // See what if any stealing we should perform
-      for (std::map<MapperID,std::pair<MapperManager*,bool> >::const_iterator
-            it = mappers.begin(); it != mappers.end(); it++)
-        it->second.first->perform_stealing(stealing_targets);
-      if (!stealing_targets.empty())
-        runtime->send_steal_request(stealing_targets, local_proc);
     }
 
     //--------------------------------------------------------------------------
@@ -9782,10 +9721,6 @@ namespace Legion {
       {
         if (tree_id != 0)
         {
-          // If we need a padding constraint make sure we're
-          // checking for tight region bounds
-          if (constraints.padding_constraint.delta.get_dim() > 0)
-            tight_region_bounds = true;
           std::set<IndexSpaceExpression*> region_exprs;
           RegionTreeForest *forest = runtime->forest;
           for (std::vector<LogicalRegion>::const_iterator it = 
@@ -9802,7 +9737,8 @@ namespace Legion {
           for (std::deque<PhysicalManager*>::const_iterator it =
                 candidates.begin(); it != candidates.end(); it++)
           {
-            if (!(*it)->meets_expression(space_expr, tight_region_bounds))
+            if (!(*it)->meets_expression(space_expr, tight_region_bounds,
+                  &constraints.padding_constraint.delta))
               continue;
             if ((*it)->entails(constraints, NULL))
             {
@@ -9898,10 +9834,6 @@ namespace Legion {
       {
         if (tree_id != 0)
         {
-          // If we need a padding constraint make sure we're
-          // checking for tight region bounds
-          if (constraints.padding_constraint.delta.get_dim() > 0)
-            tight_region_bounds = true;
           std::set<IndexSpaceExpression*> region_exprs;
           RegionTreeForest *forest = runtime->forest;
           for (std::vector<LogicalRegion>::const_iterator it = 
@@ -9918,7 +9850,8 @@ namespace Legion {
           for (std::deque<PhysicalManager*>::const_iterator it = 
                 candidates.begin(); it != candidates.end(); it++)
           {
-            if (!(*it)->meets_expression(space_expr, tight_region_bounds))
+            if (!(*it)->meets_expression(space_expr, tight_region_bounds,
+                  &constraints.padding_constraint.delta))
               continue;
             if ((*it)->entails(constraints, NULL))
             {
@@ -9994,10 +9927,6 @@ namespace Legion {
       bool found = false;
       if (!candidates.empty())
       {
-        // If we need a padding constraint make sure we're
-        // checking for tight region bounds
-        if (constraints.padding_constraint.delta.get_dim() > 0)
-          tight_region_bounds = true;
         std::set<IndexSpaceExpression*> region_exprs;
         RegionTreeForest *forest = runtime->forest;
         for (std::vector<LogicalRegion>::const_iterator it = 
@@ -10014,7 +9943,8 @@ namespace Legion {
         for (std::deque<PhysicalManager*>::const_iterator it = 
               candidates.begin(); it != candidates.end(); it++)
         {
-          if (!(*it)->meets_expression(space_expr, tight_region_bounds))
+          if (!(*it)->meets_expression(space_expr, tight_region_bounds,
+                &constraints.padding_constraint.delta))
             continue;
           if ((*it)->entails(constraints, NULL))
           {
@@ -12002,6 +11932,11 @@ namespace Legion {
         Deserializer derez(args,message_size);
         switch (kind)
         {
+          case SEND_STARTUP_BARRIER:
+            {
+              runtime->handle_startup_barrier(derez);
+              break;
+            }
           case TASK_MESSAGE:
             {
               runtime->handle_task(derez);
@@ -13190,11 +13125,6 @@ namespace Legion {
           case SEND_CONSTRAINT_RELEASE:
             {
               runtime->handle_constraint_release(derez);
-              break;
-            }
-          case SEND_TOP_LEVEL_TASK_REQUEST:
-            {
-              runtime->handle_top_level_task_request(derez);
               break;
             }
           case SEND_TOP_LEVEL_TASK_COMPLETE:
@@ -15768,7 +15698,7 @@ namespace Legion {
       assert(is_functional);
 #endif
       Domain launch_domain;
-      domain->get_launch_space_domain(launch_domain);
+      domain->get_domain(launch_domain);
       // If we're exclusive, we'll store the handles until after
       // we release the lock to go look them up in the region tree
       std::vector<LogicalRegion> handles;
@@ -16115,7 +16045,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       Domain launch_domain;
-      projection_space->get_launch_space_domain(launch_domain);
+      projection_space->get_domain(launch_domain);
       if (node->is_region())
       {
         RegionNode *region = node->as_region_node();
@@ -16245,8 +16175,8 @@ namespace Legion {
       if (!local_space.exists())
         return result;
       Domain local_domain, launch_domain;
-      forest->find_launch_space_domain(local_space, local_domain);
-      launch_space->get_launch_space_domain(launch_domain);
+      forest->find_domain(local_space, local_domain);
+      launch_space->get_domain(launch_domain);
       std::map<IndexTreeNode*,ProjectionTree*> node_map;
       node_map[row_source] = result;
       if (root->is_region())
@@ -16312,8 +16242,8 @@ namespace Legion {
       if (!local_space.exists())
         return;
       Domain local_domain, launch_domain;
-      forest->find_launch_space_domain(local_space, local_domain);
-      launch_space->get_launch_space_domain(launch_domain);
+      forest->find_domain(local_space, local_domain);
+      launch_space->get_domain(launch_domain);
       if (root->is_region())
       {
         RegionNode *region = root->as_region_node();
@@ -16694,11 +16624,8 @@ namespace Legion {
         legion_collective_radix(config.legion_collective_radix),
         mpi_rank_table((mpi_rank >= 0) ? new MPIRankTable(this) : NULL),
         prepared_for_shutdown(false), total_outstanding_tasks(0), 
-        // In the case where the runtime is backgrounded, have node 0 keep
-        // a reference for each node so that we wait until we see all wait
-        // call from each node before we start trying to perform a shutdown
-        outstanding_top_level_tasks(
-            ((unique == 0) && background) ? total_address_spaces : 0),
+        outstanding_top_level_tasks(initialize_outstanding_top_level_tasks(
+              address_space, total_address_spaces, legion_collective_radix)),
         concurrent_reservation(Reservation::NO_RESERVATION),
         local_procs(locals), local_utils(local_utilities),
         proc_spaces(processor_spaces),
@@ -17300,11 +17227,9 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void Runtime::log_machine(Machine machine) const
+    void Runtime::log_machine(void) const
     //--------------------------------------------------------------------------
     {
-      if (!legion_spy_enabled)
-        return;
       std::set<Processor::Kind> proc_kinds;
       Machine::ProcessorQuery all_procs(machine);
 #define COUNTER(X,Y) +1
@@ -17859,32 +17784,6 @@ namespace Legion {
       delete dso;
 #endif // LEGION_USE_LIBDL
       return global_perform;
-    }
-
-    //--------------------------------------------------------------------------
-    void Runtime::startup_runtime(void)
-    //--------------------------------------------------------------------------
-    {
-      // If stealing is not disabled then startup our mappers
-      if (!stealing_disabled)
-      {
-        for (std::map<Processor,ProcessorManager*>::const_iterator it = 
-              proc_managers.begin(); it != proc_managers.end(); it++)
-          it->second->startup_mappers();
-      }
-      if (address_space == 0)
-      {
-        if (legion_spy_enabled)
-            log_machine(machine);
-        // If we are runtime 0 then we launch the top-level task
-        if (legion_main_set)
-        {
-          TaskLauncher launcher(Runtime::legion_main_id, 
-                                UntypedBuffer(&input_args, sizeof(InputArgs)),
-                                Predicate::TRUE_PRED, legion_main_mapper_id);
-          launch_top_level_task(launcher); 
-        }
-      }
     }
 
     //--------------------------------------------------------------------------
@@ -21141,6 +21040,14 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void Runtime::send_startup_barrier(AddressSpaceID target, Serializer &rez)
+    //--------------------------------------------------------------------------
+    {
+      find_messenger(target)->send_message<SEND_STARTUP_BARRIER>(rez,
+                                                          true/*flush*/);
+    }
+
+    //--------------------------------------------------------------------------
     void Runtime::send_task(TaskOp *task)
     //--------------------------------------------------------------------------
     {
@@ -23567,6 +23474,15 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void Runtime::handle_startup_barrier(Deserializer &derez)
+    //--------------------------------------------------------------------------
+    {
+      RtBarrier startup_barrier;
+      derez.deserialize(startup_barrier);
+      broadcast_startup_barrier(startup_barrier);
+    }
+
+    //--------------------------------------------------------------------------
     void Runtime::handle_task(Deserializer &derez)
     //--------------------------------------------------------------------------
     {
@@ -25543,25 +25459,9 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void Runtime::handle_top_level_task_request(Deserializer &derez)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(address_space == 0); // should only happen on node 0
-#endif
-      RtUserEvent to_trigger;
-      derez.deserialize(to_trigger);
-      increment_outstanding_top_level_tasks();
-      Runtime::trigger_event(to_trigger);
-    }
-
-    //--------------------------------------------------------------------------
     void Runtime::handle_top_level_task_complete(Deserializer &derez)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(address_space == 0); // should only happen on node 0
-#endif
       decrement_outstanding_top_level_tasks();
     }
 
@@ -27214,47 +27114,35 @@ namespace Legion {
     void Runtime::increment_outstanding_top_level_tasks(void)
     //--------------------------------------------------------------------------
     {
-      // Check to see if we are on node 0 or not
-      if (address_space != 0)
-      {
-        // Send a message to node 0 requesting permission to 
-        // lauch a new top-level task and wait on an event
-        // to signal that permission has been granted
-        RtUserEvent grant_event = Runtime::create_rt_user_event();
-        Serializer rez;
-        rez.serialize(grant_event);
-        find_messenger(0)->send_message<SEND_TOP_LEVEL_TASK_REQUEST>(rez,
-                                                          true/*flush*/);
-        grant_event.wait();
-      }
-      else
-      {
-        outstanding_top_level_tasks.fetch_add(1);
-      }
+      unsigned previous = outstanding_top_level_tasks.fetch_add(1);
+      if (previous == 0)
+        REPORT_LEGION_ERROR(ERROR_ILLEGAL_TOP_LEVEL_TASK_CREATION,
+            "Illegal attempt to launch a top-level task after "
+            "Runtime::wait_for_shutdown has been called. All top-level tasks "
+            "must be created on a node before signaling to the runtime that "
+            "the client is ready for Legion to shutdown on that node.")
     }
 
     //--------------------------------------------------------------------------
     void Runtime::decrement_outstanding_top_level_tasks(void)
     //--------------------------------------------------------------------------
     {
-      // Check to see if we are on node 0 or not
-      if (address_space != 0)
-      {
-        // Send a message to node 0 indicating that we finished
-        // executing a top-level task
-        Serializer rez;
-        find_messenger(0)->send_message<SEND_TOP_LEVEL_TASK_COMPLETE>(rez,
-                                                            true/*flush*/);
-      }
-      else
-      {
-        unsigned prev = outstanding_top_level_tasks.fetch_sub(1);
+      unsigned previous = outstanding_top_level_tasks.fetch_sub(1);
 #ifdef DEBUG_LEGION
-        assert(prev > 0);
+      assert(previous > 0);
 #endif
-        // Check to see if we have no more outstanding top-level tasks
-        // If we don't launch a task to handle the try to shutdown the runtime 
-        if (prev == 1)
+      if (previous == 1)
+      {
+        if (address_space > 0)
+        {
+          // Send a message to the next node down the tree to remove our
+          // guard reference that we have there
+          AddressSpaceID parent = (address_space - 1) / legion_collective_radix;
+          Serializer rez;
+          find_messenger(parent)->send_message<SEND_TOP_LEVEL_TASK_COMPLETE>(
+                                                          rez, true/*flush*/);
+        }
+        else // We're the owner node so start the quiesence algorithm
           issue_runtime_shutdown_attempt();
       }
     }
@@ -29913,18 +29801,19 @@ namespace Legion {
     /*static*/ MapperID Runtime::legion_main_mapper_id = 0;
     /*static*/ bool Runtime::legion_main_set = false;
     /*static*/ bool Runtime::runtime_initialized = false;
+    /*static*/ bool Runtime::runtime_cmdline_parsed = false;
     /*static*/ bool Runtime::runtime_started = false;
     /*static*/ bool Runtime::runtime_backgrounded = false;
     /*static*/ Runtime* Runtime::the_runtime = NULL;
-    /*static*/ RtUserEvent Runtime::runtime_started_event = 
-                                              RtUserEvent::NO_RT_USER_EVENT;
-    /*static*/ std::atomic<int> Runtime::background_waits = {0};
+    /*static*/ std::atomic<Realm::Event::id_t> Runtime::startup_event = {0};
+    /*static*/ Realm::Barrier::timestamp_t Runtime::startup_timestamp = 0;
+    /*static*/ std::atomic<bool> Runtime::background_wait = {0};
     /*static*/ int Runtime::return_code = 0;
     /*static*/ int Runtime::mpi_rank = -1;
 
     //--------------------------------------------------------------------------
     /*static*/ int Runtime::start(int argc, char **argv, bool background,
-                                  bool supply_default_mapper)
+                                  bool supply_default_mapper, bool filter)
     //--------------------------------------------------------------------------
     {
       // Some static asserts that need to hold true for the runtime to work
@@ -29969,8 +29858,12 @@ namespace Legion {
       // their values as they might be changed by GASNet or MPI or whatever.
       // Note that the logger isn't initialized until after this call returns 
       // which means any logging that occurs before this has undefined behavior.
-      const LegionConfiguration &config = initialize(&argc, &argv, false);
+      const LegionConfiguration &config = 
+        initialize(&argc, &argv, !runtime_cmdline_parsed, filter);
       RealmRuntime realm = RealmRuntime::get_runtime();
+      // Finish configuring the machine so we can start querying the machine
+      // model and setting up our data structures before we start Realm
+      realm.finish_configure();
 
       // Perform any waits that the user requested before starting
       if (config.delay_start > 0)
@@ -29987,72 +29880,128 @@ namespace Legion {
       if ((mpi_rank >= 0) || (!pending_handshakes.empty()))
         configure_interoperability(config.separate_runtime_instances);
       // Construct our runtime objects 
-      Processor::Kind startup_kind = Processor::NO_KIND;
-      const RtEvent tasks_registered = configure_runtime(argc, argv,
-          config, realm, startup_kind, background, supply_default_mapper);
+      std::set<Processor> local_procs;
+      std::map<Processor,Runtime*> processor_mapping;
+      const Processor first_proc = configure_runtime(argc, argv,
+          config, realm, local_procs, processor_mapping, background,
+          supply_default_mapper);
 #ifdef DEBUG_LEGION
       // Startup kind should be a CPU or a Utility processor
-      assert((startup_kind == Processor::LOC_PROC) ||
-              (startup_kind == Processor::UTIL_PROC));
+      assert((first_proc.kind() == Processor::LOC_PROC) ||
+          (first_proc.kind() == Processor::UTIL_PROC));
+      // First processor should be on node zero
+      assert(first_proc.address_space() == 0);
+      assert(!local_procs.empty());
 #endif
       // We have to set these prior to starting Realm as once we start
       // Realm it might fork child processes so they all need to see
       // the same values for these static variables
       runtime_started = true;
       runtime_backgrounded = background;
-      // Make a user event that we will trigger once we the 
-      // startup task is done. If we're node 0 then we will use this
-      // as the precondition for launching the top-level task
-      runtime_started_event = Runtime::create_rt_user_event();
 
       // Now that we have everything setup we can tell Realm to
       // start the processors. It is at this point which fork
       // can be called to spawn subprocesses.
       realm.start();
 
-      // First we issue a "barrier" NOP task that runs on all the
-      // Realm processors to make sure that Realm is initialized
-      const RtEvent realm_initialized(realm.collective_spawn_by_kind(
-            Processor::NO_KIND, 0/*NOP*/, NULL, 0, false/*one per node*/));
-
-      // Now we initialize all the runtimes so that they are ready
-      // to begin execution. Note this also acts as a barrier across
-      // the machine to ensure that nobody does anything related to
-      // startup until all the runtimes are initialized everywhere
-      const RtEvent legion_initialized(realm.collective_spawn_by_kind(
-            (config.separate_runtime_instances ? Processor::NO_KIND :
-             startup_kind), LG_INITIALIZE_TASK_ID, NULL, 0,
-            !config.separate_runtime_instances, tasks_registered)); 
-      // Now we can do one more spawn call to startup the runtime 
-      // across the machine since we know everything is initialized
-      const RtEvent runtime_started(realm.collective_spawn_by_kind(
-              (config.separate_runtime_instances ? Processor::NO_KIND : 
-               startup_kind), LG_STARTUP_TASK_ID, NULL, 0, 
-              !config.separate_runtime_instances, 
-              Runtime::merge_events(realm_initialized, legion_initialized)));
-      // Trigger the start event when the runtime is ready
-      Runtime::trigger_event(runtime_started_event, runtime_started);
+      Realm::Barrier startup_barrier = Realm::Barrier::NO_BARRIER;
+      if ((the_runtime->total_address_spaces > 1) && 
+          !config.separate_runtime_instances)
+      {
+        // First we do a collective spawn to make sure that Realm is
+        // started and all of our meta-tasks have been registered
+        // across all of the nodes
+        // Very important, do NOT pass in any event preconditions to
+        // this task and do not use the postcondition as it comes from
+        // node zero and we don't want all the nodes to subscribe to
+        // node zero unnecessarily.
+        realm.collective_spawn(first_proc, LG_STARTUP_TASK_ID, NULL, 0);
+        // Now get the start-up barrier that will be set by the
+        // start-up task as it broadcasts through the nodes
+        startup_barrier = find_or_wait_for_startup_barrier();
+      }
+      // We also need to run a nop task on every processor to make sure
+      // that Realm has finished initializing that processor. This is
+      // especially important for things like Python processors which 
+      // might still be loading modules and we want to ensure that they
+      // are completely done doing that before we try to do anything
+      std::vector<RtEvent> nop_events;
+      nop_events.reserve(local_procs.size());
+      for (std::set<Processor>::const_iterator it =
+            local_procs.begin(); it != local_procs.end(); it++)
+        nop_events.push_back(RtEvent(it->spawn(
+                  Processor::TASK_ID_PROCESSOR_NOP, NULL, 0)));
+      // Now we can initialize the Legion runtime(s) on this node
+      if (config.separate_runtime_instances)
+      {
+        for (std::map<Processor,Runtime*>::const_iterator it =
+              processor_mapping.begin(); it != processor_mapping.end(); it++)
+          it->second->initialize_runtime();
+      }
+      else
+        the_runtime->initialize_runtime();
+      if (startup_barrier.exists())
+      {
+        // Make sure all the nodes are done
+        startup_barrier.arrive(1/*count*/, Runtime::merge_events(nop_events));
+        // Wait for all the nodes to be done with the initialization
+        startup_barrier.wait();
+      }
+      else
+      {
+        const RtEvent initialized = Runtime::merge_events(nop_events);
+        initialized.wait();
+      }
+      // Launch the top-level task if we have a main set
+      if (the_runtime->address_space == 0)
+      {
+        if (config.legion_spy_enabled)
+          the_runtime->log_machine();
+        if (legion_main_set)
+        {
+          TaskLauncher launcher(Runtime::legion_main_id,
+              UntypedBuffer(&the_runtime->input_args, sizeof(InputArgs)),
+                            Predicate::TRUE_PRED, legion_main_mapper_id);
+          the_runtime->launch_top_level_task(launcher);
+        }
+        // Cleanup the start-up barrier
+        if (startup_barrier.exists())
+          startup_barrier.destroy_barrier();
+      }
       // If we are supposed to background this thread, then we wait
       // for the runtime to shutdown, otherwise we can now return
-      if (!background)
-        return realm.wait_for_shutdown();
-      return 0;
+      if (background)
+        return 0;
+      // Decrement the total outstanding top-level tasks to reflect that
+      // this node is ready to shutdown when everything is done
+      the_runtime->decrement_outstanding_top_level_tasks();
+      // Wait for Realm shutdown to be complete
+      return realm.wait_for_shutdown();
     }
 
     //--------------------------------------------------------------------------
     /*static*/ const Runtime::LegionConfiguration& Runtime::initialize(
-                                           int *argc, char ***argv, bool filter)
+                               int *argc, char ***argv, bool parse, bool filter)
     //--------------------------------------------------------------------------
     {
       static LegionConfiguration config;
-      if (runtime_initialized)
-        return config;
-      RealmRuntime realm;
+      RealmRuntime realm = RealmRuntime::get_runtime();
+      if (!runtime_initialized)
+      {
 #ifndef NDEBUG
-      bool ok = 
+        bool ok = 
 #endif
-        realm.network_init(argc, argv);
-      assert(ok);
+          realm.network_init(argc, argv);
+        assert(ok);
+#ifndef NDEBUG
+        ok =
+#endif
+          realm.create_configs(*argc, *argv);
+        assert(ok);
+        runtime_initialized = true;
+      }
+      if (runtime_cmdline_parsed || !parse)
+        return config;
       // Next we configure the realm runtime after which we can access the
       // machine model and make events and reservations and do reigstrations
       std::vector<std::string> cmdline;
@@ -30108,11 +30057,7 @@ namespace Legion {
       cmdline.reserve(cmdline.size() + ((num_args > 0) ? num_args-1 : 0));
       for (unsigned i = 1; i < num_args; i++)
         cmdline.emplace_back((*argv)[i]);
-#ifndef NDEBUG
-      ok = 
-#endif
-        realm.configure_from_command_line(cmdline, filter);
-      assert(ok);
+      realm.parse_command_line(cmdline, filter);
       Realm::CommandLineParser cp; 
       cp.add_option_bool("-lg:warn_backtrace",
                          config.warnings_backtrace, !filter)
@@ -30316,7 +30261,7 @@ namespace Legion {
               "LEVEL_ERROR" :
             (compile_time_min_level == Realm::Logger::LEVEL_FATAL) ?
               "LEVEL_FATAL" : "LEVEL_NONE")
-      runtime_initialized = true;
+      runtime_cmdline_parsed = true;
       return config;
     }
 
@@ -30391,6 +30336,29 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    /*static*/ unsigned Runtime::initialize_outstanding_top_level_tasks(
+        AddressSpaceID local_space, size_t total_spaces, unsigned radix)
+    //--------------------------------------------------------------------------
+    {
+      // We always have at least one top-level task in the count as a guard
+      // that will be removed once we know that we aren't launching anymore
+      // new top-level tasks on this node
+      unsigned result = 1;
+      // Now count how many notifications we expect to see and add that to
+      // our count to act as an additional guard. This will allow us to do
+      // a tree reduction down from each node towards node 0 which will
+      // start the shutdown quiescence test
+      AddressSpaceID offset = local_space * radix;
+      for (unsigned idx = 1; idx <= radix; idx++)
+      {
+        AddressSpaceID target = offset + idx;
+        if (target < total_spaces)
+          result++;
+      }
+      return result;
+    }
+
+    //--------------------------------------------------------------------------
     Future Runtime::launch_top_level_task(const TaskLauncher &launcher)
     //--------------------------------------------------------------------------
     {
@@ -30416,10 +30384,16 @@ namespace Legion {
 #endif
       // Get a remote task to serve as the top of the top-level task
       TopLevelContext *top_context = new TopLevelContext(this);
+      // Save the context in the implicit context
+      implicit_context = top_context;
+      implicit_runtime = this;
       // Add a reference to the top level context
       top_context->add_base_gc_ref(RUNTIME_REF);
       // Set the executing processor
       top_context->set_executing_processor(target);
+      // Save the current context if there is one and restore it later
+      TaskContext *previous_implicit = implicit_context;
+      implicit_context = top_context;
       // Get an individual task to be the top-level task
       IndividualTask *top_task = get_available_individual_task();
       AutoProvenance provenance(launcher.provenance);
@@ -30435,9 +30409,12 @@ namespace Legion {
       ApEvent pre = top_task->get_completion_event();
       issue_runtime_meta_task(args, LG_LATENCY_WORK_PRIORITY,
                               Runtime::protect_event(pre));
+      
       // Put the task in the ready queue, make sure that the runtime is all
       // set up across the machine before we launch it as well
-      top_task->enqueue_ready_task(false/*target*/, runtime_started_event);
+      top_task->enqueue_ready_task(false/*target*/);
+      // Now we can restore the previous implicit context
+      implicit_context = previous_implicit;
       return result;
     }
 
@@ -30552,9 +30529,6 @@ namespace Legion {
       // as a new kind of processor to use
       assert(proxy.exists());
 #endif
-      // Wait for the runtime to have started if necessary
-      if (!runtime_started_event.has_triggered())
-        runtime_started_event.external_wait();
       SingleTask *local_task = NULL;
       // Now that the runtime is started we can make our context
       if (control_replicable && (total_address_spaces > 1))
@@ -30805,17 +30779,19 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    /*static*/ RtEvent Runtime::configure_runtime(int argc, char **argv,
+    /*static*/ Processor Runtime::configure_runtime(int argc, char **argv,
                          const LegionConfiguration &config, RealmRuntime &realm,
-                         Processor::Kind &startup_kind, bool background,
-                         bool supply_default_mapper)
+                         std::set<Processor> &local_procs,
+                         std::map<Processor,Runtime*> &processor_mapping,
+                         bool background, bool supply_default_mapper)
     //--------------------------------------------------------------------------
     {
+      Processor first_proc = Processor::NO_PROC;
       // Do some error checking in case we are running with separate instances
       Machine machine = Machine::get_machine();
       // Compute the data structures necessary for constructing a runtime 
-      std::set<Processor> local_procs;
       std::set<Processor> local_util_procs;
+      Processor::Kind startup_kind = Processor::NO_KIND;
       // First we find all our local processors
       {
         Machine::ProcessorQuery local_proc_query(machine);
@@ -30866,12 +30842,7 @@ namespace Legion {
               "must exist in each process for Legion.")
         system_memory = local_sysmems.first();
       }
-
-      Realm::ProfilingRequestSet no_requests;
-      // Keep track of all the registration events
-      std::set<RtEvent> registered_events;
       // Now build the data structures for all processors 
-      std::map<Processor,Runtime*> processor_mapping;
       if (config.separate_runtime_instances)
       {
 #ifdef LEGION_TRACE_ALLOCATION
@@ -30893,8 +30864,14 @@ namespace Legion {
         for (Machine::ProcessorQuery::iterator it = 
               all_procs.begin(); it != all_procs.end(); it++,sid++)
         {
+          if (it->address_space() != 0)
+            REPORT_LEGION_FATAL(LEGION_FATAL_SEPARATE_RUNTIME_INSTANCES, 
+                        "Separate runtime instances are not "
+                        "supported when running with multiple nodes ")
           address_spaces.insert(sid);
           proc_spaces[*it] = sid;
+          if (!first_proc.exists() && (it->kind() == startup_kind))
+            first_proc = *it;
         }
         // Now we make runtime instances for each of the local processors
         for (std::set<Processor>::const_iterator it =
@@ -30944,6 +30921,9 @@ namespace Legion {
           AddressSpaceID sid = it->address_space();
           address_spaces.insert(sid);
           proc_spaces[*it] = sid;
+          if (!first_proc.exists() && (sid == 0) && 
+              (it->kind() == startup_kind))
+            first_proc = *it;
         }
         // Make one runtime instance and record it with all the processors
         const AddressSpace local_space = local_procs.begin()->address_space();
@@ -30977,12 +30957,14 @@ namespace Legion {
               local_util_procs.begin(); it != local_util_procs.end(); it++)
           processor_mapping[*it] = runtime;
       }
+      Realm::ProfilingRequestSet no_requests;
+      // Keep track of all the registration events
+      std::set<RtEvent> registered_events;
       // Make the code descriptors for our tasks
-      CodeDescriptor initialize_task(Runtime::initialize_runtime_task);
+      CodeDescriptor startup_task(Runtime::startup_runtime_task);
       CodeDescriptor shutdown_task(Runtime::shutdown_runtime_task);
       CodeDescriptor lg_task(Runtime::legion_runtime_task);
       CodeDescriptor rt_profiling_task(Runtime::profiling_runtime_task);
-      CodeDescriptor startup_task(Runtime::startup_runtime_task);
       CodeDescriptor endpoint_task(Runtime::endpoint_runtime_task); 
       CodeDescriptor app_proc_task(Runtime::application_processor_runtime_task);
       for (std::map<Processor,Runtime*>::const_iterator it = 
@@ -30990,14 +30972,9 @@ namespace Legion {
       {
         // These tasks get registered on startup_kind processors
         if (it->first.kind() == startup_kind)
-        {
-          registered_events.insert(RtEvent(
-                it->first.register_task(LG_INITIALIZE_TASK_ID, initialize_task,
-                  no_requests, &it->second, sizeof(it->second))));
           registered_events.insert(RtEvent(
               it->first.register_task(LG_STARTUP_TASK_ID, startup_task,
                 no_requests, &it->second, sizeof(it->second))));
-        }
         // Register these tasks on utility processors if we have
         // them otherwise register them on all the processor kinds
         if (local_util_procs.empty() || 
@@ -31075,16 +31052,14 @@ namespace Legion {
       
       if (config.record_registration)
       {
-        log_run.print("Legion runtime initialize task has Realm ID %d",
-                      LG_INITIALIZE_TASK_ID);
+        log_run.print("Legion startup task has Realm ID %d",
+                      LG_STARTUP_TASK_ID);
         log_run.print("Legion runtime shutdown task has Realm ID %d", 
                       LG_SHUTDOWN_TASK_ID);
         log_run.print("Legion runtime meta-task has Realm ID %d", 
                       LG_TASK_ID);
         log_run.print("Legion runtime profiling task Realm ID %d",
                       LG_LEGION_PROFILING_ID);
-        log_run.print("Legion startup task has Realm ID %d",
-                      LG_STARTUP_TASK_ID);
         log_run.print("Legion endpoint task has Realm ID %d",
                       LG_ENDPOINT_TASK_ID);
 #ifdef LEGION_SEPARATE_META_TASKS
@@ -31108,7 +31083,11 @@ namespace Legion {
         }
 #endif
       }
-      return Runtime::merge_events(registered_events);
+      // Make sure that we are done registering before we return
+      RtEvent ready = Runtime::merge_events(registered_events);
+      if (ready.exists())
+        ready.wait();
+      return first_proc;
     }
 
     //--------------------------------------------------------------------------
@@ -31121,7 +31100,7 @@ namespace Legion {
                       "not launched in background mode!");
       // If this is the first time we've called this on this node then 
       // we need to remove our reference to allow shutdown to proceed
-      if (background_waits.fetch_add(1) == 0)
+      if (!background_wait.exchange(true))
         the_runtime->decrement_outstanding_top_level_tasks();
       return RealmRuntime::get_runtime().wait_for_shutdown();
     }
@@ -31381,10 +31360,6 @@ namespace Legion {
     {
       if (runtime_started)
       {
-        // Wait for the runtime to be started everywhere
-        if (!runtime_started_event.has_triggered())
-          // If we're here this has to be an external thread
-          runtime_started_event.external_wait();
         if (the_runtime->separate_runtime_instances)
             REPORT_LEGION_FATAL(LEGION_FATAL_SEPARATE_RUNTIME_INSTANCES,
                 "Dynamic registration callbacks cannot be registered after "
@@ -31416,10 +31391,6 @@ namespace Legion {
     {
       if (runtime_started)
       {
-        // Wait for the runtime to be started everywhere
-        if (!runtime_started_event.has_triggered())
-          // If we're here this has to be an external thread
-          runtime_started_event.external_wait();
         if (the_runtime->separate_runtime_instances)
             REPORT_LEGION_FATAL(LEGION_FATAL_SEPARATE_RUNTIME_INSTANCES,
                 "Dynamic registration callbacks cannot be registered after "
@@ -31939,22 +31910,6 @@ namespace Legion {
 #endif
 
     //--------------------------------------------------------------------------
-    /*static*/ void Runtime::initialize_runtime_task(const void *args, 
-               size_t arglen, const void *userdata, size_t userlen, Processor p)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      assert(userlen == sizeof(Runtime**));
-#endif
-      Runtime *runtime = *((Runtime**)userdata); 
-      if (implicit_runtime == NULL)
-        implicit_runtime = runtime;
-      if (implicit_context != NULL)
-        implicit_context = NULL;
-      runtime->initialize_runtime();
-    }
-
-    //--------------------------------------------------------------------------
     /*static*/ void Runtime::shutdown_runtime_task(const void *args, 
                size_t arglen, const void *userdata, size_t userlen, Processor p)
     //--------------------------------------------------------------------------
@@ -31970,11 +31925,6 @@ namespace Legion {
       // Finalize the runtime and then delete it
       runtime->finalize_runtime();
       delete runtime;
-      // Handle a little shutdown race condition here where the 
-      // runtime_startup_event on nodes other than zero may not 
-      // have triggered yet before shutdown
-      if (!runtime_started_event.has_triggered())
-        runtime_started_event.wait();
     }
 
     //--------------------------------------------------------------------------
@@ -32608,6 +32558,38 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    void Runtime::broadcast_startup_barrier(RtBarrier startup_barrier)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(startup_barrier.exists());
+#endif
+      // Make sure the representation of the barriers haven't changed
+      static_assert(sizeof(startup_barrier) == 
+          (sizeof(startup_event) + sizeof(startup_timestamp)),
+          "Realm Barrier representation changed");
+      // Tree broadcast it out to any downstream nodes
+      AddressSpaceID offset = address_space * legion_collective_radix;
+      for (int idx = 1; idx <= legion_collective_radix; idx++)
+      {
+        AddressSpaceID target = offset + idx;
+        if (target < total_address_spaces)
+        {
+          Serializer rez;
+          rez.serialize(startup_barrier);
+          send_startup_barrier(target, rez);
+        }
+      }
+      // Write the timestamp first
+      startup_timestamp = startup_barrier.timestamp;
+      // Then set the ID locally
+      RtUserEvent to_trigger;
+      to_trigger.id = startup_event.exchange(startup_barrier.id);
+      if (to_trigger.exists())
+        Runtime::trigger_event(to_trigger);
+    }
+
+    //--------------------------------------------------------------------------
     /*static*/ void Runtime::startup_runtime_task(
                                    const void *args, size_t arglen, 
 				   const void *userdata, size_t userlen,
@@ -32622,7 +32604,10 @@ namespace Legion {
         implicit_runtime = runtime;
       if (implicit_context != NULL)
         implicit_context = NULL;
-      runtime->startup_runtime();
+      // Create the startup barrier and send it out
+      RtBarrier startup_barrier(
+        Realm::Barrier::create_barrier(runtime->total_address_spaces));
+      runtime->broadcast_startup_barrier(startup_barrier);
     }
 
     //--------------------------------------------------------------------------
@@ -32728,6 +32713,32 @@ namespace Legion {
 #ifdef DEBUG_SHUTDOWN_HANG
       runtime->outstanding_counts[tid].fetch_sub(1);
 #endif
+    }
+
+    //--------------------------------------------------------------------------
+    /*static*/ RtBarrier Runtime::find_or_wait_for_startup_barrier(void)
+    //--------------------------------------------------------------------------
+    {
+      RtBarrier result;
+      result.id = startup_event.load();
+      if (result.exists())
+      {
+        result.timestamp = startup_timestamp;
+        return result;
+      }
+      // Barrier isn't ready yet so make an event to wait on and try to
+      // swap it into the startup event
+      const RtUserEvent ready = Runtime::create_rt_user_event();
+      if (startup_event.compare_exchange_strong(result.id, ready.id))
+      {
+        ready.wait();
+        result.id = startup_event.load();
+      }
+      else // Was already set
+        Runtime::trigger_event(ready);
+      // Get the timestamp
+      result.timestamp = startup_timestamp;
+      return result;
     }
 
 #ifdef LEGION_TRACE_ALLOCATION

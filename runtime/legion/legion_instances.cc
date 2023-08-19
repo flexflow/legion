@@ -1514,7 +1514,8 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     bool PhysicalManager::meets_regions(
-      const std::vector<LogicalRegion> &regions, bool tight_region_bounds) const
+      const std::vector<LogicalRegion> &regions, bool tight_region_bounds,
+      const Domain *padding_delta) const
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -1533,16 +1534,16 @@ namespace Legion {
       }
       IndexSpaceExpression *space_expr = (region_exprs.size() == 1) ?
         *(region_exprs.begin()) : context->union_index_spaces(region_exprs);
-      return meets_expression(space_expr, tight_region_bounds);
+      return meets_expression(space_expr, tight_region_bounds, padding_delta);
     }
 
     //--------------------------------------------------------------------------
     bool PhysicalManager::meets_expression(IndexSpaceExpression *space_expr,
-                                           bool tight_bounds) const
+                           bool tight_bounds, const Domain *padding_delta) const
     //--------------------------------------------------------------------------
     {
       return instance_domain->meets_layout_expression(space_expr, tight_bounds,
-                                                  piece_list, piece_list_size);
+                                    piece_list, piece_list_size, padding_delta);
     }
 
     //--------------------------------------------------------------------------
@@ -3360,8 +3361,8 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(is_owner());
 #endif
-      if (use_event.exists() && !use_event.has_triggered())
-        use_event.wait();
+      if (use_event.exists() && !use_event.has_triggered_faultignorant())
+        use_event.wait_faultignorant();
       void *inst_ptr = instance.pointer_untyped(0/*offset*/, 0/*elem size*/);
       return uintptr_t(inst_ptr);
     }

@@ -667,7 +667,7 @@ namespace Legion {
       if (sharding_space.exists())
       {
         Domain shard_domain;
-        runtime->forest->find_launch_space_domain(sharding_space, shard_domain);
+        runtime->forest->find_domain(sharding_space, shard_domain);
         owner_shard = sharding_function->find_owner(index_point, shard_domain);
       }
       else
@@ -720,6 +720,8 @@ namespace Legion {
         LegionSpy::log_owner_shard(get_unique_id(), owner_shard);
       if (owner_shard != repl_ctx->owner_shard->shard_id)
       {
+        // Still register this with the trace
+        tpl->register_operation(this);
 #ifdef LEGION_SPY
         LegionSpy::log_replay_operation(unique_op_id);
 #endif
@@ -779,12 +781,15 @@ namespace Legion {
       // See if we're going to be a local point or not
       Domain shard_domain = index_domain;
       if (sharding_space.exists())
-        runtime->forest->find_launch_space_domain(sharding_space, shard_domain);
-      ShardID owner = sharding_function->find_owner(index_point, shard_domain);
-      if (owner == repl_ctx->owner_shard->shard_id)
+        runtime->forest->find_domain(sharding_space, shard_domain);
+      if (!elide_future_return)
       {
-        FutureMap map = must_epoch->get_future_map();
-        result = map.impl->get_future(index_point, true/*internal only*/);
+        ShardID owner = sharding_function->find_owner(index_point,shard_domain);
+        if (owner == repl_ctx->owner_shard->shard_id)
+        {
+          FutureMap map = must_epoch->get_future_map();
+          result = map.impl->get_future(index_point, true/*internal only*/);
+        }
       }
     }
 
@@ -928,18 +933,21 @@ namespace Legion {
       ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
 #endif
       set_origin_mapped(true);
-      future_map = must_epoch->get_future_map();
-      const IndexSpace local_space = sharding_space.exists() ?
-          sharding_function->find_shard_space(repl_ctx->owner_shard->shard_id,
-              launch_space, sharding_space, get_provenance()) :
-          sharding_function->find_shard_space(repl_ctx->owner_shard->shard_id,
-              launch_space, launch_space->handle, get_provenance());
-      // Figure out which points to enumerate
-      if (local_space.exists())
+      if (!elide_future_return)
       {
-        Domain local_domain;
-        runtime->forest->find_launch_space_domain(local_space, local_domain);
-        enumerate_futures(local_domain);
+        future_map = must_epoch->get_future_map();
+        const IndexSpace local_space = sharding_space.exists() ?
+            sharding_function->find_shard_space(repl_ctx->owner_shard->shard_id,
+                launch_space, sharding_space, get_provenance()) :
+            sharding_function->find_shard_space(repl_ctx->owner_shard->shard_id,
+                launch_space, launch_space->handle, get_provenance());
+        // Figure out which points to enumerate
+        if (local_space.exists())
+        {
+          Domain local_domain;
+          runtime->forest->find_domain(local_space, local_domain);
+          enumerate_futures(local_domain);
+        }
       }
     }
 
@@ -1136,7 +1144,7 @@ namespace Legion {
         if ((redop == 0) && !elide_future_return)
         {
           Domain shard_domain;
-          node->get_launch_space_domain(shard_domain);
+          node->get_domain(shard_domain);
           enumerate_futures(shard_domain);
         }
         // If we still need to slice the task then we can run it 
@@ -1361,7 +1369,8 @@ namespace Legion {
             collective_done = reduction_collective->get_done_event();
           else
             collective_done = 
-              broadcast_collective->async_broadcast(reduction_instance);
+              broadcast_collective->async_broadcast(reduction_instance,
+                  ApEvent::NO_AP_EVENT, reduction_collective->get_done_event());
         }
         else
           collective_done = all_reduce_collective->async_reduce(
@@ -1401,46 +1410,50 @@ namespace Legion {
     {
       // Otherwise, we need to update the internal space so we only set
       // our local points with the predicate false result
-      if (redop == 0)
+      if (!elide_future_return)
       {
+        if (redop == 0)
+        {
 #ifdef DEBUG_LEGION
-        ReplicateContext *repl_ctx = 
-          dynamic_cast<ReplicateContext*>(parent_ctx);
-        assert(repl_ctx != NULL);
+          ReplicateContext *repl_ctx = 
+            dynamic_cast<ReplicateContext*>(parent_ctx);
+          assert(repl_ctx != NULL);
 #else
-        ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
+          ReplicateContext *repl_ctx = 
+            static_cast<ReplicateContext*>(parent_ctx);
 #endif
 #ifdef DEBUG_LEGION
-        assert(sharding_function != NULL);
-        assert(future_map.impl != NULL);
-        ReplFutureMapImpl *impl =
-          dynamic_cast<ReplFutureMapImpl*>(future_map.impl);
-        assert(impl != NULL);
+          assert(sharding_function != NULL);
+          assert(future_map.impl != NULL);
+          ReplFutureMapImpl *impl =
+            dynamic_cast<ReplFutureMapImpl*>(future_map.impl);
+          assert(impl != NULL);
 #else
-        ReplFutureMapImpl *impl =
-          static_cast<ReplFutureMapImpl*>(future_map.impl);
+          ReplFutureMapImpl *impl =
+            static_cast<ReplFutureMapImpl*>(future_map.impl);
 #endif
-        impl->set_sharding_function(sharding_function);
-        // Compute the local index space of points for this shard
-        if (sharding_space.exists())
-          internal_space = 
-            sharding_function->find_shard_space(repl_ctx->owner_shard->shard_id,
-                launch_space, sharding_space, get_provenance());
-        else
-          internal_space =
-            sharding_function->find_shard_space(repl_ctx->owner_shard->shard_id,
+          impl->set_sharding_function(sharding_function);
+          // Compute the local index space of points for this shard
+          if (sharding_space.exists())
+            internal_space = sharding_function->find_shard_space(
+                  repl_ctx->owner_shard->shard_id,
+                  launch_space, sharding_space, get_provenance());
+          else
+            internal_space = sharding_function->find_shard_space(
+                repl_ctx->owner_shard->shard_id,
                 launch_space, launch_space->handle, get_provenance());
-      }
-      else
-      {
-        if (serdez_redop_collective != NULL)
-          serdez_redop_collective->elide_collective();
-        if (all_reduce_collective != NULL)
-          all_reduce_collective->elide_collective();
-        if (reduction_collective != NULL)
-          reduction_collective->elide_collective();
-        if (broadcast_collective != NULL)
-          broadcast_collective->elide_collective();
+        }
+        else
+        {
+          if (serdez_redop_collective != NULL)
+            serdez_redop_collective->elide_collective();
+          if (all_reduce_collective != NULL)
+            all_reduce_collective->elide_collective();
+          if (reduction_collective != NULL)
+            reduction_collective->elide_collective();
+          if (broadcast_collective != NULL)
+            broadcast_collective->elide_collective();
+        }
       }
       if (output_size_collective != NULL)
         output_size_collective->elide_collective();
@@ -1460,7 +1473,7 @@ namespace Legion {
       assert(broadcast_collective == NULL);
 #endif
       // If we have a reduction op then we need an exchange
-      if (redop > 0)
+      if (!elide_future_return && (redop > 0))
       {
         if (serdez_redop_fns == NULL)
         {
@@ -1626,9 +1639,9 @@ namespace Legion {
 #endif
       Domain launch_domain;
       if (sharding_space.exists())
-        runtime->forest->find_launch_space_domain(sharding_space,launch_domain);
+        runtime->forest->find_domain(sharding_space, launch_domain);
       else
-        launch_space->get_launch_space_domain(launch_domain);
+        launch_space->get_domain(launch_domain);
       const ShardID point_shard = 
         sharding_function->find_owner(point, launch_domain); 
       if (point_shard != repl_ctx->owner_shard->shard_id)
@@ -1665,9 +1678,9 @@ namespace Legion {
       // going to be coming from a remote shard
       Domain launch_domain;
       if (sharding_space.exists())
-        runtime->forest->find_launch_space_domain(sharding_space,launch_domain);
+        runtime->forest->find_domain(sharding_space, launch_domain);
       else
-        launch_space->get_launch_space_domain(launch_domain);
+        launch_space->get_domain(launch_domain);
       const ShardID next_shard = 
         sharding_function->find_owner(next, launch_domain); 
       if (next_shard != repl_ctx->owner_shard->shard_id)
@@ -3351,7 +3364,7 @@ namespace Legion {
       if (sharding_space.exists())
       {
         Domain shard_domain;
-        runtime->forest->find_launch_space_domain(sharding_space, shard_domain);
+        runtime->forest->find_domain(sharding_space, shard_domain);
         owner_shard = sharding_function->find_owner(index_point, shard_domain);
       }
       else
@@ -4007,9 +4020,9 @@ namespace Legion {
 #endif
       Domain launch_domain;
       if (sharding_space.exists())
-        runtime->forest->find_launch_space_domain(sharding_space,launch_domain);
+        runtime->forest->find_domain(sharding_space,launch_domain);
       else
-        launch_space->get_launch_space_domain(launch_domain);
+        launch_space->get_domain(launch_domain);
       const ShardID point_shard = 
         sharding_function->find_owner(point, launch_domain); 
       if (point_shard != repl_ctx->owner_shard->shard_id)
@@ -4046,9 +4059,9 @@ namespace Legion {
       // going to be coming from a remote shard
       Domain launch_domain;
       if (sharding_space.exists())
-        runtime->forest->find_launch_space_domain(sharding_space,launch_domain);
+        runtime->forest->find_domain(sharding_space, launch_domain);
       else
-        launch_space->get_launch_space_domain(launch_domain);
+        launch_space->get_domain(launch_domain);
       const ShardID next_shard = 
         sharding_function->find_owner(next, launch_domain); 
       if (next_shard != repl_ctx->owner_shard->shard_id)
@@ -4560,7 +4573,7 @@ namespace Legion {
 #endif
       if (future_map.impl != NULL)
       {
-        if (needs_all_futures)
+        if (!needs_all_futures)
         {
           IndexPartNode *partition = runtime->forest->get_node(pid);
           const Domain future_map_domain = future_map.impl->get_domain();
@@ -4812,7 +4825,7 @@ namespace Legion {
                                                    privilege_path, analysis);
       // Record this dependent partition op with the context so that it 
       // can track implicit dependences on it for later operations
-      parent_ctx->update_current_implicit(this);
+      parent_ctx->update_current_implicit_creation(this);
     }
 
     //--------------------------------------------------------------------------
@@ -4937,8 +4950,8 @@ namespace Legion {
       if (is_index_space)
       {
         IndexSpaceNode *node = runtime->forest->get_node(handle);
-        ApEvent domain_ready;
-        Domain domain = node->get_domain(domain_ready, false/*need tight*/);
+        Domain domain;
+        ApEvent domain_ready = node->get_domain(domain, false/*need tight*/);
         bool ready = false;
         {
           AutoLock o_lock(op_lock);
@@ -5014,7 +5027,10 @@ namespace Legion {
             }
           }
         }
-        return collective_done;
+        if (thunk->is_image())
+          return collective_done;
+        else
+          return scatter->get_done_event();
       }
       else
       {
@@ -5116,8 +5132,8 @@ namespace Legion {
           DomainPoint color = 
             node->color_space->delinearize_color_to_point(*itr);
           IndexSpaceNode *child = node->get_child(*itr);
-          ApEvent ready;
-          remote_targets[color] = child->get_domain(ready, false/*need tight*/);
+          ApEvent ready = 
+            child->get_domain(remote_targets[color], false/*need tight*/);
           if (ready.exists())
             preconditions.push_back(ready);
         }
@@ -5327,7 +5343,7 @@ namespace Legion {
       // First find all the tasks that we own on this shard
       Domain shard_domain = launch_domain;
       if (sharding_space.exists())
-        runtime->forest->find_launch_space_domain(sharding_space, shard_domain);
+        runtime->forest->find_domain(sharding_space, shard_domain);
       for (std::vector<SingleTask*>::const_iterator it = 
             single_tasks.begin(); it != single_tasks.end(); it++)
       {
@@ -5602,24 +5618,28 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ReplMustEpochOp::map_replicate_tasks(void) const
+    void ReplMustEpochOp::map_replicate_tasks(void)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(dependence_exchange != NULL);
       assert(single_tasks.size() == mapping_dependences.size());
 #endif
-      std::map<DomainPoint,RtUserEvent> mapped_events;
+      std::vector<RtEvent> local_mapped_events;
+      local_mapped_events.reserve(shard_single_tasks.size());
       for (std::set<SingleTask*>::const_iterator it = 
             shard_single_tasks.begin(); it != shard_single_tasks.end(); it++)
-        mapped_events[(*it)->index_point] = Runtime::create_rt_user_event();
+      {
+        const RtUserEvent mapped = Runtime::create_rt_user_event();
+        mapped_events[(*it)->index_point] = mapped;
+        local_mapped_events.push_back(mapped);
+      }
       // Now exchange completion events for the point tasks we own
       // and end up with a set of the completion event for each task
       // First compute the set of mapped events for the points that we own
       dependence_exchange->exchange_must_epoch_dependences(mapped_events);
 
       MustEpochMapArgs args(const_cast<ReplMustEpochOp*>(this));
-      std::set<RtEvent> local_mapped_events;
       // For correctness we still have to abide by the mapping dependences
       // computed on the individual tasks while we are mapping them
       for (unsigned idx = 0; idx < single_tasks.size(); idx++)
@@ -5652,16 +5672,12 @@ namespace Legion {
         if (!preconditions.empty())
         {
           RtEvent precondition = Runtime::merge_events(preconditions);
-          done = runtime->issue_runtime_meta_task(args, 
-                LG_THROUGHPUT_DEFERRED_PRIORITY, precondition); 
+          runtime->issue_runtime_meta_task(args, 
+                LG_THROUGHPUT_DEFERRED_PRIORITY, precondition);
         }
         else
-          done = runtime->issue_runtime_meta_task(args, 
+          runtime->issue_runtime_meta_task(args, 
                       LG_THROUGHPUT_DEFERRED_PRIORITY);
-        local_mapped_events.insert(done);
-        // We can trigger our completion event once the task is done
-        RtUserEvent mapped = mapped_events[single_tasks[idx]->index_point];
-        Runtime::trigger_event(mapped, done);
       }
       // Now we have to wait for all our mapping operations to be done
       if (!local_mapped_events.empty())
@@ -5669,6 +5685,7 @@ namespace Legion {
         RtEvent mapped_event = Runtime::merge_events(local_mapped_events);
         mapped_event.wait();
       }
+      mapped_events.clear();
     }
 
     //--------------------------------------------------------------------------
@@ -5808,7 +5825,7 @@ namespace Legion {
       if (sharding_space.exists())
       {
         Domain shard_domain;
-        runtime->forest->find_launch_space_domain(sharding_space, shard_domain);
+        runtime->forest->find_domain(sharding_space, shard_domain);
         return shard_domain;
       }
       else
@@ -6227,17 +6244,17 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(serdez_redop_fns != NULL);
 #endif
+      future_result_size = 0;
+      serdez_redop_fns->init_fn(redop,
+                                serdez_redop_buffer,
+                                future_result_size);
+      // Only include the initial value one time for control replication
+      // to avoid double inclusion
+      if (parent_ctx->get_task()->get_shard_id() == 0)
+        fold_serdez(initial_value.impl);
       for (std::map<DomainPoint,FutureImpl*>::const_iterator it = 
             sources.begin(); it != sources.end(); it++)
-      {
-        FutureImpl *impl = it->second;
-        size_t src_size = 0;
-        const void *source = impl->find_internal_buffer(parent_ctx, src_size);
-        (*(serdez_redop_fns->fold_fn))(redop, serdez_redop_buffer, 
-                                       future_result_size, source);
-        if (runtime->legion_spy_enabled)
-          LegionSpy::log_future_use(unique_op_id, impl->did);
-      }
+        fold_serdez(it->second);
       // Now we need an all-to-all to get the values from other shards
       const std::map<ShardID,std::pair<void*,size_t> > &remote_buffers =
         serdez_redop_collective->exchange_buffers(serdez_redop_buffer,
@@ -6305,7 +6322,7 @@ namespace Legion {
       // we'll just do our local reductions into the first target initially
       // and then we'll broadcast the result to the targets afterwards
       FutureInstance *local_target = targets.front();
-      ApEvent local_precondition = local_target->initialize(redop, this);
+      ApEvent local_precondition = init_redop_target(local_target);
       if (deterministic)
       {
         for (std::map<DomainPoint,FutureImpl*>::const_iterator it =
@@ -6344,7 +6361,8 @@ namespace Legion {
           collective_done = reduction_collective->get_done_event();
         else
           collective_done = 
-            broadcast_collective->async_broadcast(targets.front());
+            broadcast_collective->async_broadcast(targets.front(),
+                ApEvent::NO_AP_EVENT, reduction_collective->get_done_event());
       }
       else
         collective_done = all_reduce_collective->async_reduce(targets.front(),
@@ -12718,7 +12736,7 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     RtEvent FutureBroadcastCollective::async_broadcast(FutureInstance *inst,
-                                                       ApEvent precondition)
+                                             ApEvent precondition, RtEvent post)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -12727,6 +12745,9 @@ namespace Legion {
       instance = inst;
       if (is_origin())
       {
+#ifdef DEBUG_LEGION
+        assert(!post.exists());
+#endif
         Runtime::trigger_event(NULL, finished, precondition);
         perform_collective_async();
         return RtEvent::NO_RT_EVENT;
@@ -12736,6 +12757,7 @@ namespace Legion {
 #ifdef DEBUG_LEGION
         assert(!precondition.exists());
 #endif
+        postcondition = post;
         return perform_collective_wait(false/*block*/);
       }
     }
@@ -13587,7 +13609,7 @@ namespace Legion {
     DeppartResultScatter::DeppartResultScatter(ReplicateContext *ctx,
                   CollectiveID id, std::vector<DeppartResult> &res)
       : BroadcastCollective(ctx, id, 0/*origin shard*/), results(res),
-        renamed(false)
+        done_event(Runtime::create_ap_user_event(NULL))
     //--------------------------------------------------------------------------
     {
     }
@@ -13609,14 +13631,7 @@ namespace Legion {
         rez.serialize(it->domain);
         rez.serialize(it->color);
       }
-      if (!renamed)
-      {
-        ApUserEvent rename = Runtime::create_ap_user_event(NULL);
-        Runtime::trigger_event(NULL, rename, done_event);
-        done_event = rename;
-        renamed = true;
-      }
-      rez.serialize(done_event);
+      rez.serialize<ApEvent>(done_event);
     }
 
     //--------------------------------------------------------------------------
@@ -13632,17 +13647,16 @@ namespace Legion {
         derez.deserialize(it->domain);
         derez.deserialize(it->color);
       }
-      derez.deserialize(done_event);
+      ApEvent done;
+      derez.deserialize(done);
+      Runtime::trigger_event(NULL, done_event, done);
     }
 
     //--------------------------------------------------------------------------
     void DeppartResultScatter::broadcast_results(ApEvent done)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      assert(!done_event.exists());
-#endif
-      done_event = done;
+      Runtime::trigger_event(NULL, done_event, done);
       perform_collective_async();
     }
 
