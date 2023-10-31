@@ -499,6 +499,7 @@ namespace Legion {
       FieldAllocator& operator=(FieldAllocator &&allocator);
       inline bool operator<(const FieldAllocator &rhs) const;
       inline bool operator==(const FieldAllocator &rhs) const;
+      inline bool exists(void) const { return (impl != NULL); }
     public:
       ///@{
       /**
@@ -673,6 +674,7 @@ namespace Legion {
         { return (impl == rhs.impl); }
       inline bool operator<(const ArgumentMap &rhs) const
         { return (impl < rhs.impl); }
+      inline bool exists(void) const { return (impl != NULL); }
     public:
       /**
        * Check to see if a point has an argument set
@@ -771,6 +773,7 @@ namespace Legion {
       inline bool operator==(const Predicate &p) const;
       inline bool operator<(const Predicate &p) const;
       inline bool operator!=(const Predicate &p) const;
+      inline bool exists(void) const { return (impl != NULL); }
     private:
       bool const_value;
     };
@@ -1292,9 +1295,10 @@ namespace Legion {
       FRIEND_ALL_RUNTIME_CLASSES
       explicit Future(Internal::FutureImpl *impl);
     public:
-      bool operator==(const Future &f) const
+      inline bool exists(void) const { return (impl != NULL); }
+      inline bool operator==(const Future &f) const
         { return impl == f.impl; }
-      bool operator<(const Future &f) const
+      inline bool operator<(const Future &f) const
         { return impl < f.impl; }
       Future& operator=(const Future &f);
       Future& operator=(Future &&f);
@@ -1493,6 +1497,7 @@ namespace Legion {
       FRIEND_ALL_RUNTIME_CLASSES
       explicit FutureMap(Internal::FutureMapImpl *impl);
     public:
+      inline bool exists(void) const { return (impl != NULL); }
       inline bool operator==(const FutureMap &f) const
         { return impl == f.impl; }
       inline bool operator<(const FutureMap &f) const
@@ -2598,6 +2603,7 @@ namespace Legion {
     public:
       PhysicalRegion& operator=(const PhysicalRegion &rhs);
       PhysicalRegion& operator=(PhysicalRegion &&rhs);
+      inline bool exists(void) const { return (impl != NULL); }
       inline bool operator==(const PhysicalRegion &reg) const
         { return (impl == reg.impl); }
       inline bool operator<(const PhysicalRegion &reg) const
@@ -2771,6 +2777,7 @@ namespace Legion {
     public:
       ExternalResources& operator=(const ExternalResources &rhs);
       ExternalResources& operator=(ExternalResources &&rhs);
+      inline bool exists(void) const { return (impl != NULL); }
       inline bool operator==(const ExternalResources &reg) const
         { return (impl == reg.impl); }
       inline bool operator<(const ExternalResources &reg) const
@@ -9677,12 +9684,16 @@ namespace Legion {
 
       /**
        * This is the final method for marking the end of an 
-       * implicit top-level task. Note that it executes asychronously
-       * and it is still the responsibility of the user to wait for 
-       * the runtime to shutdown when all of it's effects are done.
+       * implicit top-level task. If there are any asynchronous effects
+       * that were launched during the implicit top-level task (such as
+       * a CUDA kernel launch) then users are required to capture all 
+       * those effects as a Realm event to tell Legion when all those
+       * effects are completed. Finishing an implicit top-level task
+       * still requires waiting explicitly for the runtime to shutdown.
        * The Context object is no longer valid after this call.
        */
-      void finish_implicit_task(Context ctx); 
+      void finish_implicit_task(Context ctx,
+                                Realm::Event effects = Realm::Event::NO_EVENT);
 
       /**
        * Return the maximum number of dimensions that Legion was

@@ -726,6 +726,7 @@ namespace Realm {
     // if true, worker threads that might have used user-level thread switching
     //  fall back to kernel threading
     bool force_kernel_threads = false;
+    unsigned long long job_id = 0;
   };
 
   CoreModuleConfig::CoreModuleConfig(void)
@@ -735,6 +736,10 @@ namespace Realm {
     config_map.insert({"util", &num_util_procs});
     config_map.insert({"io", &num_io_procs});
     config_map.insert({"sysmem", &sysmem_size});
+    config_map.insert({"stack_size", &stack_size});
+    config_map.insert({"pin_util_procs", &pin_util_procs});
+    config_map.insert({"use_ext_sysmem", &use_ext_sysmem});
+    config_map.insert({"regmem", &reg_mem_size});
   }
 
 #ifdef REALM_ON_WINDOWS
@@ -879,17 +884,85 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
     assert(finish_configured == false);
     // parse command line arguments
     CommandLineParser cp;
+
+    // config for CoreModule
     cp.add_option_int("-ll:cpu", num_cpu_procs)
       .add_option_int("-ll:util", num_util_procs)
       .add_option_int("-ll:io", num_io_procs)
       .add_option_int("-ll:concurrent_io", concurrent_io_threads)
       .add_option_int_units("-ll:csize", sysmem_size, 'm')
-      .add_option_int_units("-ll:stacksize", stack_size, 'm', true /*binary*/, true /*keep*/)
+      .add_option_int_units("-ll:stacksize", stack_size, 'm')
       .add_option_bool("-ll:pin_util", pin_util_procs)
       .add_option_int("-ll:cpu_bgwork", cpu_bgwork_timeslice)
       .add_option_int("-ll:util_bgwork", util_bgwork_timeslice)
-      .add_option_int("-ll:ext_sysmem", use_ext_sysmem)
-      .parse_command_line(cmdline);
+      .add_option_int("-ll:ext_sysmem", use_ext_sysmem);
+
+    // config for RuntimeImpl
+    // low-level runtime parameters
+    if(Network::max_node_id > 0)
+      reg_ib_mem_size = 256 << 20; // for inter-node copies
+    else
+      reg_ib_mem_size = 64 << 20; // for local transposes/serdez
+
+
+    // This dummy network list is actually handled in network_init()
+    // this is just here to help verify low-level arguement
+    std::vector<std::string> dummy_network_list;
+
+    cp.add_option_int_units("-ll:rsize", reg_mem_size, 'm')
+      .add_option_int_units("-ll:ib_rsize", reg_ib_mem_size, 'm')
+      .add_option_int_units("-ll:dsize", disk_mem_size, 'm')
+      .add_option_int("-ll:dma", dma_worker_threads)
+      .add_option_bool("-ll:pin_dma", pin_dma_threads)
+      .add_option_int("-ll:dummy_rsrv_ok", dummy_reservation_ok)
+      .add_option_bool("-ll:show_rsrv", show_reservations)
+      .add_option_int("-ll:ht_sharing", hyperthread_sharing)
+      .add_option_int_units("-ll:bitset_chunk", bitset_chunk_size, 'k')
+      .add_option_int("-ll:bitset_twolevel", bitset_twolevel);
+
+
+    cp.add_option_string("-ll:eventtrace", event_trace_file)
+      .add_option_string("-ll:locktrace", lock_trace_file);
+
+#ifdef NODE_LOGGING
+    cp.add_option_string("-ll:prefix", RuntimeImpl::prefix);
+#else
+    std::string dummy_prefix;
+    cp.add_option_string("-ll:prefix", dummy_prefix);
+#endif
+
+    cp.add_option_int("-ll:ahandlers", active_msg_handler_threads);
+    cp.add_option_int("-ll:handler_bgwork", active_msg_handler_bgwork);
+    cp.add_option_stringlist("-ll:networks", dummy_network_list);
+    cp.add_option_int_units("-ll:replheap", replheap_size);
+
+    // The default of path_cache_size is 0, when it is set to non-zero, the caching is enabled.
+    cp.add_option_int("-ll:path_cache_size", Config::path_cache_lru_size);
+
+    bool cmdline_ok = cp.parse_command_line(cmdline);
+
+    if(!cmdline_ok) {
+      fprintf(stderr, "ERROR: failure parsing command line options\n");
+      exit(1);
+    }
+
+#ifndef EVENT_TRACING
+    if(!event_trace_file.empty()) {
+      fprintf(stderr, "WARNING: event tracing requested, but not enabled at compile time!\n");
+    }
+#endif
+
+#ifndef LOCK_TRACING
+    if(!lock_trace_file.empty()) {
+        fprintf(stderr, "WARNING: lock tracing requested, but not enabled at compile time!\n");
+    }
+#endif
+
+#ifndef NODE_LOGGING
+    if(!dummy_prefix.empty()) {
+      fprintf(stderr,"WARNING: prefix set, but NODE_LOGGING not enabled at compile time!\n");
+    }
+#endif
   }
 
   CoreModule::CoreModule(void)
@@ -900,7 +973,7 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
   CoreModule::~CoreModule(void)
   {
     assert(config != nullptr);
-    delete config;
+    config = nullptr;
   }
 
   /*static*/ ModuleConfig *CoreModule::create_module_config(RuntimeImpl *runtime)
@@ -915,10 +988,10 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
     CoreModule *m = new CoreModule;
 
     CoreModuleConfig *config = dynamic_cast<CoreModuleConfig *>(runtime->get_module_config("core"));
-    assert(config != NULL);
+    assert(config != nullptr);
     assert(config->finish_configured);
     assert(m->name == config->get_name());
-    assert(m->config == NULL);
+    assert(m->config == nullptr);
     m->config = config;
 
     return m;
@@ -1029,91 +1102,6 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
     Module::cleanup();
   }
 
-  ////////////////////////////////////////////////////////////////////////
-  //
-  // class RuntimeImplConfig
-  //
-  RuntimeImplConfig::RuntimeImplConfig(void)
-  {}
-
-  void RuntimeImplConfig::configure_from_cmdline(std::vector<std::string> &cmdline)
-  {
-    // low-level runtime parameters
-    if(Network::max_node_id > 0)
-      reg_ib_mem_size = 256 << 20; // for inter-node copies
-    else
-      reg_ib_mem_size = 64 << 20; // for local transposes/serdez
-
-
-    // This dummy network list is actually handled in network_init()
-    // this is just here to help verify low-level arguement
-    std::vector<std::string> dummy_network_list;
-
-    CommandLineParser cp;
-    cp.add_option_int_units("-ll:rsize", reg_mem_size, 'm')
-      .add_option_int_units("-ll:ib_rsize", reg_ib_mem_size, 'm')
-      .add_option_int_units("-ll:dsize", disk_mem_size, 'm')
-      .add_option_int_units("-ll:stacksize", stack_size, 'm')
-      .add_option_int("-ll:dma", dma_worker_threads)
-      .add_option_bool("-ll:pin_dma", pin_dma_threads)
-      .add_option_int("-ll:dummy_rsrv_ok", dummy_reservation_ok)
-      .add_option_bool("-ll:show_rsrv", show_reservations)
-      .add_option_int("-ll:ht_sharing", hyperthread_sharing)
-      .add_option_int_units("-ll:bitset_chunk", bitset_chunk_size, 'k')
-      .add_option_int("-ll:bitset_twolevel", bitset_twolevel);
-
-
-    cp.add_option_string("-ll:eventtrace", event_trace_file)
-      .add_option_string("-ll:locktrace", lock_trace_file);
-
-#ifdef NODE_LOGGING
-    cp.add_option_string("-ll:prefix", RuntimeImpl::prefix);
-#else
-    std::string dummy_prefix;
-    cp.add_option_string("-ll:prefix", dummy_prefix);
-#endif
-
-    cp.add_option_int("-realm:eventloopcheck", Config::event_loop_detection_limit);
-    cp.add_option_bool("-ll:force_kthreads", Config::force_kernel_threads);
-    cp.add_option_bool("-ll:frsrv_fallback", Config::use_fast_reservation_fallback);
-    cp.add_option_int("-ll:machine_query_cache", Config::use_machine_query_cache);
-    cp.add_option_int("-ll:defalloc", Config::deferred_instance_allocation);
-    cp.add_option_int("-ll:amprofile", Config::profile_activemsg_handlers);
-    cp.add_option_int("-ll:aminline", Config::max_inline_message_time);
-    cp.add_option_int("-ll:ahandlers", active_msg_handler_threads);
-    cp.add_option_int("-ll:handler_bgwork", active_msg_handler_bgwork);
-    cp.add_option_stringlist("-ll:networks", dummy_network_list);
-    cp.add_option_int_units("-ll:replheap", replheap_size);
-
-    // The default of path_cache_size is 0, when it is set to non-zero, the caching is enabled.
-    cp.add_option_int("-ll:path_cache_size", Config::path_cache_lru_size);
-
-    bool cmdline_ok = cp.parse_command_line(cmdline);
-
-    if(!cmdline_ok) {
-      fprintf(stderr, "ERROR: failure parsing command line options\n");
-      exit(1);
-    }
-
-#ifndef EVENT_TRACING
-    if(!event_trace_file.empty()) {
-      fprintf(stderr, "WARNING: event tracing requested, but not enabled at compile time!\n");
-    }
-#endif
-
-#ifndef LOCK_TRACING
-    if(!lock_trace_file.empty()) {
-        fprintf(stderr, "WARNING: lock tracing requested, but not enabled at compile time!\n");
-    }
-#endif
-
-#ifndef NODE_LOGGING
-    if(!dummy_prefix.empty()) {
-      fprintf(stderr,"WARNING: prefix set, but NODE_LOGGING not enabled at compile time!\n");
-    }
-#endif
-  }
-
 
   ////////////////////////////////////////////////////////////////////////
   //
@@ -1123,8 +1111,7 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
     RuntimeImpl *runtime_singleton = 0;
   
     RuntimeImpl::RuntimeImpl(void)
-      : config(),
-        machine(0), 
+      : machine(0), 
         num_untriggered_events(0),
 	nodes(0),
 	local_event_free_list(0), local_barrier_free_list(0),
@@ -1306,6 +1293,10 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 
       module_registrar.create_network_modules(network_modules,
 					      &local_argc, &local_argv);
+
+      for (NodeSetIterator it = Network::shared_peers.begin(); it != Network::shared_peers.end(); ++it) {
+        log_runtime.debug() << Network::my_node_id << " is shareable with " << *it;
+      }
       
       // TODO: this is here to match old behavior, but it'd probably be
       //  better to have REALM_DEFAULT_ARGS only be visible to Realm...
@@ -1483,6 +1474,174 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
         return 0;
     }
 
+    /// Internal auxilary class to handle active messages for sharing CPU memory objects
+    struct ShareableMemoryMessageHandler {
+      struct Payload {
+        realm_id_t memory_id; // The memory which is being shared
+        size_t sz;            // The size of the memory
+      };
+      static Mutex mutex;
+      static Mutex::CondVar cond_var;
+      static size_t num_msgs_handled;
+      static void handle_message(NodeID sender, const ShareableMemoryMessageHandler &args,
+                                 const void *data, size_t len)
+      {
+        const Payload *msg = reinterpret_cast<const Payload *>(data);
+        const Payload *end_msg = msg + len / sizeof(*msg);
+        // Iterate all the payloads passed here.
+        AutoLock<> al(ShareableMemoryMessageHandler::mutex);
+        for (; msg != end_msg; ++msg) {
+          assert(ID(msg->memory_id).is_memory() && "Parsed id is not a memory id");
+          assert((sender == NodeID(ID(msg->memory_id).memory_owner_node())) &&
+                 "Sender is not owner of sent memory");
+          SharedMemoryInfo shm;
+          std::string path = get_shm_name(msg->memory_id);
+
+          if(!SharedMemoryInfo::open(shm, path, msg->sz)) {
+            log_runtime.warning() << "Failed to open shared memory " << ID(msg->memory_id)
+                                  << ':' << msg->sz << ' ' << path;
+          }
+          else {
+            get_runtime()->remote_shared_memory_mappings.emplace(msg->memory_id, std::move(shm));
+          }
+        }
+        // Count the number of messages handled, there should be one for every shareable
+        // peer
+        num_msgs_handled++;
+        if (num_msgs_handled == Network::shared_peers.size()) {
+          // All done opening shared memory regions for all the shared peers, wake up the
+          // runtime initialization
+          ShareableMemoryMessageHandler::cond_var.signal();
+        }
+      }
+    };
+    Mutex ShareableMemoryMessageHandler::mutex;
+    Mutex::CondVar ShareableMemoryMessageHandler::cond_var(ShareableMemoryMessageHandler::mutex);
+    size_t ShareableMemoryMessageHandler::num_msgs_handled = 0;
+
+    static ActiveMessageHandlerReg<ShareableMemoryMessageHandler> shareable_memory_message_handler;
+
+#if defined(REALM_USE_SHM) && defined(REALM_USE_ANONYMOUS_SHARED_MEMORY)
+    static std::string get_mailbox_name(NodeID id) {
+      return std::to_string(id) + '.' + std::to_string(Config::job_id);
+    }
+#endif
+
+    bool RuntimeImpl::share_memories(void)
+    {
+#if defined(REALM_USE_SHM)
+#if defined(REALM_USE_ANONYMOUS_SHARED_MEMORY)
+      // Temporary structure defining the layout of the data sent along in the mailbox
+      struct MessagePayload {
+        realm_id_t mem;
+        size_t size;
+        MessagePayload() {}
+        MessagePayload(realm_id_t _mem, size_t _size)
+          : mem(_mem)
+          , size(_size)
+        {}
+      };
+      std::vector<OsHandle> my_handles, peer_handles;
+      std::vector<MessagePayload> my_mem_ids, peer_mem_ids;
+      static const size_t MAX_PEER_MEMORIES = 1024;
+      OsHandle intra_node_mailbox =
+          Realm::ipc_mailbox_create(get_mailbox_name(Network::my_node_id));
+      if(intra_node_mailbox == Realm::INVALID_OS_HANDLE) {
+        log_runtime.error("Failed to create ipc mailbox");
+        return false;
+      }
+      {
+        size_t idx = 0;
+        my_handles.resize(local_shared_memory_mappings.size(), Realm::INVALID_OS_HANDLE);
+        my_mem_ids.resize(local_shared_memory_mappings.size());
+        for(std::unordered_map<realm_id_t, SharedMemoryInfo>::iterator it =
+                local_shared_memory_mappings.begin();
+            it != local_shared_memory_mappings.end(); ++it) {
+          realm_id_t id = it->first;
+          SharedMemoryInfo &shm = it->second;
+          assert(shm.get_handle() != Realm::INVALID_OS_HANDLE);
+          my_handles[idx] = shm.get_handle();
+          my_mem_ids[idx] = MessagePayload(id, shm.get_size());
+          idx++;
+        }
+      }
+
+      log_runtime.info() << "Found " << my_handles.size() << " shared memories";
+
+      Network::barrier(); // Wait for everyone to create their ipc mailboxes
+                          // (TODO: only do on shared peers)
+      // Share all the sharable memories.  Do this AFTER the network barrier to ensure
+      // all the intra_node_mailboxes have been created
+      for(NodeSetIterator it = Network::shared_peers.begin();
+          it != Network::shared_peers.end(); ++it) {
+        size_t data_sz;
+        std::string slot_name = get_mailbox_name(*it);
+        if(!Realm::ipc_mailbox_send(intra_node_mailbox, slot_name, my_handles,
+                                    my_mem_ids.data(),
+                                    my_mem_ids.size() * sizeof(my_mem_ids[0]))) {
+          log_runtime.warning(
+              "Unable to send shared memory information to node %u, skipping",
+              (unsigned)*it);
+          continue;
+        }
+        // TODO: modify ipc_mailbox_recv to peek and resize the data buffer the same as
+        // the peer handles
+        peer_mem_ids.resize(MAX_PEER_MEMORIES);
+        if(!Realm::ipc_mailbox_recv(intra_node_mailbox, slot_name, peer_handles,
+                                    peer_mem_ids.data(), data_sz,
+                                    peer_mem_ids.size() * sizeof(peer_mem_ids[0]))) {
+          log_runtime.warning(
+              "Unable to recv shared memory information from node %u, skipping",
+              (unsigned)*it);
+          continue;
+        }
+        assert(peer_handles.size() * sizeof(peer_mem_ids[0]) == data_sz &&
+               "Mismatch in received handles and ids");
+        for(size_t p = 0; p < peer_handles.size(); p++) {
+          SharedMemoryInfo peer_shm;
+          if(!SharedMemoryInfo::open(peer_shm, peer_handles[p], peer_mem_ids[p].size)) {
+            log_runtime.warning()
+                << "Failed to open shared memory " << peer_mem_ids[p].mem;
+            close_handle(peer_handles[p]);
+          } else {
+            peer_shm.unlink(); // No need to keep the OS resources around
+            remote_shared_memory_mappings.emplace(peer_mem_ids[p].mem, std::move(peer_shm));
+          }
+        }
+      }
+      // Wait for everyone to complete opening their sharing
+      // TODO: only do on shared peers
+      Network::barrier();
+      close_handle(intra_node_mailbox);
+      return true;
+#else  // REALM_USE_ANONYMOUS_SHARED_MEMORY
+      ActiveMessage<ShareableMemoryMessageHandler> msg(
+          Network::shared_peers, local_shared_memory_mappings.size() *
+                                     sizeof(ShareableMemoryMessageHandler::Payload));
+      for(std::unordered_map<realm_id_t, SharedMemoryInfo>::iterator it =
+              local_shared_memory_mappings.begin();
+          it != local_shared_memory_mappings.end(); ++it) {
+        ShareableMemoryMessageHandler::Payload payload;
+        payload.memory_id = it->first;
+        payload.sz = it->second.get_size();
+        msg.add_payload(&payload, sizeof(payload));
+      }
+      msg.commit();
+      { // Wait for everyone to send their mappings
+        AutoLock<> al(ShareableMemoryMessageHandler::mutex);
+        while(ShareableMemoryMessageHandler::num_msgs_handled !=
+              Network::shared_peers.size()) {
+          ShareableMemoryMessageHandler::cond_var.wait();
+        }
+      }
+      Network::barrier(); // Wait for everyone to get all their mappings from us
+      return true;
+#endif // REALM_USE_ANONYMOUS_MEMORY
+#else  // REALM_USE_SHM
+      return true;
+#endif
+    }
+
     void RuntimeImpl::parse_command_line(std::vector<std::string> &cmdline)
     {
       // very first thing - let the logger initialization happen
@@ -1520,22 +1679,42 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
           it++)
         (*it)->parse_command_line(this, cmdline);
 
-      PartitioningOpQueue::configure_from_cmdline(cmdline);
-      config.configure_from_cmdline(cmdline);
-
-      core_map = CoreMap::discover_core_map(config.hyperthread_sharing);
-      core_reservations = new CoreReservationSet(core_map);
-
-      sampling_profiler.configure_from_cmdline(cmdline, *core_reservations);
-
-      bgwork.configure_from_cmdline(cmdline);
-
       // configure module configs
       std::map<std::string, ModuleConfig*>::iterator it;
       for (it = module_configs.begin(); it != module_configs.end(); it++) {
         ModuleConfig *module_config = it->second;
         module_config->configure_from_cmdline(cmdline);
       }
+
+      PartitioningOpQueue::configure_from_cmdline(cmdline);
+
+      // parse the global Config
+      {
+        CommandLineParser cp;
+        cp.add_option_int("-realm:eventloopcheck", Config::event_loop_detection_limit);
+        cp.add_option_bool("-ll:force_kthreads", Config::force_kernel_threads);
+        cp.add_option_bool("-ll:frsrv_fallback", Config::use_fast_reservation_fallback);
+        cp.add_option_int("-ll:machine_query_cache", Config::use_machine_query_cache);
+        cp.add_option_int("-ll:defalloc", Config::deferred_instance_allocation);
+        cp.add_option_int("-ll:amprofile", Config::profile_activemsg_handlers);
+        cp.add_option_int("-ll:aminline", Config::max_inline_message_time);
+        bool cmdline_ok = cp.parse_command_line(cmdline);
+        if(!cmdline_ok) {
+          fprintf(stderr, "ERROR: failure parsing command line options for Config\n");
+          exit(1);
+        }
+      }
+
+      // load the CoreModuleConfig
+      CoreModuleConfig *config = dynamic_cast<CoreModuleConfig *>(get_module_config("core"));
+      assert(config != nullptr);
+
+      core_map = CoreMap::discover_core_map(config->hyperthread_sharing);
+      core_reservations = new CoreReservationSet(core_map);
+
+      sampling_profiler.configure_from_cmdline(cmdline, *core_reservations);
+
+      bgwork.configure_from_cmdline(cmdline);
 
       // now that we've done all of our argument parsing, scan through what's
       //  left and see if anything starts with -ll: - probably a misspelled
@@ -1565,6 +1744,11 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
       module_registrar.create_static_modules(modules);
       module_registrar.create_dynamic_modules(modules);
       modules_created = true;
+
+      // load the CoreModuleConfig
+      CoreModuleConfig *config = dynamic_cast<CoreModuleConfig *>(get_module_config("core"));
+      assert(config != nullptr);
+      assert(config->finish_configured);
 
       // Check that we have enough resources for the number of nodes we are using
       if (Network::max_node_id > (NodeID)(ID::MAX_NODE_ID))
@@ -1598,16 +1782,16 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
       {
 	// choose a chunk size that's roughly the requested size, but
 	//  clamp to [8,1024]
-	size_t bitsets_per_chunk = ((config.bitset_chunk_size << 3) /
+	size_t bitsets_per_chunk = ((config->bitset_chunk_size << 3) /
 				    (Network::max_node_id + 1));
 	if(bitsets_per_chunk < 8)
 	  bitsets_per_chunk = 8;
 	if(bitsets_per_chunk > 1024)
 	  bitsets_per_chunk = 1024;
 	// negative values of bitset_twolevel are a threshold
-	bool use_twolevel = ((config.bitset_twolevel > 0) ||
-			     ((config.bitset_twolevel < 0) &&
-			      (Network::max_node_id >= -config.bitset_twolevel)));
+	bool use_twolevel = ((config->bitset_twolevel > 0) ||
+			     ((config->bitset_twolevel < 0) &&
+			      (Network::max_node_id >= -config->bitset_twolevel)));
 	NodeSetBitmask::configure_allocator(Network::max_node_id,
 					    bitsets_per_chunk,
 					    use_twolevel);
@@ -1651,14 +1835,14 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
       }
 
       // form requests for network-registered memory
-      if(config.reg_ib_mem_size > 0) {
+      if(config->reg_ib_mem_size > 0) {
 	reg_ib_mem_segment.request(NetworkSegmentInfo::HostMem,
-				   config.reg_ib_mem_size, 64);
+				   config->reg_ib_mem_size, 64);
 	network_segments.push_back(&reg_ib_mem_segment);
       }
-      if(config.reg_mem_size > 0) {
+      if(config->reg_mem_size > 0) {
 	reg_mem_segment.request(NetworkSegmentInfo::HostMem,
-				config.reg_mem_size, 64);
+				config->reg_mem_size, 64);
 	network_segments.push_back(&reg_mem_segment);
       }
 
@@ -1667,12 +1851,12 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 
       // and also our incoming active message manager
       message_manager = new IncomingMessageManager(Network::max_node_id + 1,
-						   config.active_msg_handler_threads,
+						   config->active_msg_handler_threads,
 						   *core_reservations);
-      if(config.active_msg_handler_bgwork)
+      if(config->active_msg_handler_bgwork)
 	message_manager->add_to_manager(&bgwork);
       else
-	assert(config.active_msg_handler_threads > 0);
+	assert(config->active_msg_handler_threads > 0);
 
       // initialize modules and create memories before we do network attach
       //  so that we have a chance to register these other memories for
@@ -1682,36 +1866,46 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 	  it++)
 	(*it)->initialize(this);
 
-      for(std::vector<Module *>::const_iterator it = modules.begin();
-	  it != modules.end();
-	  it++)
-	(*it)->create_memories(this);
+    // Coordinate a job identifer across all the nodes in order to use it for
+    // generating names in the system namespace (like files or sockets).  This needs
+    // to come before the modules make their memories, but after the network is
+    // initialized.  This cannot be currently done if GASNET1 is enabled, as the
+    // broadcast function is not available until after Module::attach
+#if !defined(REALM_USE_GASNET1)
+    {
+      Config::job_id =
+          Network::broadcast(0, Clock::current_time_in_nanoseconds(true) + rand());
+    }
+#endif
 
-      Node *n = &nodes[Network::my_node_id];
-      for(MemoryImpl *mem : n->memories) {
-	NetworkSegment *seg = mem->get_network_segment();
-	if(seg)
-	  network_segments.push_back(seg);
-      }
-      for(IBMemory *ibm : n->ib_memories) {
-	NetworkSegment *seg = ibm->get_network_segment();
-	if(seg)
-	  network_segments.push_back(seg);
-      }
+    for(std::vector<Module *>::const_iterator it = modules.begin(); it != modules.end();
+        it++)
+      (*it)->create_memories(this);
 
-      // attach to the network
-      for(std::vector<NetworkModule *>::const_iterator it = network_modules.begin();
-	  it != network_modules.end();
-	  it++)
-	(*it)->attach(this, network_segments);
+    Node *n = &nodes[Network::my_node_id];
+    for(MemoryImpl *mem : n->memories) {
+      NetworkSegment *seg = mem->get_network_segment();
+      if(seg)
+        network_segments.push_back(seg);
+    }
+    for(IBMemory *ibm : n->ib_memories) {
+      NetworkSegment *seg = ibm->get_network_segment();
+      if(seg)
+        network_segments.push_back(seg);
+    }
 
-      {
-	// try to get all nodes to have roughly the same idea of the "zero
-	//  "time" by using network barriers
-	Network::barrier();
-	Realm::Clock::set_zero_time();
-	Network::barrier();
-      }
+    // attach to the network
+    for(std::vector<NetworkModule *>::const_iterator it = network_modules.begin();
+        it != network_modules.end(); it++)
+      (*it)->attach(this, network_segments);
+
+    {
+      // try to get all nodes to have roughly the same idea of the "zero
+      //  "time" by using network barriers
+      Network::barrier();
+      Realm::Clock::set_zero_time();
+      Network::barrier();
+    }
 
 #ifdef DEADLOCK_TRACE
       next_thread = 0;
@@ -1777,12 +1971,12 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 	(*it)->create_memories(this);
 
       LocalCPUMemory *regmem;
-      if(config.reg_mem_size > 0) {
+      if(config->reg_mem_size > 0) {
 	void *regmem_base = reg_mem_segment.base;
 	assert(regmem_base != 0);
 	Memory m = get_runtime()->next_local_memory_id();
 	regmem = new LocalCPUMemory(m,
-				    config.reg_mem_size,
+				    config->reg_mem_size,
                                     -1/*don't care numa domain*/,
                                     Memory::REGDMA_MEM,
 				    regmem_base,
@@ -1797,12 +1991,12 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 	(*it)->create_processors(this);
 
       IBMemory *reg_ib_mem;
-      if(config.reg_ib_mem_size > 0) {
+      if(config->reg_ib_mem_size > 0) {
 	void *reg_ib_mem_base = reg_ib_mem_segment.base;
 	assert(reg_ib_mem_base != 0);
 	Memory m = get_runtime()->next_local_ib_memory_id();
 	reg_ib_mem = new IBMemory(m,
-				  config.reg_ib_mem_size,
+				  config->reg_ib_mem_size,
 				  MemoryImpl::MKIND_SYSMEM,
 				  Memory::REGDMA_MEM,
 				  reg_ib_mem_base,
@@ -1813,12 +2007,12 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 
       // create local disk memory
       DiskMemory *diskmem;
-      if(config.disk_mem_size > 0) {
+      if(config->disk_mem_size > 0) {
         char file_name[30];
         snprintf(file_name, sizeof file_name, "disk_file%d.tmp", Network::my_node_id);
         Memory m = get_runtime()->next_local_memory_id();
         diskmem = new DiskMemory(m,
-                                 config.disk_mem_size,
+                                 config->disk_mem_size,
                                  std::string(file_name));
         get_runtime()->add_memory(diskmem);
       } else
@@ -1835,7 +2029,7 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
       
       // start dma system at the very ending of initialization
       // since we need list of local gpus to create channels
-      if(config.dma_worker_threads > 0) {
+      if(config->dma_worker_threads > 0) {
         // warn about use of old flags
         log_runtime.warning() << "-ll:dma specified on command line no longer has effect - use -ll:bgwork to control background worker threads (which include dma work)";
       }
@@ -1844,9 +2038,9 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
       // now that we've created all the processors/etc., we can try to come up with core
       //  allocations that satisfy everybody's requirements - this will also start up any
       //  threads that have already been requested
-      bool ok = core_reservations->satisfy_reservations(config.dummy_reservation_ok);
+      bool ok = core_reservations->satisfy_reservations(config->dummy_reservation_ok);
       if(ok) {
-	if(config.show_reservations) {
+	if(config->show_reservations) {
 	  std::cout << *core_map << std::endl;
 	  core_reservations->report_reservations(std::cout);
 	}
@@ -1857,7 +2051,21 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 
       // create the "replicated heap" that puts instance layouts and sparsity
       //  maps where non-CPU devices can see them
-      repl_heap.init(config.replheap_size, 1 /*chunks*/);
+      repl_heap.init(config->replheap_size, 1 /*chunks*/);
+
+      if (!Network::shared_peers.empty() && local_shared_memory_mappings.size() > 0) {
+        if (!share_memories()) {
+          log_runtime.fatal("Failed to share memories with peers");
+          abort();
+        }
+        for(std::unordered_map<realm_id_t, SharedMemoryInfo>::iterator it =
+                local_shared_memory_mappings.begin();
+            it != local_shared_memory_mappings.end(); ++it) {
+          // We're done communicating our shared memories, so there's no need to keep the
+          // sharing handles active, so unlink them now.
+          it->second.unlink();
+        }
+      }
 
       for(std::vector<Module *>::const_iterator it = modules.begin();
 	  it != modules.end();
@@ -2580,6 +2788,13 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 #endif
       cleanup_query_caches();
       {
+        // clean up all the module configs
+        for (std::map<std::string, ModuleConfig*>::iterator it = module_configs.begin();
+             it != module_configs.end(); it++) {
+          delete (it->second);
+          it->second = nullptr;
+        }
+
         // Clean up all the modules before tearing down the runtime state.
         for (std::vector<Module *>::iterator it = modules.begin();
              it != modules.end(); it++) {

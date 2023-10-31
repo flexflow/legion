@@ -231,7 +231,7 @@ namespace Realm {
     HDF5Module::~HDF5Module(void)
     {
       assert(config != nullptr);
-      delete config;
+      config = nullptr;
     }
 
     /*static*/ ModuleConfig *HDF5Module::create_module_config(RuntimeImpl *runtime)
@@ -247,10 +247,10 @@ namespace Realm {
       HDF5Module *m = new HDF5Module;
 
       HDF5ModuleConfig *config = dynamic_cast<HDF5ModuleConfig *>(runtime->get_module_config("hdf5"));
-      assert(config != NULL);
+      assert(config != nullptr);
       assert(config->finish_configured);
       assert(m->name == config->get_name());
-      assert(m->config == NULL);
+      assert(m->config == nullptr);
       m->config = config;
 
       {

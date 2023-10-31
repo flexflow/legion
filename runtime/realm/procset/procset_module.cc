@@ -118,7 +118,7 @@ namespace Realm {
     ProcSetModule::~ProcSetModule(void)
     {
       assert(config != nullptr);
-      delete config;
+      config = nullptr;
     }
 
     /*static*/ ModuleConfig *ProcSetModule::create_module_config(RuntimeImpl *runtime)
@@ -133,10 +133,10 @@ namespace Realm {
       ProcSetModule *m = new ProcSetModule;
 
       ProcSetModuleConfig *config = dynamic_cast<ProcSetModuleConfig *>(runtime->get_module_config("procset"));
-      assert(config != NULL);
+      assert(config != nullptr);
       assert(config->finish_configured);
       assert(m->name == config->get_name());
-      assert(m->config == NULL);
+      assert(m->config == nullptr);
       m->config = config;
 
       return m;

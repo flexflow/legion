@@ -7467,15 +7467,14 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void ReplDetachOp::record_unordered_kind(
-          std::map<std::pair<LogicalRegion,FieldID>,ReplDetachOp*> &detachments)
+             std::map<std::pair<LogicalRegion,FieldID>,Operation*> &detachments)
     //--------------------------------------------------------------------------
     {
-      const RegionRequirement &req = region.impl->get_requirement();
 #ifdef DEBUG_LEGION
-      assert(!req.privilege_fields.empty());
+      assert(!requirement.privilege_fields.empty());
 #endif
-      const std::pair<LogicalRegion,FieldID> key(req.region,
-          *(req.privilege_fields.begin()));
+      const std::pair<LogicalRegion,FieldID> key(requirement.region,
+          *(requirement.privilege_fields.begin()));
 #ifdef DEBUG_LEGION
       assert(detachments.find(key) == detachments.end());
 #endif
@@ -7798,6 +7797,35 @@ namespace Legion {
     {
       participants = new ShardParticipantsExchange(ctx, COLLECTIVE_LOC_103);
       participants->exchange(points.size() > 0);
+    }
+
+    //--------------------------------------------------------------------------
+    void ReplIndexDetachOp::record_unordered_kind(
+     std::map<std::pair<LogicalRegion,FieldID>,Operation*> &region_detachments,
+     std::map<std::pair<LogicalPartition,FieldID>,Operation*> &part_detachments)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(!requirement.privilege_fields.empty());
+#endif
+      if (requirement.handle_type == LEGION_PARTITION_PROJECTION)
+      {
+        const std::pair<LogicalPartition,FieldID> key(requirement.partition,
+            *(requirement.privilege_fields.begin()));
+#ifdef DEBUG_LEGION
+        assert(part_detachments.find(key) == part_detachments.end());
+#endif
+        part_detachments[key] = this;
+      }
+      else
+      {
+        const std::pair<LogicalRegion,FieldID> key(requirement.region,
+            *(requirement.privilege_fields.begin()));
+#ifdef DEBUG_LEGION
+        assert(region_detachments.find(key) == region_detachments.end());
+#endif
+        region_detachments[key] = this;
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -10339,13 +10367,15 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ShardManager::handle_post_execution(FutureInstance *inst, 
-                                    void *metadata, size_t metasize, bool local)
+    void ShardManager::handle_post_execution(FutureInstance *inst,
+        ApEvent effects, void *metadata, size_t metasize, bool local)
     //--------------------------------------------------------------------------
     {
       bool notify = false;
       {
         AutoLock m_lock(manager_lock);
+        if (effects.exists())
+          execution_effects.push_back(effects);
         if (local)
         {
           local_execution_complete++;
@@ -10385,6 +10415,8 @@ namespace Legion {
       {
         FutureInstance *result = local_future_result;
         local_future_result = NULL;
+        if (!execution_effects.empty())
+          effects = Runtime::merge_events(NULL, execution_effects);
         if (original_task == NULL)
         {
           Serializer rez;
@@ -10396,14 +10428,16 @@ namespace Legion {
           rez.serialize(metasize);
           if (metasize > 0)
             rez.serialize(metadata, metasize);
+          rez.serialize(effects);
           runtime->send_replicate_post_execution(owner_space, rez);
           if (result != NULL)
             delete result;
         }
         else
         {
-          original_task->handle_future(result, metadata, metasize,
-              NULL/*functor*/, Processor::NO_PROC, false/*own functor*/);
+          original_task->handle_post_execution(result, effects, metadata, 
+              metasize, NULL/*functor*/, Processor::NO_PROC, 
+              false/*own functor*/);
           // we no longer own this, it got passed through
           metadata = NULL;
         }
@@ -10472,7 +10506,6 @@ namespace Legion {
           RtEvent applied_event;
           if (!applied_events.empty())
             applied_event = Runtime::merge_events(applied_events);
-          original_task->complete_execution(applied_event);
           original_task->trigger_children_complete(all_shard_effects);
           return applied_event;
         }
@@ -10518,7 +10551,8 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ShardManager::send_collective_message(ShardID target, Serializer &rez)
+    void ShardManager::send_collective_message(MessageKind message,
+                                               ShardID target, Serializer &rez)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -10535,7 +10569,7 @@ namespace Legion {
         handle_collective_message(derez);
       }
       else
-        runtime->send_control_replicate_collective_message(target_space, rez);
+        runtime->send_message(message, target_space, rez, true/*flush*/);
     }
 
     //--------------------------------------------------------------------------
@@ -11341,7 +11375,10 @@ namespace Legion {
         memcpy(metadata, derez.get_current_pointer(), metasize);
         derez.advance_pointer(metasize);
       }
-      manager->handle_post_execution(instance,metadata,metasize,false/*local*/);
+      ApEvent effects;
+      derez.deserialize(effects);
+      manager->handle_post_execution(instance, effects, metadata, 
+                                     metasize, false/*local*/);
     }
 
     //--------------------------------------------------------------------------
@@ -11730,6 +11767,7 @@ namespace Legion {
     void BroadcastCollective::send_messages(void) const
     //--------------------------------------------------------------------------
     {
+      const MessageKind message = get_message_kind();
       const int local_index = convert_to_index(local_shard, origin);
       for (int idx = 1; idx <= shard_collective_radix; idx++)
       {
@@ -11744,7 +11782,7 @@ namespace Legion {
           rez.serialize(collective_index);
           pack_collective(rez);
         }
-        manager->send_collective_message(target, rez);
+        manager->send_collective_message(message, target, rez);
       }
     }
 
@@ -11882,7 +11920,8 @@ namespace Legion {
         AutoLock c_lock(collective_lock,1,false/*exclusive*/);
         pack_collective(rez);
       }
-      manager->send_collective_message(next, rez);
+      const MessageKind message = get_message_kind();
+      manager->send_collective_message(message, next, rez);
     } 
 
     //--------------------------------------------------------------------------
@@ -12139,6 +12178,7 @@ namespace Legion {
     void AllGatherCollective<INORDER>::send_remainder_stage(void)
     //--------------------------------------------------------------------------
     {
+      const MessageKind message = get_message_kind();
       if (participating)
       {
         // Send back to the shards that are not participating
@@ -12148,7 +12188,7 @@ namespace Legion {
 #endif
         Serializer rez;
         construct_message(target, -1/*stage*/, rez);
-        manager->send_collective_message(target, rez);
+        manager->send_collective_message(message, target, rez);
       }
       else
       {
@@ -12156,7 +12196,7 @@ namespace Legion {
         ShardID target = local_shard % shard_collective_participating_shards;
         Serializer rez;
         construct_message(target, -1/*stage*/, rez);
-        manager->send_collective_message(target, rez);
+        manager->send_collective_message(message, target, rez);
       }
     }
 
@@ -12171,6 +12211,7 @@ namespace Legion {
       // Iterate through the stages and send any that are ready
       // Remember that stages have to be done in order
       bool sent_previous_stage = false;
+      const MessageKind message = get_message_kind();
       for (int stage = start_stage; stage < shard_collective_stages; stage++)
       {
         {
@@ -12239,7 +12280,7 @@ namespace Legion {
 #endif
             Serializer rez;
             construct_message(target, stage, rez);
-            manager->send_collective_message(target, rez);
+            manager->send_collective_message(message, target, rez);
           }
         }
         else
@@ -12253,7 +12294,7 @@ namespace Legion {
 #endif
             Serializer rez;
             construct_message(target, stage, rez);
-            manager->send_collective_message(target, rez);
+            manager->send_collective_message(message, target, rez);
           }
         }
         sent_previous_stage = true;
@@ -14994,7 +15035,8 @@ namespace Legion {
       pack_counts(rez, field_space_counts);
       pack_field_counts(rez, field_counts);
       pack_counts(rez, logical_region_counts);
-      pack_field_counts(rez, detach_counts);
+      pack_field_counts(rez, region_detach_counts);
+      pack_field_counts(rez, partition_detach_counts);
     }
 
     //--------------------------------------------------------------------------
@@ -15014,26 +15056,27 @@ namespace Legion {
         field_space_counts.clear();
         field_counts.clear();
         logical_region_counts.clear();
-        detach_counts.clear();
+        region_detach_counts.clear();
+        partition_detach_counts.clear();
       }
       unpack_counts(stage, derez, index_space_counts);
       unpack_counts(stage, derez, index_partition_counts);
       unpack_counts(stage, derez, field_space_counts);
       unpack_field_counts(stage, derez, field_counts);
       unpack_counts(stage, derez, logical_region_counts);
-      unpack_field_counts(stage, derez, detach_counts);
+      unpack_field_counts(stage, derez, region_detach_counts);
+      unpack_field_counts(stage, derez, partition_detach_counts);
     }
 
     //--------------------------------------------------------------------------
-    bool UnorderedExchange::exchange_unordered_ops(
-                                    const std::list<Operation*> &unordered_ops,
-                                          std::vector<Operation*> &ready_ops)
+    void UnorderedExchange::start_unordered_exchange(
+                                   const std::vector<Operation*> &unordered_ops)
     //--------------------------------------------------------------------------
     {
       // Sort our operations
       if (!unordered_ops.empty())
       {
-        for (std::list<Operation*>::const_iterator it = 
+        for (std::vector<Operation*>::const_iterator it = 
               unordered_ops.begin(); it != unordered_ops.end(); it++)
         {
           switch ((*it)->get_operation_kind())
@@ -15053,13 +15096,22 @@ namespace Legion {
               }
             case Operation::DETACH_OP_KIND:
               {
-#ifdef DEBUG_LEGION
                 ReplDetachOp *op = dynamic_cast<ReplDetachOp*>(*it);
-                assert(op != NULL);
+                if (op == NULL)
+                {
+#ifdef DEBUG_LEGION
+                  ReplIndexDetachOp *index = 
+                    dynamic_cast<ReplIndexDetachOp*>(*it);
+                  assert(index != NULL);
 #else
-                ReplDetachOp *op = static_cast<ReplDetachOp*>(*it);
+                  ReplIndexDetachOp *index = 
+                    static_cast<ReplIndexDetachOp*>(*it);
 #endif
-                op->record_unordered_kind(detachments);
+                  index->record_unordered_kind(region_detachments,
+                                            partition_detachments);
+                }
+                else 
+                  op->record_unordered_kind(region_detachments);
                 break;
               }
             default: // Unimplemented operation kind
@@ -15072,33 +15124,36 @@ namespace Legion {
         initialize_counts(field_space_deletions, field_space_counts);
         initialize_counts(field_deletions, field_counts);
         initialize_counts(logical_region_deletions, logical_region_counts);
-        initialize_counts(detachments, detach_counts);
+        initialize_counts(region_detachments, region_detach_counts);
+        initialize_counts(partition_detachments, partition_detach_counts);
       }
       // Perform the exchange
-      perform_collective_sync();
+      perform_collective_async();
+    }
+
+    //--------------------------------------------------------------------------
+    void UnorderedExchange::find_ready_operations(
+                                             std::vector<Operation*> &ready_ops)
+    //--------------------------------------------------------------------------
+    {
       // Now look and see which operations have keys for all shards 
       // Only need to do this if we have ops, if we didn't have ops then
       // it's impossible for anyone else to have them all too
-      if (!unordered_ops.empty())
-      {
-        const size_t total_shards = manager->total_shards;
-        find_ready_ops(total_shards, index_space_counts,
-                       index_space_deletions, ready_ops);
-        find_ready_ops(total_shards, index_partition_counts,
-                       index_partition_deletions, ready_ops);
-        find_ready_ops(total_shards, field_space_counts,
-                       field_space_deletions, ready_ops);
-        find_ready_ops(total_shards, field_counts,
-                       field_deletions, ready_ops);
-        find_ready_ops(total_shards, logical_region_counts,
-                       logical_region_deletions, ready_ops);
-        find_ready_ops(total_shards, detach_counts,
-                       detachments, ready_ops);
-      }
-      // Return true if anybody anywhere had a non-zero count
-      return (!index_space_counts.empty() || !index_partition_counts.empty() ||
-          !field_space_counts.empty() || !field_counts.empty() || 
-          !logical_region_counts.empty() || !detach_counts.empty());
+      const size_t total_shards = manager->total_shards;
+      find_ready_ops(total_shards, index_space_counts,
+                     index_space_deletions, ready_ops);
+      find_ready_ops(total_shards, index_partition_counts,
+                     index_partition_deletions, ready_ops);
+      find_ready_ops(total_shards, field_space_counts,
+                     field_space_deletions, ready_ops);
+      find_ready_ops(total_shards, field_counts,
+                     field_deletions, ready_ops);
+      find_ready_ops(total_shards, logical_region_counts,
+                     logical_region_deletions, ready_ops);
+      find_ready_ops(total_shards, region_detach_counts,
+                     region_detachments, ready_ops);
+      find_ready_ops(total_shards, partition_detach_counts,
+                     partition_detachments, ready_ops);
     }
 
     /////////////////////////////////////////////////////////////

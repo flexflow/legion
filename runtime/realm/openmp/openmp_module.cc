@@ -25,6 +25,7 @@
 #include "realm/logging.h"
 #include "realm/cmdline.h"
 #include "realm/proc_impl.h"
+#include "realm/mem_impl.h"
 #include "realm/threads.h"
 #include "realm/runtime_impl.h"
 #include "realm/utils.h"
@@ -164,6 +165,8 @@ namespace Realm {
     {
       config_map.insert({"ocpu", &cfg_num_openmp_cpus});
       config_map.insert({"othr", &cfg_num_threads_per_cpu});
+      config_map.insert({"onuma", &cfg_use_numa});
+      config_map.insert({"ostack", &cfg_stack_size});
     }
 
     void OpenMPModuleConfig::configure_from_cmdline(std::vector<std::string>& cmdline)
@@ -198,7 +201,7 @@ namespace Realm {
     OpenMPModule::~OpenMPModule(void)
     {
       assert(config != nullptr);
-      delete config;
+      config = nullptr;
     }
 
     /*static*/ ModuleConfig *OpenMPModule::create_module_config(RuntimeImpl *runtime)
@@ -218,10 +221,10 @@ namespace Realm {
 #endif
 
       OpenMPModuleConfig *config = dynamic_cast<OpenMPModuleConfig *>(runtime->get_module_config("openmp"));
-      assert(config != NULL);
+      assert(config != nullptr);
       assert(config->finish_configured);
       assert(m->name == config->get_name());
-      assert(m->config == NULL);
+      assert(m->config == nullptr);
       m->config = config;
 
       // if no cpus were requested, there's no point

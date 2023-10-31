@@ -16,6 +16,7 @@
 #include "realm/cuda/cuda_module.h"
 #include "realm/cuda/cuda_internal.h"
 #include "realm/cuda/cuda_access.h"
+#include "realm/cuda/cuda_memcpy.h"
 
 #include "realm/tasks.h"
 #include "realm/logging.h"
@@ -60,6 +61,10 @@
 #define IS_DEFAULT_STREAM(stream)   \
   (((stream) == 0) || ((stream) == CU_STREAM_LEGACY) || ((stream) == CU_STREAM_PER_THREAD))
 
+// The embedded fat binary that holds all the internal
+// realm cuda kernels (see generated file realm_fatbin.c)
+extern const unsigned char realm_fatbin[];
+
 namespace Realm {
 
   extern Logger log_taskreg;
@@ -91,6 +96,26 @@ namespace Realm {
     CUDA_DRIVER_APIS(DEFINE_FNPTR);
   #undef DEFINE_FNPTR
 #endif
+
+    static unsigned ctz(uint64_t v) {
+#ifdef REALM_ON_WINDOWS
+      unsigned long index;
+#ifdef _WIN64
+      if (_BitScanForward64(&index, v)) return index;
+#else
+      unsigned v_lo = v;
+      unsigned v_hi = v >> 32;
+      if (_BitScanForward(&index, v_lo))
+        return index;
+      else if (_BitScanForward(&index, v_hi))
+        return index + 32;
+#endif
+      else
+        return 0;
+#else
+      return __builtin_ctzll(v);
+#endif
+    }
 
 #define DEFINE_FNPTR(name) decltype(&name) name##_fnptr = 0;
 
@@ -2017,6 +2042,11 @@ namespace Realm {
       return NULL;
     }
 
+    bool GPU::can_access_peer(const GPU *peer) const {
+      return (peer != NULL) &&
+             (info->peers.find(peer->info->device) != info->peers.end());
+    }
+
     GPUStream* GPU::get_null_task_stream(void) const
     {
       GPUStream *stream = ThreadLocal::current_gpu_stream;
@@ -2046,6 +2076,40 @@ namespace Realm {
       unsigned d2d_stream_index = (next_d2d_stream.fetch_add(1) %
                                    module->config->cfg_d2d_streams);
       return device_to_device_streams[d2d_stream_index];
+    }
+
+    static void launch_kernel(const Realm::Cuda::GPU::GPUFuncInfo &func_info, void *params,
+                              size_t num_elems, GPUStream *stream)
+    {
+      unsigned int num_blocks = 0, num_threads = 0;
+      void *args[] = {params};
+
+      num_threads = std::min(static_cast<unsigned int>(func_info.occ_num_threads),
+                             static_cast<unsigned int>(num_elems));
+      num_blocks = std::min(
+          static_cast<unsigned int>((num_elems + num_threads - 1) / num_threads),
+          static_cast<unsigned int>(
+              func_info.occ_num_blocks)); // Cap the grid based on the given volume
+
+      CHECK_CU(CUDA_DRIVER_FNPTR(cuLaunchKernel)(func_info.func, num_blocks, 1, 1,
+                                                 num_threads, 1, 1, 0,
+                                                 stream->get_stream(), args, NULL));
+    }
+
+    void GPU::launch_batch_affine_kernel(void *copy_info, size_t dim,
+                                         size_t elem_size, size_t volume,
+                                         GPUStream *stream) {
+      size_t log_elem_size = std::min(static_cast<size_t>(ctz(elem_size)),
+                                      CUDA_MEMCPY_KERNEL_MAX2_LOG2_BYTES - 1);
+
+      assert((1ULL << log_elem_size) == elem_size);
+      assert(dim <= REALM_MAX_DIM);
+      assert(dim >= 1);
+
+      // TODO: probably replace this
+      // with a better data-structure
+      GPUFuncInfo &func_info = batch_affine_kernels[dim - 1][log_elem_size];
+      launch_kernel(func_info, copy_info, volume, stream);
     }
 
     const GPU::CudaIpcMapping *GPU::find_ipc_mapping(Memory mem) const
@@ -2551,14 +2615,21 @@ namespace Realm {
 
     GPUDynamicFBMemory::~GPUDynamicFBMemory(void)
     {
+      cleanup();
+    }
+
+    void GPUDynamicFBMemory::cleanup(void)
+    {
+      AutoLock<> al(mutex);
+      if(alloc_bases.empty())
+        return;
       // free any remaining allocations
       AutoGPUContext agc(gpu);
-      AutoLock<> al(mutex);
-      for(std::map<RegionInstance, std::pair<CUdeviceptr, size_t> >::const_iterator it = alloc_bases.begin();
-          it != alloc_bases.end();
-          ++it)
+      for(std::map<RegionInstance, std::pair<CUdeviceptr, size_t>>::const_iterator it =
+              alloc_bases.begin();
+          it != alloc_bases.end(); ++it)
         if(it->second.first)
-          CHECK_CU( CUDA_DRIVER_FNPTR(cuMemFree)(it->second.first) );
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuMemFree)(it->second.first));
       alloc_bases.clear();
     }
 
@@ -3276,7 +3347,7 @@ namespace Realm {
 	     CUcontext _context)
       : module(_module), info(_info), worker(_worker)
       , proc(0), fbmem(0), fb_ibmem(0)
-      , context(_context), fbmem_base(0), fb_ibmem_base(0)
+      , context(_context), device_module(0), fbmem_base(0), fb_ibmem_base(0)
       , next_task_stream(0), next_d2d_stream(0)
     {
       push_context();
@@ -3289,10 +3360,87 @@ namespace Realm {
       host_to_device_stream = new GPUStream(this, worker);
       device_to_host_stream = new GPUStream(this, worker);
 
+      CUdevice dev;
+      int numSMs;
+
+      CHECK_CU(CUDA_DRIVER_FNPTR(cuCtxGetDevice)(&dev));
+      CHECK_CU(CUDA_DRIVER_FNPTR(cuDeviceGetAttribute)(
+          &numSMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev));
+
+      CHECK_CU(CUDA_DRIVER_FNPTR(cuModuleLoadDataEx)(
+          &device_module, realm_fatbin, 0, NULL, NULL));
+      for(unsigned int log_bit_sz = 0; log_bit_sz < CUDA_MEMCPY_KERNEL_MAX2_LOG2_BYTES;
+          log_bit_sz++) {
+        const unsigned int bit_sz = 8U << log_bit_sz;
+        GPUFuncInfo func_info;
+        char name[30];
+        std::snprintf(name, sizeof(name), "memcpy_transpose%u", bit_sz);
+        CHECK_CU(CUDA_DRIVER_FNPTR(cuModuleGetFunction)(&func_info.func,
+                                                        device_module, name));
+
+        // We use MaxActiveBlocksPerMultiprocessor here since we have a static
+        // tile size here based on the size of the static shared memory
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuOccupancyMaxPotentialBlockSize)(
+              &func_info.occ_num_blocks, &func_info.occ_num_threads,
+              func_info.func, 0, 0, 0));
+
+        func_info.occ_num_blocks *=
+            numSMs; // Fill up the GPU with the number of blocks if possible
+        transpose_kernels[log_bit_sz] = func_info;
+
+        for(unsigned int d = 1; d <= CUDA_MAX_DIM; d++) {
+          std::snprintf(name, sizeof(name), "memcpy_affine_batch%uD_%u", d,
+                        bit_sz);
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuModuleGetFunction)(&func_info.func,
+                                                          device_module, name));
+          // Here, we don't have a constraint on the block size, so allow
+          // the driver to decide the best combination we can launch
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuOccupancyMaxPotentialBlockSize)(
+              &func_info.occ_num_blocks, &func_info.occ_num_threads,
+              func_info.func, 0, 0, 0));
+          batch_affine_kernels[d - 1][log_bit_sz] = func_info;
+
+          std::snprintf(name, sizeof(name), "fill_affine_large%uD_%u", d,
+                        bit_sz);
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuModuleGetFunction)(&func_info.func,
+                                                          device_module, name));
+          // Here, we don't have a constraint on the block size, so allow
+          // the driver to decide the best combination we can launch
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuOccupancyMaxPotentialBlockSize)(
+              &func_info.occ_num_blocks, &func_info.occ_num_threads,
+              func_info.func, 0, 0, 0));
+          fill_affine_large_kernels[d - 1][log_bit_sz] = func_info;
+
+          std::snprintf(name, sizeof(name), "fill_affine_batch%uD_%u", d,
+                        bit_sz);
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuModuleGetFunction)(&func_info.func,
+                                                          device_module, name));
+          // Here, we don't have a constraint on the block size, so allow
+          // the driver to decide the best combination we can launch
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuOccupancyMaxPotentialBlockSize)(
+              &func_info.occ_num_blocks, &func_info.occ_num_threads,
+              func_info.func, 0, 0, 0));
+          batch_fill_affine_kernels[d - 1][log_bit_sz] = func_info;
+
+          std::snprintf(name, sizeof(name), "memcpy_indirect%uD_%u", d,
+                        bit_sz);
+
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuModuleGetFunction)(&func_info.func,
+                                                          device_module, name));
+
+          CHECK_CU(CUDA_DRIVER_FNPTR(cuOccupancyMaxPotentialBlockSize)(
+              &func_info.occ_num_blocks, &func_info.occ_num_threads,
+              func_info.func, 0, 0, 0));
+
+          indirect_copy_kernels[d - 1][log_bit_sz] = func_info;
+        }
+      }
+
       device_to_device_streams.resize(module->config->cfg_d2d_streams, 0);
-      for(unsigned i = 0; i < module->config->cfg_d2d_streams; i++)
-        device_to_device_streams[i] = new GPUStream(this, worker,
-                                                    module->config->cfg_d2d_stream_priority);
+      for(unsigned i = 0; i < module->config->cfg_d2d_streams; i++) {
+        device_to_device_streams[i] =
+            new GPUStream(this, worker, module->config->cfg_d2d_stream_priority);
+      }
 
       // only create p2p streams for devices we can talk to
       peer_to_peer_streams.resize(module->gpu_info.size(), 0);
@@ -3351,6 +3499,10 @@ namespace Realm {
         {
           CHECK_CU( CUDA_DRIVER_FNPTR(cuMemFree)(fbmem->base) );
         }
+      }
+
+      if (fb_dmem) {
+        fb_dmem->cleanup();
       }
 
       if(fb_ibmem_base)
@@ -3634,8 +3786,9 @@ namespace Realm {
       }
 
       Memory m = runtime->next_local_memory_id();
-      GPUDynamicFBMemory *dfb = new GPUDynamicFBMemory(m, this, max_size);
-      runtime->add_memory(dfb);
+      // TODO(apryakhin@): Determine if we need to keep the pointer.
+      fb_dmem = new GPUDynamicFBMemory(m, this, max_size);
+      runtime->add_memory(fb_dmem);
     }
 
 #ifdef REALM_USE_CUDART_HIJACK
@@ -3856,6 +4009,13 @@ namespace Realm {
       config_map.insert({"gpu", &cfg_num_gpus});
       config_map.insert({"zcmem", &cfg_zc_mem_size});
       config_map.insert({"fbmem", &cfg_fb_mem_size});
+      config_map.insert({"ib_fbmem", &cfg_fb_ib_size});
+      config_map.insert({"ib_zcmem", &cfg_zc_ib_size});
+      config_map.insert({"uvmem", &cfg_uvm_mem_size});
+      config_map.insert({"use_dynamic_fb", &cfg_use_dynamic_fb});
+      config_map.insert({"dynfb_max_size", &cfg_dynfb_max_size});
+      config_map.insert({"task_streams", &cfg_task_streams});
+      config_map.insert({"d2d_streams", &cfg_d2d_streams});
       res_fbmem_sizes.push_back(0);
     }
 
@@ -3992,7 +4152,7 @@ namespace Realm {
     CudaModule::~CudaModule(void)
     {
       assert(config != nullptr);
-      delete config;
+      config = nullptr;
       delete_container_contents(gpu_info);
       assert(cuda_module_singleton == this);
       cuda_module_singleton = 0;
@@ -4134,11 +4294,10 @@ namespace Realm {
       CudaModule *m = new CudaModule(runtime);
 
       CudaModuleConfig *config = dynamic_cast<CudaModuleConfig *>(runtime->get_module_config("cuda"));
-      assert(config != NULL);
+      assert(config != nullptr);
       assert(config->finish_configured);
       assert(m->name == config->get_name());
-      assert(m->config == NULL);
-      assert(config->finish_configured);
+      assert(m->config == nullptr);
       m->config = config;
 
       // if we know gpus have been requested, correct loading of libraries
@@ -4182,9 +4341,11 @@ namespace Realm {
                 CUDA_DRIVER_FNPTR(cuDeviceTotalMem)(&info->totalGlobalMem, info->device));
             CHECK_CU(CUDA_DRIVER_FNPTR(cuDeviceGetUuid)(&info->uuid, info->device));
             CHECK_CU(CUDA_DRIVER_FNPTR(cuDeviceGetAttribute)(
-                &info->major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, info->device));
+                &info->major, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                info->device));
             CHECK_CU(CUDA_DRIVER_FNPTR(cuDeviceGetAttribute)(
-                &info->minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, info->device));
+                &info->minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+                info->device));
             CHECK_CU(CUDA_DRIVER_FNPTR(cuDeviceGetAttribute)(
                 &info->pci_busid, CU_DEVICE_ATTRIBUTE_PCI_BUS_ID, info->device));
             CHECK_CU(CUDA_DRIVER_FNPTR(cuDeviceGetAttribute)(
@@ -4443,7 +4604,7 @@ namespace Realm {
         }
         // if num_gpus was specified, they should match
         if(config->cfg_num_gpus > 0) {
-          if(config->cfg_num_gpus != (int)fixed_indices.size()) {
+          if(config->cfg_num_gpus != static_cast<int>(fixed_indices.size())) {
             log_gpu.fatal() << "mismatch between '-ll:gpu' and '-ll:gpu_ids'";
             abort();
           }
@@ -4458,7 +4619,7 @@ namespace Realm {
       unsigned gpu_count = 0;
       // try to get cfg_num_gpus, working through the list in order
       for(size_t i = config->cfg_skip_gpu_count;
-          (i < gpu_info.size()) && ((int)gpu_count < config->cfg_num_gpus); i++) {
+          (i < gpu_info.size()) && (static_cast<int>(gpu_count) < config->cfg_num_gpus); i++) {
         int idx = (fixed_indices.empty() ? i : fixed_indices[i]);
 
         // try to create a context and possibly check available memory - in order
@@ -4545,7 +4706,7 @@ namespace Realm {
       }
 
       // did we actually get the requested number of GPUs?
-      if((int)gpu_count < config->cfg_num_gpus) {
+      if(static_cast<int>(gpu_count) < config->cfg_num_gpus) {
         log_gpu.fatal() << config->cfg_num_gpus << " GPUs requested, but only " << gpu_count
                         << " available!";
         assert(false);
@@ -4809,7 +4970,7 @@ namespace Realm {
 
       // ask any ipc-able nodes to share handles with us
       if(config->cfg_use_cuda_ipc) {
-        NodeSet ipc_peers = Network::all_peers;
+        NodeSet ipc_peers = Network::shared_peers;
 
 #ifdef REALM_ON_LINUX
         if(!ipc_peers.empty()) {
@@ -4979,6 +5140,59 @@ namespace Realm {
       ThreadLocal::context_sync_required = (is_required ? 1 : 0);
     }
 
+    static void CUDA_CB event_trigger_callback(void *userData) {
+      UserEvent realm_event;
+      realm_event.id = reinterpret_cast<Realm::Event::id_t>(userData);
+      realm_event.trigger();
+    }
+
+    Event CudaModule::make_realm_event(CUevent_st *cuda_event)
+    {
+      CUresult res = CUDA_DRIVER_FNPTR(cuEventQuery)(cuda_event);
+      if(res == CUDA_SUCCESS) {
+        // This CUDA event is already completed, no need to create a new event.
+        return Event::NO_EVENT;
+      } else if(res != CUDA_ERROR_NOT_READY) {
+        CHECK_CU(res);
+      }
+      UserEvent realm_event = UserEvent::create_user_event();
+      bool free_stream = false;
+      CUstream cuda_stream = 0;
+      if(ThreadLocal::current_gpu_stream != nullptr) {
+        cuda_stream = ThreadLocal::current_gpu_stream->get_stream();
+      } else {
+        // Create a temporary stream to push the signaling onto.  This will ensure there's
+        // no direct dependency on the signaling other than the event
+        CHECK_CU(CUDA_DRIVER_FNPTR(cuStreamCreate)(&cuda_stream, CU_STREAM_NON_BLOCKING));
+        free_stream = true;
+      }
+      CHECK_CU(CUDA_DRIVER_FNPTR(cuStreamWaitEvent)(cuda_stream, cuda_event,
+                                                    CU_EVENT_WAIT_DEFAULT));
+      CHECK_CU(CUDA_DRIVER_FNPTR(cuLaunchHostFunc)(
+          cuda_stream, event_trigger_callback, reinterpret_cast<void *>(realm_event.id)));
+      if(free_stream) {
+        CHECK_CU(CUDA_DRIVER_FNPTR(cuStreamDestroy)(cuda_stream));
+      }
+      
+      return realm_event;
+    }
+
+    Event CudaModule::make_realm_event(CUstream_st *cuda_stream)
+    {
+      CUresult res = CUDA_DRIVER_FNPTR(cuStreamQuery)(cuda_stream);
+      if (res == CUDA_SUCCESS) {
+        // This CUDA stream is already completed, no need to create a new event.
+        return Event::NO_EVENT;
+      }
+      else if (res != CUDA_ERROR_NOT_READY) {
+        CHECK_CU(res);
+      }
+      UserEvent realm_event = UserEvent::create_user_event();
+      CHECK_CU(CUDA_DRIVER_FNPTR(cuLaunchHostFunc)(
+          cuda_stream, event_trigger_callback,
+          reinterpret_cast<void *>(realm_event.id)));
+      return realm_event;
+    }
 
 #ifdef REALM_USE_CUDART_HIJACK
     ////////////////////////////////////////////////////////////////////////

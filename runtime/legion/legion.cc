@@ -2429,9 +2429,13 @@ namespace Legion {
       if (impl == NULL)
         REPORT_LEGION_ERROR(ERROR_REQUEST_FOR_EMPTY_FUTURE, 
                           "Illegal request for future value from empty future")
-      Processor proc = Internal::implicit_context->get_executing_processor();
-      return impl->get_buffer(proc, memory, extent_in_bytes, check_size,
-                              silence_warnings, warning_string);
+      if (Internal::implicit_context == NULL)
+        return impl->get_buffer(Processor::NO_PROC, memory, extent_in_bytes, 
+                                check_size, silence_warnings, warning_string);
+      else
+        return impl->get_buffer(
+            Internal::implicit_context->get_executing_processor(), memory,
+            extent_in_bytes, check_size, silence_warnings, warning_string);
     }
 
     //--------------------------------------------------------------------------
@@ -7734,10 +7738,10 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void Runtime::finish_implicit_task(Context ctx)
+    void Runtime::finish_implicit_task(Context ctx, Realm::Event effects)
     //--------------------------------------------------------------------------
     {
-      runtime->finish_implicit_task(ctx);
+      runtime->finish_implicit_task(ctx, Internal::ApEvent(effects));
     } 
 
     //--------------------------------------------------------------------------
@@ -8072,7 +8076,8 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       ctx->end_task(retvalptr, retvalsize, owned, inst, NULL/*functor*/,
-          NULL/*resource*/, NULL/*freefunc*/, metadataptr, metadatasize);
+          NULL/*resource*/, NULL/*freefunc*/, metadataptr, metadatasize,
+          Internal::ApEvent::NO_AP_EVENT);
     }
 
     //--------------------------------------------------------------------------
@@ -8081,7 +8086,8 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       ctx->end_task(NULL, 0, owned, Realm::RegionInstance::NO_INST,
-          callback_functor, NULL/*resource*/, NULL/*freefunc*/, NULL, 0);
+          callback_functor, NULL/*resource*/, NULL/*freefunc*/, NULL, 0,
+          Internal::ApEvent::NO_AP_EVENT);
     }
 
     //--------------------------------------------------------------------------
@@ -8093,7 +8099,8 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       ctx->end_task(ptr, size, owned, Realm::RegionInstance::NO_INST,
-          NULL/*functor*/, &resource, freefunc, metadataptr, metadatasize);
+          NULL/*functor*/, &resource, freefunc, metadataptr, metadatasize,
+          Internal::ApEvent::NO_AP_EVENT);
     }
 
     //--------------------------------------------------------------------------

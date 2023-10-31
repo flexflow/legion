@@ -3429,11 +3429,31 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void SingleTask::find_completion_effects(std::set<ApEvent> &effects)
+    void SingleTask::find_completion_effects(std::set<ApEvent> &effects, 
+                                             bool tracing)
     //--------------------------------------------------------------------------
     {
+      Operation::find_completion_effects(effects, tracing);
       AutoLock o_lock(op_lock,1,false/*exclusive*/);
-      effects = task_completion_effects;
+      // If we're completed then we know we have all the completion effects
+      // that we're ever going to have so we can just report them back
+      if (!task_completion_effects.empty())
+        effects.insert(task_completion_effects.begin(),
+                       task_completion_effects.end());
+    }
+
+    //--------------------------------------------------------------------------
+    void SingleTask::find_completion_effects(std::vector<ApEvent> &effects,
+                                             bool tracing)
+    //--------------------------------------------------------------------------
+    {
+      Operation::find_completion_effects(effects, tracing);
+      AutoLock o_lock(op_lock,1,false/*exclusive*/);
+      // If we're completed then we know we have all the completion effects
+      // that we're ever going to have so we can just report them back
+      if (!task_completion_effects.empty())
+        effects.insert(effects.end(), task_completion_effects.begin(),
+                       task_completion_effects.end());
     }
 
     //--------------------------------------------------------------------------
@@ -3776,25 +3796,25 @@ namespace Legion {
           else
             shard_manager->set_shard_mapping(output.control_replication_map);
           VariantImpl *var_impl = NULL;
-          VariantID chosen_variant = output.task_mappings[0].chosen_variant;
+          selected_variant = output.task_mappings[0].chosen_variant;
           if (!runtime->unsafe_mapper)
           {
             // Check to make sure that they all picked the same variant
             // and that it is a replicable variant
             for (unsigned idx = 1; idx < total_shards; idx++)
             {
-              if (output.task_mappings[idx].chosen_variant != chosen_variant)
+              if (output.task_mappings[idx].chosen_variant != selected_variant)
                 REPORT_LEGION_ERROR(ERROR_INVALID_MAPPER_OUTPUT,
                               "Invalid mapper output from invocation of '%s' "
                               "on mapper %s. Mapper picked different variants "
                               "%d and %d for task %s (UID %lld) that was "
                               "designated to be control replicated.", 
                               "map_replicate_task", mapper->get_mapper_name(),
-                              chosen_variant, 
+                              selected_variant, 
                               output.task_mappings[idx].chosen_variant,
                               get_task_name(), get_unique_id())
             }
-            var_impl = runtime->find_variant_impl(task_id, chosen_variant,
+            var_impl = runtime->find_variant_impl(task_id, selected_variant,
                                                   true/*can_fail*/);
             // If it's NULL we'll catch it later in the checks
             if ((var_impl != NULL) && !var_impl->is_replicable())
@@ -3807,7 +3827,7 @@ namespace Legion {
                             get_unique_id())
           }
           else
-            var_impl = runtime->find_variant_impl(task_id, chosen_variant,
+            var_impl = runtime->find_variant_impl(task_id, selected_variant,
                                                   true/*can_fail*/);
           handle_future_size(var_impl->return_type_size,
               var_impl->has_return_type_size, map_applied_conditions);
@@ -4612,7 +4632,9 @@ namespace Legion {
       }
       // STEP 3: Finally we get to launch the task
       // Mark that we have an outstanding task in this context 
-      if (!inline_task)
+      if (inline_task)
+        parent_ctx->increment_inlined();
+      else
         parent_ctx->increment_pending();
       // Note there is a potential scary race condition to be aware of here: 
       // once we launch this task it's possible for this task to run and 
@@ -4706,65 +4728,31 @@ namespace Legion {
       }
       else // We're going to trigger this right now with no precondition
         single_task_termination = ApUserEvent::NO_AP_USER_EVENT;
-      ApEvent task_launch_event;
-      if (inline_task)
+      ApEvent task_launch_event = variant->dispatch_task(launch_processor, this,
+         execution_context, start_condition, task_priority, profiling_requests);
+      // Release any reservations that we took on behalf of this task
+      // Note this happens before protection of the event for predication
+      // because the acquires were also subject to poisoning so we either
+      // want all the releases to be done or poisoned the same as the acquires
+      if (!to_release.empty())
       {
-        bool poisoned = false;
-        if (start_condition.exists() && 
-            !start_condition.has_triggered_faultaware(poisoned))
-          start_condition.wait_faultaware(poisoned);
-        if (poisoned)
-        {
-          // Check to see if we were poisoned because of prediation
-          // or because of an actual fault
-          bool mispredicated = false;
-          true_guard.has_triggered_faultaware(mispredicated);
-          if (!mispredicated)
-            execution_context->raise_poison_exception();
-          // No need to release the reservations because they were
-          // poisoned out from being executed
-        }
-        else
-        {
-          variant->dispatch_inline(launch_processor, execution_context);
-          // Release any reservations that we took on behalf of this task
-          if (!to_release.empty())
-          {
-            for (std::vector<Reservation>::const_iterator it = 
-                  to_release.begin(); it != to_release.end(); it++)
-              Runtime::release_reservation(*it);
-          }
-        }
+        for (std::vector<Reservation>::const_iterator it = 
+              to_release.begin(); it != to_release.end(); it++)
+          Runtime::release_reservation(*it, task_launch_event);
       }
-      else
+      // If this task was predicated then we need to protect everything that
+      // comes after this from the predication poison
+      if (true_guard.exists())
       {
-        task_launch_event = variant->dispatch_task(launch_processor, this,
-                            execution_context, start_condition,
-                            task_priority, profiling_requests);
-        // Release any reservations that we took on behalf of this task
-        // Note this happens before protection of the event for predication
-        // because the acquires were also subject to poisoning so we either
-        // want all the releases to be done or poisoned the same as the acquires
-        if (!to_release.empty())
+        task_launch_event = Runtime::ignorefaults(task_launch_event);
+        // Also merge in the original preconditions so that is reflected 
+        // downstream in the event chain still for things like postconditions
+        // Make sure to prune out the true guard that we added here
+        wait_on_events.erase(ApEvent(true_guard));
+        if (!wait_on_events.empty())
         {
-          for (std::vector<Reservation>::const_iterator it = 
-                to_release.begin(); it != to_release.end(); it++)
-            Runtime::release_reservation(*it, task_launch_event);
-        }
-        // If this task was predicated then we need to protect everything that
-        // comes after this from the predication poison
-        if (true_guard.exists())
-        {
-          task_launch_event = Runtime::ignorefaults(task_launch_event);
-          // Also merge in the original preconditions so that is reflected 
-          // downstream in the event chain still for things like postconditions
-          // Make sure to prune out the true guard that we added here
-          wait_on_events.erase(ApEvent(true_guard));
-          if (!wait_on_events.empty())
-          {
-            wait_on_events.insert(task_launch_event);
-            task_launch_event = Runtime::merge_events(NULL, wait_on_events);
-          }
+          wait_on_events.insert(task_launch_event);
+          task_launch_event = Runtime::merge_events(NULL, wait_on_events);
         }
       }
       if (chain_task_termination.exists())
@@ -6420,12 +6408,15 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void IndividualTask::handle_future(FutureInstance *instance,
+    void IndividualTask::handle_post_execution(FutureInstance *instance,
+                                       ApEvent effects,
                                        void *metadata, size_t metasize,
                                        FutureFunctor *functor,
                                        Processor future_proc, bool own_functor)
     //--------------------------------------------------------------------------
     {
+      if (effects.exists())
+        record_completion_effect(effects);
       if (functor != NULL)
       {
 #ifdef DEBUG_LEGION
@@ -6469,6 +6460,7 @@ namespace Legion {
                                     metadata, metasize);
         }
       }
+      complete_execution();
     }
 
     //--------------------------------------------------------------------------
@@ -7411,7 +7403,8 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void PointTask::handle_future(FutureInstance *instance,
+    void PointTask::handle_post_execution(FutureInstance *instance,
+                                  ApEvent effects,
                                   void *metadata, size_t metasize,
                                   FutureFunctor *functor, 
                                   Processor future_proc, bool own_functor)
@@ -7419,6 +7412,8 @@ namespace Legion {
     {
       if ((instance != NULL) && (instance->size > 0))
         check_future_return_bounds(instance);
+      if (effects.exists())
+        record_completion_effect(effects);
       if (!is_remote())
       {
         ApEvent effects_done;
@@ -7430,6 +7425,7 @@ namespace Legion {
       else
         slice_owner->handle_future(remote_completion_event, index_point,
             instance, metadata, metasize, functor, future_proc, own_functor); 
+      complete_execution();
     }
 
     //--------------------------------------------------------------------------
@@ -8010,16 +8006,17 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ShardTask::handle_future(FutureInstance *instance, void *metadata,
-                                  size_t metasize, FutureFunctor *functor,
-                                  Processor future_proc, bool own_functor)
+    void ShardTask::handle_post_execution(FutureInstance *instance,
+        ApEvent effects, void *metadata, size_t metasize,
+        FutureFunctor *functor, Processor future_proc, bool own_functor)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(functor == NULL);
 #endif
-      shard_manager->handle_post_execution(instance, metadata, 
+      shard_manager->handle_post_execution(instance, effects, metadata, 
                                            metasize, true/*local*/);
+      complete_execution();
     }
 
     //--------------------------------------------------------------------------
@@ -9227,6 +9224,9 @@ namespace Legion {
                           "are interfering.", idx1, idx2, get_task_name(),
                           get_unique_id(), parent_ctx->get_task_name(),
                           parent_ctx->get_unique_id())
+      // Need a lock here in case this gets called in parallel by multiple
+      // slice tasks returning at the same time
+      AutoLock o_lock(op_lock);
       interfering_requirements.insert(std::pair<unsigned,unsigned>(idx1,idx2));
     }
 
@@ -12083,9 +12083,6 @@ namespace Legion {
       rez.serialize(applied_condition);
       // Serialize the privilege state
       pack_resources_return(rez, context_index); 
-#ifdef DEBUG_LEGION
-      assert(point_completions.empty() || (redop > 0));
-#endif
       if (!point_completions.empty())
       {
         const ApEvent completion_effects =

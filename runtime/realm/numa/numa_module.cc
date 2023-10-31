@@ -19,6 +19,7 @@
 #include "realm/logging.h"
 #include "realm/cmdline.h"
 #include "realm/proc_impl.h"
+#include "realm/mem_impl.h"
 #include "realm/threads.h"
 #include "realm/runtime_impl.h"
 #include "realm/utils.h"
@@ -93,6 +94,10 @@ namespace Realm {
     NumaModuleConfig::NumaModuleConfig(void)
       : ModuleConfig("numa")
     {
+      config_map.insert({"numamem", &cfg_numa_mem_size});
+      config_map.insert({"numa_nocpumem", &cfg_numa_nocpu_mem_size});
+      config_map.insert({"numacpus", &cfg_num_numa_cpus});
+      config_map.insert({"pin_memory", &cfg_pin_memory});
     }
 
     void NumaModuleConfig::configure_from_cmdline(std::vector<std::string>& cmdline)
@@ -125,7 +130,7 @@ namespace Realm {
     NumaModule::~NumaModule(void)
     {
       assert(config != nullptr);
-      delete config;
+      config = nullptr;
     }
 
     /*static*/ ModuleConfig *NumaModule::create_module_config(RuntimeImpl *runtime)
@@ -141,10 +146,10 @@ namespace Realm {
       NumaModule *m = new NumaModule;
 
       NumaModuleConfig *config = dynamic_cast<NumaModuleConfig *>(runtime->get_module_config("numa"));
-      assert(config != NULL);
+      assert(config != nullptr);
       assert(config->finish_configured);
       assert(m->name == config->get_name());
-      assert(m->config == NULL);
+      assert(m->config == nullptr);
       m->config = config;
 
       // if neither NUMA memory nor cpus was requested, there's no point
