@@ -95,15 +95,15 @@ namespace Legion {
     thread_local LgTaskID implicit_task_caller = LG_SCHEDULER_ID;
 #endif
 
-    const LgEvent LgEvent::NO_LG_EVENT = LgEvent();
-    const ApEvent ApEvent::NO_AP_EVENT = ApEvent();
-    const ApUserEvent ApUserEvent::NO_AP_USER_EVENT = ApUserEvent();
-    const ApBarrier ApBarrier::NO_AP_BARRIER = ApBarrier();
-    const RtEvent RtEvent::NO_RT_EVENT = RtEvent();
-    const RtUserEvent RtUserEvent::NO_RT_USER_EVENT = RtUserEvent();
-    const RtBarrier RtBarrier::NO_RT_BARRIER = RtBarrier();
-    const PredEvent PredEvent::NO_PRED_EVENT = PredEvent();
-    const PredUserEvent PredUserEvent::NO_PRED_USER_EVENT = PredUserEvent();
+    const LgEvent LgEvent::NO_LG_EVENT = {};
+    const ApEvent ApEvent::NO_AP_EVENT = {};
+    const ApUserEvent ApUserEvent::NO_AP_USER_EVENT = {};
+    const ApBarrier ApBarrier::NO_AP_BARRIER = {};
+    const RtEvent RtEvent::NO_RT_EVENT = {};
+    const RtUserEvent RtUserEvent::NO_RT_USER_EVENT = {};
+    const RtBarrier RtBarrier::NO_RT_BARRIER = {};
+    const PredEvent PredEvent::NO_PRED_EVENT = {};
+    const PredUserEvent PredUserEvent::NO_PRED_USER_EVENT = {};
 
     //--------------------------------------------------------------------------
     void LgEvent::begin_context_wait(Context ctx) const
@@ -402,7 +402,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    FutureMap ArgumentMapImpl::freeze(TaskContext *ctx, Provenance *provenance)
+    FutureMap ArgumentMapImpl::freeze(InnerContext *ctx, Provenance *provenance)
     //--------------------------------------------------------------------------
     {
       // If we already have a future map then we are good
@@ -2398,12 +2398,8 @@ namespace Legion {
         // We know futures can never flow up the task tree so the
         // only way they have the same depth is if they are from 
         // the same parent context
-        TaskContext *context = consumer_op->get_context();
-        const int consumer_depth = context->get_depth();
-#ifdef DEBUG_LEGION
-        assert(consumer_depth >= producer_depth);
-#endif
-        if (consumer_depth == producer_depth)
+        TaskContext *consumer_context = consumer_op->get_context();
+        if (consumer_context == context)
         {
           consumer_op->register_dependence(producer_op, op_gen);
 #ifdef LEGION_SPY
@@ -2411,6 +2407,39 @@ namespace Legion {
               context->get_unique_id(), producer_uid, 0,
               consumer_op->get_unique_op_id(), 0, TRUE_DEPENDENCE);
 #endif
+        }
+        else
+        {
+          // Check that the consumer is contained within the task
+          // sub-tree of the producer task
+          TaskTreeCoordinates prod_coords, con_coords;
+          context->compute_task_tree_coordinates(prod_coords);
+          consumer_context->compute_task_tree_coordinates(con_coords);
+          bool contained = (prod_coords.size() <= con_coords.size());
+          if (contained)
+          {
+            for (unsigned idx = 0; idx < prod_coords.size(); idx++)
+            {
+              if (prod_coords[idx] == con_coords[idx])
+                continue;
+              contained = false;
+              break;
+            }
+          }
+          if (!contained)
+          {
+            Provenance *provenance = consumer_op->get_provenance();
+            REPORT_LEGION_ERROR(ERROR_ILLEGAL_FUTURE_USE,
+                "Illegal use of future produced in context %s (UID %lld) "
+                "but consumed in context %s (UID %lld) by operation %s "
+                "(UID %lld) launched from %s. Futures are only permitted "
+                "to be used in the task sub-tree rooted by the context "
+                "that produced the future.", context->get_task_name(),
+                context->get_unique_id(), consumer_context->get_task_name(), 
+                consumer_context->get_unique_id(),
+                consumer_op->get_logging_name(),
+                consumer_op->get_unique_op_id(), provenance->human.c_str())
+          }
         }
       }
 #ifdef DEBUG_LEGION
@@ -16639,6 +16668,7 @@ namespace Legion {
         no_physical_tracing(config.no_physical_tracing),
         no_trace_optimization(config.no_trace_optimization),
         no_fence_elision(config.no_fence_elision),
+        no_transitive_reduction(config.no_transitive_reduction),
         replay_on_cpus(config.replay_on_cpus),
         verify_partitions(config.verify_partitions),
         runtime_warnings(config.runtime_warnings),
@@ -16859,6 +16889,7 @@ namespace Legion {
         no_physical_tracing(rhs.no_physical_tracing),
         no_trace_optimization(rhs.no_trace_optimization),
         no_fence_elision(rhs.no_fence_elision),
+        no_transitive_reduction(rhs.no_transitive_reduction),
         replay_on_cpus(rhs.replay_on_cpus),
         verify_partitions(rhs.verify_partitions),
         runtime_warnings(rhs.runtime_warnings),
@@ -17061,7 +17092,12 @@ namespace Legion {
         while (!redop_table.empty())
         {
           ReductionOpTable::iterator it = redop_table.begin();
-          delete it->second;
+          // Free ReductionOp *'s with free, not delete!
+          static_assert(
+            std::is_trivially_destructible<typename std::decay<decltype(*(it->second))>::type>::value,
+            "ReducionOp must be trivially destructible"
+          );
+          free(it->second);
           redop_table.erase(it);
         }
       }
@@ -30109,6 +30145,8 @@ namespace Legion {
                          config.no_trace_optimization, !filter)
         .add_option_bool("-lg:no_fence_elision",
                          config.no_fence_elision, !filter)
+        .add_option_bool("-lg:no_transitive_reduction",
+                         config.no_transitive_reduction, !filter)
         .add_option_bool("-lg:replay_on_cpus",
                          config.replay_on_cpus, !filter)
         .add_option_bool("-lg:disjointness",

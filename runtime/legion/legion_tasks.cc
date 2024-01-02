@@ -784,17 +784,18 @@ namespace Legion {
               options.check_collective_regions.begin(); it !=
               options.check_collective_regions.end(); it++)
         {
-          // Remove it if it is too big or 
-          if ((*it >= regions.size()) || IS_WRITE(regions[*it]))
-          {
-            if (*it < regions.size())
-              REPORT_LEGION_WARNING(LEGION_WARNING_WRITE_PRIVILEGE_COLLECTIVE,
-                  "Ignoring request by mapper %s to check for collective usage "
-                  "for region requirement %d of task %s (UID %lld) because "
-                  "region requirement has writing privileges.",
-                  mapper->get_mapper_name(), *it, 
-                  get_task_name(), unique_op_id)
-          }
+          if ((*it) >= regions.size())
+            continue;
+          const RegionRequirement &req = regions[*it];
+          if (IS_NO_ACCESS(req) || req.privilege_fields.empty())
+            continue;
+          if (IS_WRITE(req))
+            REPORT_LEGION_WARNING(LEGION_WARNING_WRITE_PRIVILEGE_COLLECTIVE,
+                "Ignoring request by mapper %s to check for collective usage "
+                "for region requirement %d of task %s (UID %lld) because "
+                "region requirement has writing privileges.",
+                mapper->get_mapper_name(), *it, 
+                get_task_name(), unique_op_id)
           else
             check_collective_regions.push_back(*it);
         }
@@ -1918,11 +1919,11 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void TaskOp::compute_parent_indexes(TaskContext *alt_context/*= NULL*/)
+    void TaskOp::compute_parent_indexes(InnerContext *alt_context/*= NULL*/)
     //--------------------------------------------------------------------------
     {
       parent_req_indexes.resize(get_region_count());
-      TaskContext *use_ctx = (alt_context == NULL) ? parent_ctx : alt_context;
+      InnerContext *use_ctx = (alt_context == NULL) ? parent_ctx : alt_context;
       for (unsigned idx = 0; idx < logical_regions.size(); idx++)
       {
         int parent_index = 
@@ -4068,7 +4069,8 @@ namespace Legion {
             const bool record_valid = !std::binary_search(
                 untracked_valid_regions.begin(),
                 untracked_valid_regions.end(), 0);
-            const bool check_collective = std::binary_search(
+            const bool check_collective = 
+              IS_COLLECTIVE(regions.front()) || std::binary_search(
                 check_collective_regions.begin(),
                 check_collective_regions.end(), 0);
             region_preconditions.back() =
@@ -4107,7 +4109,8 @@ namespace Legion {
             const bool record_valid = !std::binary_search(
                 untracked_valid_regions.begin(),
                 untracked_valid_regions.end(), idx);
-            const bool check_collective = std::binary_search(
+            const bool check_collective = 
+              IS_COLLECTIVE(logical_regions[idx]) || std::binary_search(
                 check_collective_regions.begin(),
                 check_collective_regions.end(), idx);
             // apply the results of the mapping to the tree
@@ -6710,7 +6713,7 @@ namespace Legion {
       if (execution_context != NULL)
       {
         rez.serialize<bool>(true);
-        execution_context->pack_resources_return(rez, context_index);
+        execution_context->pack_return_resources(rez, context_index);
       }
       else
         rez.serialize<bool>(false);
@@ -10215,6 +10218,7 @@ namespace Legion {
               if (fold_reduction_future(it->second, reduction_effects,
                                         deterministic_redop)) 
               {
+                delete it->second;
                 std::map<DomainPoint,FutureInstance*>::iterator 
                   to_delete = it++;
                 temporary_futures.erase(to_delete);
@@ -10624,6 +10628,13 @@ namespace Legion {
             // If either one are the NO_REGION then there is no interference
             if (!point_reqs[it->first].exists() || 
                 !other_reqs[it->second].exists())
+              continue;
+            // If the user marked this region requirement as collective
+            // and this is the same region requirement for both points
+            // and the region name is the same then we allow that
+            if (!same_point && (it->first == it->second) &&
+                IS_COLLECTIVE(regions[it->first]) &&
+                (point_reqs[it->first] == other_reqs[it->second]))
               continue;
             if (!runtime->forest->are_disjoint(
                   point_reqs[it->first].get_index_space(), 

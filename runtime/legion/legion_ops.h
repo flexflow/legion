@@ -199,7 +199,7 @@ namespace Legion {
     public:
       ResourceTracker& operator=(const ResourceTracker &rhs);
     public:
-      bool has_return_resources(void) const;
+      // Delete this function once MustEpochOps are gone
       void return_resources(ResourceTracker *target, size_t return_index,
                             std::set<RtEvent> &preconditions);
       virtual void receive_resources(size_t return_index,
@@ -216,6 +216,7 @@ namespace Legion {
               std::vector<DeletedPartition> &deleted_partitions,
               std::set<RtEvent> &preconditions) = 0;
       void pack_resources_return(Serializer &rez, size_t return_index);
+      static void pack_empty_resources(Serializer &rez, size_t return_index);
       static RtEvent unpack_resources_return(Deserializer &derez,
                                              ResourceTracker *target);
     protected:
@@ -3930,16 +3931,14 @@ namespace Legion {
       RegionRequirement requirement;
       RegionTreePath privilege_path;
       VersionInfo version_info;
-      const char *file_name;
-      std::map<FieldID,const char*> field_map;
-      std::map<FieldID,void*> field_pointers_map;
-      LegionFileMode file_mode;
       PhysicalRegion region;
       unsigned parent_req_index;
       InstanceSet external_instances;
       std::set<RtEvent> map_applied_conditions;
       LayoutConstraintSet layout_constraint_set;
-      size_t footprint;
+      Realm::ExternalInstanceResource *external_resource;
+      std::vector<std::string> hdf5_field_files;
+      ApEvent termination_event;
       bool restricted;
     };
 
@@ -4020,7 +4019,7 @@ namespace Legion {
       virtual void deactivate(bool free = true);
     public:
       PhysicalRegionImpl* initialize(IndexAttachOp *owner, InnerContext *ctx,
-        const IndexAttachLauncher &launcher, const OrderingConstraint &ordering,
+        const IndexAttachLauncher &launcher,
         const DomainPoint &point, unsigned index);
     public:
       virtual void trigger_ready(void);
