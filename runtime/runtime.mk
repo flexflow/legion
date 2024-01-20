@@ -559,8 +559,6 @@ SLIB_LEGION_DEPS += -L$(CUDA)/lib64 -L$(CUDA)/lib64/stubs -lcudart -lcuda
 SLIB_REALM_DEPS += -L$(CUDA)/lib64 -L$(CUDA)/lib64/stubs -lcudart -lcuda
 endif
 endif
-# Add support for Legion GPU reductions
-# LEGION_CC_FLAGS	+= -DLEGION_GPU_REDUCTIONS
 # Convert CXXFLAGS and CPPFLAGS to NVCC_FLAGS
 # Need to detect whether nvcc supports them directly or to use -Xcompiler
 NVCC_FLAGS	+= ${shell                                                              \
