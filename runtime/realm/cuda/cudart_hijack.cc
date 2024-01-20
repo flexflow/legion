@@ -778,10 +778,7 @@ extern "C" {
     p->gpu_memcpy_from_symbol_async(dst, src, size, offset, stream);
     return cudaSuccess;
   }
-   
-  //REALM_PUBLIC_API
-  //cudaError_t cudaDeviceEnablePeerAccess (int peerDevice, unsigned int flags) { return cudaSuccess; }
-   
+
   REALM_PUBLIC_API
   cudaError_t cudaDeviceSetSharedMemConfig(cudaSharedMemConfig config)
   {
