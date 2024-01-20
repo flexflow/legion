@@ -378,61 +378,6 @@ ifeq ($(strip $(USE_PYTHON)),1)
     $(error USE_PYTHON requires USE_LIBDL)
   endif
 
-  # Attempt to auto-detect location of Python shared library based on
-  # the location of Python executable on PATH. We do this because the
-  # shared library may not be on LD_LIBRARY_PATH even when the
-  # executable is on PATH.
-
-  # Note: Set PYTHON_ROOT to an empty string to skip this logic and
-  # defer to the normal search of LD_LIBRARY_PATH instead. Or set
-  # PYTHON_LIB to specify the path to the shared library directly.
-  ifndef PYTHON_LIB
-    ifndef PYTHON_ROOT
-      PYTHON_EXE := $(shell which python3 python | head -1)
-      ifeq ($(PYTHON_EXE),)
-        $(error cannot find python - set PYTHON_ROOT if not in PATH)
-      endif
-      PYTHON_VERSION_MAJOR := $(shell $(PYTHON_EXE) -c 'import sys; print(sys.version_info.major)')
-      PYTHON_VERSION_MINOR := $(shell $(PYTHON_EXE) -c 'import sys; print(sys.version_info.minor)')
-      PYTHON_ROOT := $(dir $(PYTHON_EXE))
-    endif
-
-    # Try searching for common locations of the Python shared library.
-    ifneq ($(strip $(PYTHON_ROOT)),)
-      ifeq ($(strip $(DARWIN)),1)
-        PYTHON_EXT := dylib
-      else
-	PYTHON_EXT := so
-      endif
-      PYTHON_LIB := $(wildcard $(PYTHON_ROOT)/libpython$(PYTHON_VERSION_MAJOR).$(PYTHON_VERSION_MINOR)*.$(PYTHON_EXT))
-      ifeq ($(strip $(PYTHON_LIB)),)
-        PYTHON_LIB := $(wildcard $(abspath $(PYTHON_ROOT)/../lib/libpython$(PYTHON_VERSION_MAJOR).$(PYTHON_VERSION_MINOR)*.$(PYTHON_EXT)))
-        ifeq ($(strip $(PYTHON_LIB)),)
-          $(warning cannot find libpython$(PYTHON_VERSION_MAJOR).$(PYTHON_VERSION_MINOR)*.$(PYTHON_EXT) - falling back to using LD_LIBRARY_PATH)
-          PYTHON_LIB :=
-        endif
-      endif
-    endif
-  endif
-
-  ifneq ($(strip $(PYTHON_LIB)),)
-    ifndef FORCE_PYTHON
-      ifeq ($(wildcard $(PYTHON_LIB)),)
-        $(error cannot find libpython$(PYTHON_VERSION_MAJOR).$(PYTHON_VERSION_MINOR).$(PYTHON_EXT) - PYTHON_LIB set but file does not exist)
-      else
-        REALM_CC_FLAGS += -DREALM_PYTHON_LIB="\"$(PYTHON_LIB)\""
-      endif
-    else
-      REALM_CC_FLAGS += -DREALM_PYTHON_LIB="\"$(PYTHON_LIB)\""
-    endif
-  endif
-
-  ifndef PYTHON_VERSION_MAJOR
-    $(error cannot auto-detect Python version - please set PYTHON_VERSION_MAJOR)
-  else
-    REALM_CC_FLAGS += -DREALM_PYTHON_VERSION_MAJOR=$(PYTHON_VERSION_MAJOR)
-  endif
-
   REALM_CC_FLAGS += -DREALM_USE_PYTHON
 endif
 
@@ -935,6 +880,10 @@ REALM_CC_FLAGS	+= -DCOMPILE_TIME_MIN_LEVEL=$(OUTPUT_LEVEL)
 # demand warning-free compilation
 CC_FLAGS        += -Wall
 FC_FLAGS	+= -Wall
+REALM_CXX_CHECK := -Wdeprecated
+ifneq '' '$(findstring clang,$(shell $(CXX) --version))'
+  REALM_CXX_CHECK += -Wformat-pedantic
+endif
 ifeq ($(strip $(WARN_AS_ERROR)),1)
 CC_FLAGS        += -Werror
 FC_FLAGS	+= -Werror
@@ -988,6 +937,7 @@ MAPPER_SRC	?=
 # Set the source files
 REALM_SRC 	+= $(LG_RT_DIR)/realm/runtime_impl.cc \
     $(LG_RT_DIR)/realm/bgwork.cc \
+    $(LG_RT_DIR)/realm/transfer/address_list.cc \
     $(LG_RT_DIR)/realm/transfer/transfer.cc \
     $(LG_RT_DIR)/realm/transfer/channel.cc \
     $(LG_RT_DIR)/realm/transfer/channel_disk.cc \
@@ -1407,13 +1357,13 @@ $(filter %.S.o,$(APP_OBJS)) : %.S.o : %.S
 #  (hopefully making the path explicit doesn't break things too badly...)
 ifneq ($(USE_PGI),1)
 $(LG_RT_DIR)/realm/deppart/image_%.cc.o : $(LG_RT_DIR)/realm/deppart/image_tmpl.cc $(LG_RT_DIR)/realm/deppart/image.cc $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) -DINST_N1=$(word 1,$(subst _, ,$*)) -DINST_N2=$(word 2,$(subst _, ,$*)) $(REALM_DEFCHECK)
+	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_CXX_CHECK) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) -DINST_N1=$(word 1,$(subst _, ,$*)) -DINST_N2=$(word 2,$(subst _, ,$*)) $(REALM_DEFCHECK)
 
 $(LG_RT_DIR)/realm/deppart/preimage_%.cc.o : $(LG_RT_DIR)/realm/deppart/preimage_tmpl.cc $(LG_RT_DIR)/realm/deppart/preimage.cc $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) -DINST_N1=$(word 1,$(subst _, ,$*)) -DINST_N2=$(word 2,$(subst _, ,$*)) $(REALM_DEFCHECK)
+	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_CXX_CHECK) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) -DINST_N1=$(word 1,$(subst _, ,$*)) -DINST_N2=$(word 2,$(subst _, ,$*)) $(REALM_DEFCHECK)
 
 $(LG_RT_DIR)/realm/deppart/byfield_%.cc.o : $(LG_RT_DIR)/realm/deppart/byfield_tmpl.cc $(LG_RT_DIR)/realm/deppart/byfield.cc $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) -DINST_N1=$(word 1,$(subst _, ,$*)) -DINST_N2=$(word 2,$(subst _, ,$*)) $(REALM_DEFCHECK)
+	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_CXX_CHECK) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) -DINST_N1=$(word 1,$(subst _, ,$*)) -DINST_N2=$(word 2,$(subst _, ,$*)) $(REALM_DEFCHECK)
 else
 # nvc++ names some symbols based on the source filename, so the trick above
 #  of compiling multiple things from the same template with different defines
@@ -1440,7 +1390,7 @@ REALM_OBJS += $(REALM_INST_OBJS)
 endif
 
 $(REALM_OBJS) : %.cc.o : %.cc $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)
-	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) $(REALM_DEFCHECK)
+	$(CXX) -MMD -o $@ -c $< $(CC_FLAGS) $(REALM_CXX_CHECK) $(REALM_SYMBOL_VISIBILITY) $(INC_FLAGS) $(REALM_DEFCHECK)
 
 ifeq ($(strip $(USE_CUDA)),1)
 $(REALM_CUHOOK_OBJS) : %.cc.o : %.cc $(LEGION_DEFINES_HEADER) $(REALM_DEFINES_HEADER)

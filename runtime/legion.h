@@ -1108,7 +1108,7 @@ namespace Legion {
     public:
       ProjectionType handle_type; /**< region or partition requirement*/
       ProjectionID projection; /**< projection function for index space tasks*/
-    protected:
+    public:
       void *projection_args; /**< projection arguments buffer*/
       size_t projection_args_size; /**< projection arguments buffer size*/
     };
@@ -4879,6 +4879,40 @@ namespace Legion {
                                     const Domain &launch_domain);
 
       /**
+       * This method will be invoked on functional projection functors
+       * for projecting from an upper bound logical region when the
+       * the corresponding region requirement has projection arguments
+       * associated with it.
+       * @param upper_bound the upper bound logical region
+       * @param point the point being projected
+       * @param launch_domain the launch domain of the index operation
+       * @param args pointer to the buffer of arguments
+       * @param size size of the buffer of arguments in bytes
+       * @return logical region result
+       */
+      virtual LogicalRegion project(LogicalRegion upper_bound,
+                                    const DomainPoint &point,
+                                    const Domain &launch_domain,
+                                    const void *args, size_t size);
+
+      /**
+       * This method will be invoked on functional projection functors
+       * for projecting from an upper bound logical partition when the
+       * the corresponding region requirement has projection arguments
+       * associated with it.
+       * @param upper_bound the upper bound logical region
+       * @param point the point being projected
+       * @param launch_domain the launch domain of the index operation
+       * @param args pointer to the buffer of arguments
+       * @param size size of the buffer of arguments in bytes
+       * @return logical region result
+       */
+      virtual LogicalRegion project(LogicalPartition upper_bound,
+                                    const DomainPoint &point,
+                                    const Domain &launch_domain,
+                                    const void *args, size_t size);
+
+      /**
        * @deprecated
        * Compute the projection for a logical region projection
        * requirement down to a specific logical region.
@@ -7084,28 +7118,26 @@ namespace Legion {
                                      const bool unordered = false);
 
       /**
-       * Internally the runtime selects sets of disjoint and complete
-       * partitions to use for guiding the dependence analysis that it
-       * performs on region trees. The runtime has heuristics for selecting
-       * these partitions, but users may want to suggest specific regions and
-       * partitions to use to aid improve runtime performance. This method
-       * allows users to suggest specific regions and partitions to use for
-       * this analysis. The suggested regions and partitions must all be from
-       * the same region tree and must constitute a covering of the parent
-       * region. Furthermore all the partitions in the tree must be disjoint
-       * and complete and any ancestor partitions must also be disjoint
-       * and complete. This call will have no bearing on correctness, but
-       * will influence the amount of runtime overhead observed.
+       * Internally the runtime creates "equivalence sets" which are
+       * subsets of logical regions that it uses for performing its analyses.
+       * In general, these equivalence sets are established on a first touch
+       * basis and then altered using runtime heuristics. However, you can 
+       * influence their selection using this API call which will reset the
+       * equivalence sets for certain fields on a arbitrary region in the
+       * region tree (note you must have privileges on this region). The 
+       * next task to use this region or any overlapping regions will create
+       * new equivalence sets. Therefore it is useful to use this to inform
+       * the runtime when switching from one partition to a new partition.
+       * Note that this method will only impact your performance and has no
+       * bearing on the correctness of your application.
        * @param ctx enclosing task context
        * @param parent the logical region where privileges are derived from
-       * @param regions recommended analysis regions
-       * @param parts recommended analysis partitions
+       * @param region the region to reset the equivalence sets for
        * @param fields the fields for which these should apply
        */
-      void advise_analysis_subtree(Context ctx, LogicalRegion parent,
-                                   const std::set<LogicalRegion> &regions,
-                                   const std::set<LogicalPartition> &parts,
-                                   const std::set<FieldID> &fields);
+      void reset_equivalence_sets(Context ctx, LogicalRegion parent, 
+                                  LogicalRegion region,
+                                  const std::set<FieldID> &fields);
     public:
       //------------------------------------------------------------------------
       // Logical Region Tree Traversal Operations
@@ -8717,6 +8749,19 @@ namespace Legion {
       const Task* get_current_task(Context ctx);
 
       /**
+       * Query the space available to this task in a given memory.
+       * This is an instantaneous value and may be subject to change.
+       * If the mapper has provided an upper bound for a pool in this
+       * memory then it will reflect how much space is left available
+       * in that pool, otherwise it will reflect the space left in the
+       * actual memory. Note that the space available does not imply
+       * that you can create an instance of this size as the memory 
+       * may be fragmented and the largest hole might be much smaller
+       * than the size returned by this function.
+       */
+      size_t query_available_memory(Context ctx, Memory target);
+
+      /**
        * Indicate that data in a particular physical region
        * appears to be incorrect for whatever reason.  This
        * will cause the runtime to trap into an error handler
@@ -9232,7 +9277,7 @@ namespace Legion {
        * ever being invoked. The runtime takes ownership for deleting the
        * projection functor after the application has finished executing.
        * @param pid the projection ID to use for the registration
-       * @param functor the objecto register for handling projections
+       * @param functor the object to register for handling projections
        */
       static void preregister_projection_functor(ProjectionID pid,
                                                  ProjectionFunctor *functor);
@@ -9275,7 +9320,14 @@ namespace Legion {
       /**
        * Register a sharding functor for handling control replication
        * queries about which shard owns which a given point in an 
-       * index space launch.
+       * index space launch. The ShardingID must be non-zero because
+       * zero is the special "round-robin" sharding functor. The
+       * runtime takes ownership of for deleting the sharding functor
+       * after the application has finished executing.
+       * @param sid the sharding ID to use for the registration
+       * @param functor the object to register for handling sharding requests 
+       * @param silence_warnings disable warnings about dynamic registration
+       * @param warning_string a string to be reported with any warnings
        */
       void register_sharding_functor(ShardingID sid,
                                      ShardingFunctor *functor,
@@ -9286,7 +9338,11 @@ namespace Legion {
        * Register a sharding functor before the runtime has 
        * started only. The sharding functor will be invoked to
        * handle queries during control replication about which
-       * shard owns a given point in an index space launch.
+       * shard owns a given point in an index space launch. The
+       * runtime takes ownership for deleting the sharding functor
+       * after the application has finished executing.
+       * @param sid the sharding ID to use for the registration
+       * @param functor the object too register for handling sharding 
        */
       static void preregister_sharding_functor(ShardingID sid,
                                                ShardingFunctor *functor);
@@ -9627,6 +9683,12 @@ namespace Legion {
        *              This allows control over the granularity so they
        *              can be made small enough to interleave with other
        *              runtime work. The default is 100 (us).
+       * -lg:prof_call_threshold <int> The minimum size of runtime and
+       *              mapper calls in order for them to be logged by the
+       *              profiler in microseconds. All runtime and mapper calls
+       *              that are less than this threshold will be discarded
+       *              and will not be recorded in the profiling logs. The
+       *              default value is 0 (us) so all calls are logged.
        *
        * @param argc the number of input arguments
        * @param argv pointer to an array of string arguments of size argc

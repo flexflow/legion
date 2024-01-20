@@ -28,6 +28,7 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
 list(APPEND REALM_SRC
   realm/realm_c.h
   realm/transfer/lowlevel_disk.cc
+  realm/transfer/address_list.h            realm/transfer/address_list.cc
   realm/transfer/channel.h                 realm/transfer/channel.cc
   realm/transfer/channel_disk.h            realm/transfer/channel_disk.cc
   realm/transfer/transfer.h                realm/transfer/transfer.cc
@@ -988,6 +989,18 @@ if(COMPILER_SUPPORTS_DEFCHECK)
   #  any place it needs to be
   target_compile_options(LegionRuntime PRIVATE $<$<COMPILE_LANGUAGE:CXX>:--defcheck;legion_defines.h>)
 endif()
+
+# compiler options' check for realm
+check_cxx_compiler_flag("-Wdeprecated" COMPILER_SUPPORTS_CXX_WDEPRECATED)
+if(COMPILER_SUPPORTS_CXX_WDEPRECATED)
+  target_compile_options(RealmRuntime PRIVATE -Wdeprecated)
+endif()
+check_cxx_compiler_flag("-Wformat-pedantic" COMPILER_SUPPORTS_CXX_FORMAT_PEDENTIC)
+if(COMPILER_SUPPORTS_CXX_FORMAT_PEDENTIC)
+  target_compile_options(RealmRuntime PRIVATE -Wformat-pedantic)
+endif()
+
+
 
 target_include_directories(LegionRuntime
   INTERFACE
