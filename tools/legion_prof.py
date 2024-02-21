@@ -1810,6 +1810,10 @@ class RuntimeCallKind(StatObject):
         self.name = name
         self.color: Optional[str] = None
 
+    @typecheck
+    def __hash__(self) -> int:
+        return hash(self.runtime_call_kind)
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RuntimeCallKind):
             assert 0, "Wrong type of other" + str(type(other))
@@ -3467,7 +3471,8 @@ class State(object):
         'minimum_call_threshold', 'mapper_call_kinds', 'mapper_calls', 'runtime_call_kinds', 
         'runtime_calls', 'instances', 'index_spaces', 'partitions', 'logical_regions', 
         'field_spaces', 'fields', 'has_spy_data', 'spy_state', 'callbacks', 'copy_map',
-        'fill_map', 'visible_nodes', 'always_parsed_callbacks', 'current_node_id'
+        'fill_map', 'visible_nodes', 'always_parsed_callbacks', 'current_node_id',
+        'hostname', 'host_id', 'process_id', 'calibration_err',
     ]
     def __init__(self, call_threshold: int) -> None:
         self.max_dim = 3
@@ -3547,10 +3552,15 @@ class State(object):
             "PhysicalInstLayoutDesc": self.log_physical_inst_layout_desc,
             "PhysicalInstDimOrderDesc": self.log_physical_inst_layout_dim_desc,
             "PhysicalInstanceUsage": self.log_physical_inst_usage,
-            "IndexSpaceSizeDesc": self.log_index_space_size_desc
+            "IndexSpaceSizeDesc": self.log_index_space_size_desc,
+            "CalibrationErr": self.log_calibration_err
             #"UserInfo": self.log_user_info
         }
         self.current_node_id: Optional[int] = None
+        self.hostname = ""
+        self.host_id = 0
+        self.process_id = 0
+        self.calibration_err = 0
 
     #############################################################
     # process logging statement
@@ -3563,12 +3573,17 @@ class State(object):
 
     # MachineDesc
     @typecheck
-    def log_machine_desc(self, node_id: int, num_nodes: int) -> int:
+    def log_machine_desc(self, node_id: int, num_nodes: int,
+                         hostname: str, host_id: int,
+                         process_id: int) -> int:
         if self.num_nodes == 0:
             self.num_nodes = num_nodes
         else:
             assert self.num_nodes == num_nodes
         self.current_node_id = node_id
+        self.hostname = hostname
+        self.host_id = host_id
+        self.process_id = process_id
         return node_id
 
     # ZeroTime
@@ -3653,6 +3668,11 @@ class State(object):
         index_space = self.find_index_space(unique_id)
         index_space.set_size(dense_size, sparse_size, is_sparse)
 
+    # CalibrationErr
+    @typecheck
+    def log_calibration_err(self, calibration_err: int) -> None:
+        self.calibration_err = calibration_err
+
     # PhysicalInstRegionDesc
     @typecheck
     def log_physical_inst_region_desc(self, inst_uid: int, 
@@ -3709,7 +3729,8 @@ class State(object):
     def log_task_info(self, op_id: int, task_id: int, 
                       variant_id: int, proc_id: int,
                       create: int, ready: int, 
-                      start: int, stop: int, fevent: int
+                      start: int, stop: int,
+                      creator: int, fevent: int
     ) -> None:
         variant = self.find_or_create_variant(task_id, variant_id)
         task = self.find_or_create_task(op_id, variant, create, ready, start, stop)
@@ -3726,7 +3747,7 @@ class State(object):
                           create: int, ready: int, 
                           start: int, stop: int, 
                           gpu_start: int, gpu_stop: int,
-                          fevent: int
+                          creator: int, fevent: int
     ) -> None:
         # it is possible that gpu_start is larger than gpu_stop when cuda hijack is disabled, 
         # because the cuda event completions of these two timestamp may be out of order when
@@ -3747,7 +3768,7 @@ class State(object):
                       proc_id: int, 
                       create: int, ready: int, 
                       start: int, stop: int,
-                      fevent: int
+                      creator: int, fevent: int
     ) -> None:
         op = self.find_or_create_op(op_id)
         variant = self.find_or_create_meta_variant(lg_id)
@@ -3769,7 +3790,8 @@ class State(object):
     def log_copy_info(self, op_id: int, size: int,
                       create: int, ready: int, 
                       start: int, stop: int,
-                      fevent: int, collective: int
+                      creator: int, fevent: int,
+                      collective: int
     ) -> None:
         op = self.find_or_create_op(op_id)
         copy = self.create_copy(op, size, create, ready, start, stop, fevent, collective)
@@ -3807,7 +3829,7 @@ class State(object):
     def log_fill_info(self, op_id: int, size: int,
                       create: int, ready: int, 
                       start: int, stop: int,
-                      fevent: int
+                      creator: int, fevent: int
     ) -> None:
         op = self.find_or_create_op(op_id)
         fill = self.create_fill(op, size, create, ready, start, stop, fevent)
@@ -3829,7 +3851,8 @@ class State(object):
     @typecheck
     def log_inst_timeline(self, inst_uid: int, inst_id: int,
                           mem_id: int, size: int, op_id: int,
-                          create: int, ready: int, destroy: int
+                          create: int, ready: int, destroy: int,
+                          creator: int
     ) -> None:
         op = self.find_or_create_op(op_id)
         inst = self.find_or_create_instance(inst_uid)
@@ -3843,7 +3866,8 @@ class State(object):
     @typecheck
     def log_partition_info(self, op_id: int, part_op: int, 
                            create: int, ready: int, 
-                           start: int, stop: int
+                           start: int, stop: int,
+                           creator: int
     ) -> None:
         op = self.find_or_create_op(op_id)
         deppart = self.create_deppart(part_op, op, create, ready, start, stop)
@@ -3948,7 +3972,10 @@ class State(object):
 
     # ProcDesc
     @typecheck
-    def log_proc_desc(self, proc_id: int, kind: int) -> None:
+    def log_proc_desc(self, proc_id: int, kind: int,
+                      uuid_size: int = 0,
+                      cuda_device_uuid: List[int] = [],
+    ) -> None:
         assert kind in processor_kinds
         kind_str = processor_kinds[kind]
         if proc_id not in self.processors:
@@ -4032,7 +4059,8 @@ class State(object):
     # ProfTaskInfo
     @typecheck
     def log_proftask_info(self, proc_id: int, op_id: int, 
-                          start: int, stop: int, fevent: int
+                          start: int, stop: int, fevent: int,
+                          creator: int
     ) -> None:
         # we don't have a unique op_id for the profiling task itself, so we don't 
         # add to self.operations

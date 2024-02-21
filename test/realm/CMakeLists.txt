@@ -62,9 +62,11 @@ if(Legion_USE_CUDA)
   set(CUDASRC_simple_reduce simple_reduce_gpu.cu)
   set(CUDASRC_multiaffine multiaffine_gpu.cu)
 
-  list(APPEND REALM_TESTS cuda_arrays)
-  set(CUDASRC_cuda_arrays cuda_arrays_gpu.cu)
+  # FIXME: https://github.com/StanfordLegion/legion/issues/1635
+  # list(APPEND REALM_TESTS cuda_arrays)
+  # set(CUDASRC_cuda_arrays cuda_arrays_gpu.cu)
   list(APPEND REALM_TESTS cuda_memcpy_test)
+  list(APPEND REALM_TESTS cuda_scatter_test)
   list(APPEND REALM_TESTS cuda_transpose_test)
   list(APPEND REALM_TESTS task_stream)
   set(CUDASRC_task_stream task_stream_gpu.cu)
@@ -113,6 +115,10 @@ foreach(test IN LISTS REALM_TESTS)
   endif()
 endforeach()
 
+if(Legion_USE_LIBDL)
+  target_link_libraries(taskreg ${CMAKE_DL_LIBS})
+endif()
+
 if(REALM_LIMIT_SYMBOL_VISIBILITY)
   set_target_properties(machine_config PROPERTIES CXX_VISIBILITY_PRESET hidden)
   set_target_properties(machine_config PROPERTIES VISIBILITY_INLINES_HIDDEN 1)
@@ -128,7 +134,9 @@ set(TESTARGS_scatter           -p1 2 -p2 2)
 set(TESTARGS_alltoall          -ll:csize 1024)
 set(TESTARGS_simple_reduce     -all)
 set(TESTARGS_sparse_construct  -verbose)
-set(TESTARGS_cuda_arrays       -ll:gpu 1)
+# FIXME: https://github.com/StanfordLegion/legion/issues/1635
+# set(TESTARGS_cuda_arrays       -ll:gpu 1)
+set(TESTARGS_scatter_test       -ll:gpu 1)
 set(TESTARGS_transpose_test       -ll:gpu 1 -unit_test 1)
 set(TESTARGS_cuda_memcpy_test      -ll:gpu 1 -sparse 64 -gap 0 -chunks 32 -test-sparse -rects 8 -verify)
 set(TESTARGS_machine_config_args    -test_args 1 -ll:cpu 4 -ll:util 2 -ll:io 1 -ll:csize 16 -ll:stacksize 4 -ll:pin_util 1 -ll:ext_sysmem 0 -ll:rsize 2 -ll:nsize 2 -ll:ncsize 1 -ll:ncpu 1 -numa:pin)
@@ -150,10 +158,14 @@ endif()
 
 if(Legion_ENABLE_TESTING)
   foreach(test IN LISTS REALM_TESTS)
-    add_test(NAME ${test} COMMAND ${Legion_TEST_LAUNCHER} $<TARGET_FILE:${test}> ${Legion_TEST_ARGS} ${TESTARGS_${test}})
+    if (NOT test STREQUAL "machine_config")
+      add_test(NAME ${test} COMMAND ${Legion_TEST_LAUNCHER} $<TARGET_FILE:${test}> ${Legion_TEST_ARGS} ${TESTARGS_${test}})
+    endif()
   endforeach()
+  # test machine_config without any Legion_TEST_ARGS
+  add_test(NAME machine_config COMMAND ${Legion_TEST_LAUNCHER} $<TARGET_FILE:machine_config> ${TESTARGS_machine_config})
   # test machine_config with -test_args 1
-  add_test(NAME machine_config_args COMMAND ${Legion_TEST_LAUNCHER} $<TARGET_FILE:machine_config> ${Legion_TEST_ARGS} ${TESTARGS_machine_config_args})
+  add_test(NAME machine_config_args COMMAND ${Legion_TEST_LAUNCHER} $<TARGET_FILE:machine_config> ${TESTARGS_machine_config_args})
 
   if(Legion_NETWORKS)
     # For verifying the -ll:networks arguments, try each network we've compiled with

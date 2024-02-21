@@ -288,6 +288,7 @@ pub trait ContainerEntry {
     fn time_range_mut(&mut self) -> &mut TimeRange;
     fn waiters(&self) -> Option<&Waiters>;
     fn initiation(&self) -> Option<OpID>;
+    fn creator(&self) -> Option<EventID>;
 
     // Methods that require State access
     fn name(&self, state: &State) -> String;
@@ -311,8 +312,10 @@ pub struct ProcEntry {
     pub initiation_op: Option<OpID>,
     pub kind: ProcEntryKind,
     pub time_range: TimeRange,
+    pub creator: EventID,
     pub fevent: EventID,
     pub waiters: Waiters,
+    pub subcalls: Vec<(ProfUID, Timestamp, Timestamp)>,
 }
 
 impl ProcEntry {
@@ -322,6 +325,7 @@ impl ProcEntry {
         initiation_op: Option<OpID>,
         kind: ProcEntryKind,
         time_range: TimeRange,
+        creator: EventID,
         fevent: EventID,
     ) -> Self {
         ProcEntry {
@@ -330,8 +334,10 @@ impl ProcEntry {
             initiation_op,
             kind,
             time_range,
+            creator,
             fevent,
             waiters: Waiters::new(),
+            subcalls: Vec::new(),
         }
     }
     fn trim_time_range(&mut self, start: Timestamp, stop: Timestamp) -> bool {
@@ -362,6 +368,10 @@ impl ContainerEntry for ProcEntry {
 
     fn initiation(&self) -> Option<OpID> {
         self.initiation_op
+    }
+
+    fn creator(&self) -> Option<EventID> {
+        Some(self.creator)
     }
 
     fn name(&self, state: &State) -> String {
@@ -462,7 +472,6 @@ pub struct Proc {
     entries: BTreeMap<ProfUID, ProcEntry>,
     tasks: BTreeMap<OpID, ProfUID>,
     meta_tasks: BTreeMap<(OpID, VariantID), Vec<ProfUID>>,
-    fevents: BTreeMap<EventID, ProfUID>,
     pub max_levels: u32,
     pub max_levels_ready: u32,
     pub time_points: Vec<ProcPoint>,
@@ -478,7 +487,6 @@ impl Proc {
             entries: BTreeMap::new(),
             tasks: BTreeMap::new(),
             meta_tasks: BTreeMap::new(),
-            fevents: BTreeMap::new(),
             max_levels: 0,
             max_levels_ready: 0,
             time_points: Vec::new(),
@@ -494,9 +502,11 @@ impl Proc {
         initiation_op: Option<OpID>,
         kind: ProcEntryKind,
         time_range: TimeRange,
+        creator: EventID,
         fevent: EventID,
         op_prof_uid: &mut BTreeMap<OpID, ProfUID>,
         prof_uid_proc: &mut BTreeMap<ProfUID, ProcID>,
+        fevents: &mut BTreeMap<EventID, ProfUID>,
     ) -> &mut ProcEntry {
         if let Some(op_id) = op {
             op_prof_uid.insert(op_id, base.prof_uid);
@@ -506,8 +516,8 @@ impl Proc {
         match kind {
             ProcEntryKind::Task(_, _) | ProcEntryKind::MetaTask(_) | ProcEntryKind::ProfTask => {
                 // We should only see an event once
-                assert!(!self.fevents.contains_key(&fevent));
-                self.fevents.insert(fevent, base.prof_uid);
+                assert!(!fevents.contains_key(&fevent));
+                fevents.insert(fevent, base.prof_uid);
             }
             _ => {}
         }
@@ -524,9 +534,9 @@ impl Proc {
             // If we don't need to look up later... don't bother building the index
             _ => {}
         }
-        self.entries
-            .entry(base.prof_uid)
-            .or_insert_with(|| ProcEntry::new(base, op, initiation_op, kind, time_range, fevent))
+        self.entries.entry(base.prof_uid).or_insert_with(|| {
+            ProcEntry::new(base, op, initiation_op, kind, time_range, creator, fevent)
+        })
     }
 
     pub fn find_task(&self, op_id: OpID) -> Option<&ProcEntry> {
@@ -553,6 +563,10 @@ impl Proc {
         self.entries.get_mut(prof_uid)
     }
 
+    pub fn find_entry(&self, prof_uid: ProfUID) -> Option<&ProcEntry> {
+        self.entries.get(&prof_uid)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -561,7 +575,7 @@ impl Proc {
         self.entries.retain(|_, t| !t.trim_time_range(start, stop));
     }
 
-    fn sort_calls_and_waits(&mut self) {
+    fn sort_calls_and_waits(&mut self, fevents: &BTreeMap<EventID, ProfUID>) {
         // Before we sort things, we need to rearrange the waiters from
         // any tasks into the appropriate runtime/mapper calls and make the
         // runtime/mapper calls appear as waiters in the original tasks
@@ -569,7 +583,7 @@ impl Proc {
         for (uid, entry) in self.entries.iter() {
             match entry.kind {
                 ProcEntryKind::MapperCall(_) | ProcEntryKind::RuntimeCall(_) => {
-                    let task_uid = self.fevents.get(&entry.fevent).unwrap();
+                    let task_uid = fevents.get(&entry.fevent).unwrap();
                     let call_start = entry.time_range.start.unwrap();
                     let call_stop = entry.time_range.stop.unwrap();
                     assert!(call_start <= call_stop);
@@ -651,12 +665,14 @@ impl Proc {
                     }
                 }
             }
+            // Save any calls on the proc entry
+            std::mem::swap(&mut task_entry.subcalls, calls);
             // Finally add the task entry back in now that we're done mutating it
             self.entries.insert(*task_uid, task_entry);
         }
     }
 
-    fn sort_time_range(&mut self) {
+    fn sort_time_range(&mut self, fevents: &BTreeMap<EventID, ProfUID>) {
         fn add(
             time: &TimeRange,
             prof_uid: ProfUID,
@@ -709,7 +725,7 @@ impl Proc {
         }
 
         // Before we do anything sort the runtime/mapper calls and waiters
-        self.sort_calls_and_waits();
+        self.sort_calls_and_waits(fevents);
 
         let mut all_points = Vec::new();
         let mut points = Vec::new();
@@ -1016,6 +1032,14 @@ impl ContainerEntry for ChanEntry {
             ChanEntry::Copy(copy) => Some(copy.op_id),
             ChanEntry::Fill(fill) => Some(fill.op_id),
             ChanEntry::DepPart(deppart) => Some(deppart.op_id),
+        }
+    }
+
+    fn creator(&self) -> Option<EventID> {
+        match self {
+            ChanEntry::Copy(copy) => Some(copy.creator),
+            ChanEntry::Fill(fill) => Some(fill.creator),
+            ChanEntry::DepPart(deppart) => Some(deppart.creator),
         }
     }
 
@@ -1418,9 +1442,8 @@ impl FSpace {
         }
     }
     fn set_name(&mut self, name: &str) -> &mut Self {
-        let new_name = Some(name.to_owned());
-        assert!(self.name.is_none() || self.name == new_name);
-        self.name = new_name;
+        assert!(self.name.as_ref().map_or(true, |n| n == name));
+        self.name = Some(name.to_owned());
         self
     }
 }
@@ -1558,6 +1581,7 @@ pub struct Inst {
     pub fields: BTreeMap<FSpaceID, Vec<FieldID>>,
     pub align_desc: BTreeMap<FSpaceID, Vec<Align>>,
     pub dim_order: BTreeMap<Dim, DimKind>,
+    pub creator: Option<EventID>,
 }
 
 impl Inst {
@@ -1576,21 +1600,26 @@ impl Inst {
             fields: BTreeMap::new(),
             align_desc: BTreeMap::new(),
             dim_order: BTreeMap::new(),
+            creator: None,
         }
     }
     fn set_inst_id(&mut self, inst_id: InstID) -> &mut Self {
+        assert!(self.inst_id.map_or(true, |i| i == inst_id));
         self.inst_id = Some(inst_id);
         self
     }
     fn set_op_id(&mut self, op_id: OpID) -> &mut Self {
+        assert!(self.op_id.map_or(true, |i| i == op_id));
         self.op_id = Some(op_id);
         self
     }
     fn set_mem(&mut self, mem_id: MemID) -> &mut Self {
+        assert!(self.mem_id.map_or(true, |i| i == mem_id));
         self.mem_id = Some(mem_id);
         self
     }
     fn set_size(&mut self, size: u64) -> &mut Self {
+        assert!(self.size.map_or(true, |s| s == size));
         self.size = Some(size);
         self
     }
@@ -1634,11 +1663,17 @@ impl Inst {
         self
     }
     fn set_tree(&mut self, tree_id: TreeID) -> &mut Self {
+        assert!(self.tree_id.map_or(true, |t| t == tree_id));
         self.tree_id = Some(tree_id);
         self
     }
     fn trim_time_range(&mut self, start: Timestamp, stop: Timestamp) -> bool {
         self.time_range.trim_time_range(start, stop)
+    }
+    fn set_creator(&mut self, creator: EventID) -> &mut Self {
+        assert!(self.creator.map_or(true, |c| c == creator));
+        self.creator = Some(creator);
+        self
     }
 }
 
@@ -1685,6 +1720,10 @@ impl ContainerEntry for Inst {
 
     fn initiation(&self) -> Option<OpID> {
         self.op_id
+    }
+
+    fn creator(&self) -> Option<EventID> {
+        self.creator
     }
 
     fn name(&self, state: &State) -> String {
@@ -1825,9 +1864,7 @@ impl Variant {
         }
     }
     fn set_task(&mut self, task_id: TaskID) -> &mut Self {
-        if let Some(id) = self.task_id {
-            assert_eq!(id, task_id);
-        }
+        assert!(self.task_id.map_or(true, |t| t == task_id));
         self.task_id = Some(task_id);
         self
     }
@@ -1855,12 +1892,12 @@ impl Base {
         }
     }
     fn set_level(&mut self, level: u32) -> &mut Self {
-        assert_eq!(self.level, None);
+        assert!(self.level.is_none());
         self.level = Some(level);
         self
     }
     fn set_level_ready(&mut self, level_ready: u32) -> &mut Self {
-        assert_eq!(self.level_ready, None);
+        assert!(self.level_ready.is_none());
         self.level_ready = Some(level_ready);
         self
     }
@@ -2041,15 +2078,17 @@ impl Operation {
         }
     }
     fn set_parent_id(&mut self, parent_id: OpID) -> &mut Self {
-        if parent_id == OpID(std::u64::MAX) {
-            self.parent_id = None;
+        let parent = if parent_id == OpID(std::u64::MAX) {
+            None
         } else {
-            self.parent_id = Some(parent_id);
-        }
+            Some(parent_id)
+        };
+        assert!(self.parent_id.is_none() || self.parent_id == parent);
+        self.parent_id = parent;
         self
     }
     fn set_kind(&mut self, kind: OpKindID) -> &mut Self {
-        assert_eq!(self.kind, None);
+        assert!(self.kind.is_none());
         self.kind = Some(kind);
         self
     }
@@ -2128,6 +2167,7 @@ impl CopyInstInfo {
 #[derive(Debug)]
 pub struct Copy {
     base: Base,
+    creator: EventID,
     fevent: EventID,
     time_range: TimeRange,
     chan_id: Option<ChanID>,
@@ -2144,11 +2184,13 @@ impl Copy {
         time_range: TimeRange,
         op_id: OpID,
         size: u64,
+        creator: EventID,
         fevent: EventID,
         collective: u32,
     ) -> Self {
         Copy {
             base,
+            creator,
             fevent,
             time_range,
             chan_id: None,
@@ -2252,6 +2294,7 @@ impl FillInstInfo {
 #[derive(Debug)]
 pub struct Fill {
     base: Base,
+    creator: EventID,
     fevent: EventID,
     time_range: TimeRange,
     chan_id: Option<ChanID>,
@@ -2261,9 +2304,17 @@ pub struct Fill {
 }
 
 impl Fill {
-    fn new(base: Base, time_range: TimeRange, op_id: OpID, size: u64, fevent: EventID) -> Self {
+    fn new(
+        base: Base,
+        time_range: TimeRange,
+        op_id: OpID,
+        size: u64,
+        creator: EventID,
+        fevent: EventID,
+    ) -> Self {
         Fill {
             base,
+            creator,
             fevent,
             time_range,
             chan_id: None,
@@ -2279,7 +2330,7 @@ impl Fill {
 
     fn add_channel(&mut self) {
         // sanity check
-        assert_eq!(self.chan_id, None);
+        assert!(self.chan_id.is_none());
         assert!(!self.fill_inst_infos.is_empty());
         let chan_dst = self.fill_inst_infos[0]._dst;
         for fill_inst_info in &self.fill_inst_infos {
@@ -2293,15 +2344,23 @@ impl Fill {
 #[derive(Debug)]
 pub struct DepPart {
     base: Base,
+    creator: EventID,
     pub part_op: DepPartKind,
     time_range: TimeRange,
     pub op_id: OpID,
 }
 
 impl DepPart {
-    fn new(base: Base, part_op: DepPartKind, time_range: TimeRange, op_id: OpID) -> Self {
+    fn new(
+        base: Base,
+        part_op: DepPartKind,
+        time_range: TimeRange,
+        op_id: OpID,
+        creator: EventID,
+    ) -> Self {
         DepPart {
             base,
+            creator,
             part_op,
             time_range,
             op_id,
@@ -2418,6 +2477,7 @@ pub struct State {
     max_dim: i32,
     pub num_nodes: u32,
     pub zero_time: TimestampDelta,
+    pub _calibration_err: i64,
     pub procs: BTreeMap<ProcID, Proc>,
     pub mems: BTreeMap<MemID, Mem>,
     pub mem_proc_affinity: BTreeMap<MemID, MemProcAffinity>,
@@ -2443,6 +2503,7 @@ pub struct State {
     pub has_prof_data: bool,
     pub visible_nodes: Vec<NodeID>,
     pub source_locator: Vec<String>,
+    pub fevents: BTreeMap<EventID, ProfUID>,
 }
 
 impl State {
@@ -2496,6 +2557,7 @@ impl State {
         task_id: TaskID,
         variant_id: VariantID,
         time_range: TimeRange,
+        creator: EventID,
         fevent: EventID,
     ) -> &mut ProcEntry {
         // Hack: we have to do this in two places, because we don't know what
@@ -2511,9 +2573,11 @@ impl State {
             parent_id,
             ProcEntryKind::Task(task_id, variant_id),
             time_range,
+            creator,
             fevent,
             &mut self.op_prof_uid,
             &mut self.prof_uid_proc,
+            &mut self.fevents,
         )
     }
 
@@ -2534,6 +2598,7 @@ impl State {
         variant_id: VariantID,
         proc_id: ProcID,
         time_range: TimeRange,
+        creator: EventID,
         fevent: EventID,
     ) -> &mut ProcEntry {
         self.create_op(op_id);
@@ -2543,12 +2608,14 @@ impl State {
         proc.create_proc_entry(
             Base::new(alloc),
             None,
-            Some(op_id),
+            Some(op_id), // FIXME: should really make this None if op_id == 0 but backwards compatibilty with Python is hard
             ProcEntryKind::MetaTask(variant_id),
             time_range,
+            creator,
             fevent,
             &mut self.op_prof_uid,
             &mut self.prof_uid_proc,
+            &mut self.fevents,
         )
     }
 
@@ -2577,8 +2644,10 @@ impl State {
             ProcEntryKind::MapperCall(kind),
             time_range,
             fevent,
+            fevent,
             &mut self.op_prof_uid,
             &mut self.prof_uid_proc,
+            &mut self.fevents,
         )
     }
 
@@ -2598,8 +2667,10 @@ impl State {
             ProcEntryKind::RuntimeCall(kind),
             time_range,
             fevent,
+            fevent,
             &mut self.op_prof_uid,
             &mut self.prof_uid_proc,
+            &mut self.fevents,
         )
     }
 
@@ -2608,6 +2679,7 @@ impl State {
         proc_id: ProcID,
         op_id: OpID,
         time_range: TimeRange,
+        creator: EventID,
         fevent: EventID,
     ) -> &mut ProcEntry {
         let alloc = &mut self.prof_uid_allocator;
@@ -2615,12 +2687,14 @@ impl State {
         proc.create_proc_entry(
             Base::new(alloc),
             None,
-            Some(op_id),
+            Some(op_id), // FIXME: should really make this None if op_id == 0 but backwards compatibilty with Python is hard
             ProcEntryKind::ProfTask,
             time_range,
+            creator,
             fevent,
             &mut self.op_prof_uid,
             &mut self.prof_uid_proc,
+            &mut self.fevents,
         )
     }
 
@@ -2629,18 +2703,20 @@ impl State {
         time_range: TimeRange,
         op_id: OpID,
         size: u64,
+        creator: EventID,
         fevent: EventID,
         collective: u32,
         copies: &'a mut BTreeMap<EventID, Copy>,
     ) -> &'a mut Copy {
         let alloc = &mut self.prof_uid_allocator;
-        assert_eq!(copies.contains_key(&fevent), false);
+        assert!(!copies.contains_key(&fevent));
         copies.entry(fevent).or_insert_with(|| {
             Copy::new(
                 Base::new(alloc),
                 time_range,
                 op_id,
                 size,
+                creator,
                 fevent,
                 collective,
             )
@@ -2652,21 +2728,28 @@ impl State {
         time_range: TimeRange,
         op_id: OpID,
         size: u64,
+        creator: EventID,
         fevent: EventID,
         fills: &'a mut BTreeMap<EventID, Fill>,
     ) -> &'a mut Fill {
         let alloc = &mut self.prof_uid_allocator;
-        assert_eq!(fills.contains_key(&fevent), false);
-        fills
-            .entry(fevent)
-            .or_insert_with(|| Fill::new(Base::new(alloc), time_range, op_id, size, fevent))
+        assert!(!fills.contains_key(&fevent));
+        fills.entry(fevent).or_insert_with(|| {
+            Fill::new(Base::new(alloc), time_range, op_id, size, creator, fevent)
+        })
     }
 
-    fn create_deppart(&mut self, op_id: OpID, part_op: DepPartKind, time_range: TimeRange) {
+    fn create_deppart(
+        &mut self,
+        op_id: OpID,
+        part_op: DepPartKind,
+        time_range: TimeRange,
+        creator: EventID,
+    ) {
         self.create_op(op_id);
         let base = Base::new(&mut self.prof_uid_allocator); // FIXME: construct here to avoid mutability conflict
         let chan = self.find_deppart_chan_mut();
-        chan.add_deppart(DepPart::new(base, part_op, time_range, op_id));
+        chan.add_deppart(DepPart::new(base, part_op, time_range, op_id, creator));
     }
 
     fn find_chan_mut(&mut self, chan_id: ChanID) -> &mut Chan {
@@ -2875,7 +2958,7 @@ impl State {
     pub fn sort_time_range(&mut self) {
         self.procs
             .par_iter_mut()
-            .for_each(|(_, proc)| proc.sort_time_range());
+            .for_each(|(_, proc)| proc.sort_time_range(&self.fevents));
         self.mems
             .par_iter_mut()
             .for_each(|(_, mem)| mem.sort_time_range());
@@ -3409,7 +3492,10 @@ fn process_record(
         Record::ZeroTime { zero_time } => {
             state.zero_time = TimestampDelta(*zero_time);
         }
-        Record::ProcDesc { proc_id, kind } => {
+        Record::CalibrationErr { calibration_err } => {
+            state._calibration_err = *calibration_err;
+        }
+        Record::ProcDesc { proc_id, kind, .. } => {
             let kind = match ProcKind::try_from(*kind) {
                 Ok(x) => x,
                 Err(_) => panic!("bad processor kind"),
@@ -3678,10 +3764,19 @@ fn process_record(
             ready,
             start,
             stop,
+            creator,
             fevent,
         } => {
             let time_range = TimeRange::new_full(*create, *ready, *start, *stop);
-            state.create_task(*op_id, *proc_id, *task_id, *variant_id, time_range, *fevent);
+            state.create_task(
+                *op_id,
+                *proc_id,
+                *task_id,
+                *variant_id,
+                time_range,
+                *creator,
+                *fevent,
+            );
             state.update_last_time(*stop);
         }
         Record::GPUTaskInfo {
@@ -3693,6 +3788,7 @@ fn process_record(
             ready,
             gpu_start,
             gpu_stop,
+            creator,
             fevent,
             ..
         } => {
@@ -3704,7 +3800,15 @@ fn process_record(
                 gpu_start.0 = gpu_stop.0 - 1;
             }
             let time_range = TimeRange::new_full(*create, *ready, gpu_start, *gpu_stop);
-            state.create_task(*op_id, *proc_id, *task_id, *variant_id, time_range, *fevent);
+            state.create_task(
+                *op_id,
+                *proc_id,
+                *task_id,
+                *variant_id,
+                time_range,
+                *creator,
+                *fevent,
+            );
             state.update_last_time(*gpu_stop);
         }
         Record::MetaInfo {
@@ -3715,10 +3819,11 @@ fn process_record(
             ready,
             start,
             stop,
+            creator,
             fevent,
         } => {
             let time_range = TimeRange::new_full(*create, *ready, *start, *stop);
-            state.create_meta(*op_id, *lg_id, *proc_id, time_range, *fevent);
+            state.create_meta(*op_id, *lg_id, *proc_id, time_range, *creator, *fevent);
             state.update_last_time(*stop);
         }
         Record::CopyInfo {
@@ -3728,12 +3833,21 @@ fn process_record(
             ready,
             start,
             stop,
+            creator,
             fevent,
             collective,
         } => {
             let time_range = TimeRange::new_full(*create, *ready, *start, *stop);
             state.create_op(*op_id);
-            state.create_copy(time_range, *op_id, *size, *fevent, *collective, copies);
+            state.create_copy(
+                time_range,
+                *op_id,
+                *size,
+                *creator,
+                *fevent,
+                *collective,
+                copies,
+            );
             state.update_last_time(*stop);
         }
         Record::CopyInstInfo {
@@ -3769,11 +3883,12 @@ fn process_record(
             ready,
             start,
             stop,
+            creator,
             fevent,
         } => {
             let time_range = TimeRange::new_full(*create, *ready, *start, *stop);
             state.create_op(*op_id);
-            state.create_fill(time_range, *op_id, *size, *fevent, fills);
+            state.create_fill(time_range, *op_id, *size, *creator, *fevent, fills);
             state.update_last_time(*stop);
         }
         Record::FillInstInfo {
@@ -3795,6 +3910,7 @@ fn process_record(
             create,
             ready,
             destroy,
+            creator,
         } => {
             state.create_op(*op_id);
             state.insts.entry(*inst_uid).or_insert_with(|| *mem_id);
@@ -3804,7 +3920,8 @@ fn process_record(
                 .set_op_id(*op_id)
                 .set_start_stop(*create, *ready, *destroy)
                 .set_mem(*mem_id)
-                .set_size(*size);
+                .set_size(*size)
+                .set_creator(*creator);
             state.update_last_time(*destroy);
         }
         Record::PartitionInfo {
@@ -3814,13 +3931,14 @@ fn process_record(
             ready,
             start,
             stop,
+            creator,
         } => {
             let part_op = match DepPartKind::try_from(*part_op) {
                 Ok(x) => x,
                 Err(_) => panic!("bad deppart kind"),
             };
             let time_range = TimeRange::new_full(*create, *ready, *start, *stop);
-            state.create_deppart(*op_id, part_op, time_range);
+            state.create_deppart(*op_id, part_op, time_range, *creator);
             state.update_last_time(*stop);
         }
         Record::MapperCallInfo {
@@ -3859,10 +3977,11 @@ fn process_record(
             op_id,
             start,
             stop,
+            creator,
             fevent,
         } => {
             let time_range = TimeRange::new_start(*start, *stop);
-            state.create_prof_task(*proc_id, *op_id, time_range, *fevent);
+            state.create_prof_task(*proc_id, *op_id, time_range, *creator, *fevent);
             state.update_last_time(*stop);
         }
     }

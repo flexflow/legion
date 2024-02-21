@@ -990,9 +990,8 @@ namespace Legion {
       collective_check_id = 0;
       slice_sharding_output = false;
       output_bar = RtBarrier::NO_RT_BARRIER;
-      concurrent_prebar = RtBarrier::NO_RT_BARRIER;
-      concurrent_postbar = RtBarrier::NO_RT_BARRIER;
       concurrent_validator = NULL;
+      concurrent_exchange = NULL;
 #ifdef DEBUG_LEGION
       sharding_collective = NULL;
 #endif
@@ -1015,6 +1014,8 @@ namespace Legion {
         delete output_size_collective;
       if (concurrent_validator != NULL)
         delete concurrent_validator;
+      if (concurrent_exchange != NULL)
+        delete concurrent_exchange;
 #ifdef DEBUG_LEGION
       if (sharding_collective != NULL)
         delete sharding_collective;
@@ -1205,9 +1206,6 @@ namespace Legion {
         if (redop == 0)
           tpl->record_sharding_function(trace_local_id, sharding_function);
       }
-      // Prepare any setup for performing the concurrent analysis
-      if (concurrent_task)
-        initialize_concurrent_analysis(false/*replay*/);
       // If it's empty we're done, otherwise we go back on the queue
       if (!internal_space.exists())
       {
@@ -1235,6 +1233,14 @@ namespace Legion {
             complete_mapping(Runtime::merge_events(map_applied_conditions));
           else
             complete_mapping();
+        }
+        if (concurrent_task)
+        {
+          concurrent_exchange->exchange(concurrent_slices,
+              concurrent_lamport_clock, concurrent_poisoned,
+              concurrent_task_barrier, concurrent_variant, 0/*points*/);
+          if (concurrent_validator != NULL)
+            concurrent_validator->perform_validation(concurrent_processors);
         }
         if (redop > 0)
           finish_index_task_reduction();
@@ -1306,7 +1312,13 @@ namespace Legion {
 #endif
         // Still need to do any rendezvous for concurrent analysis
         if (concurrent_task)
-          initialize_concurrent_analysis(true/*replay*/);
+        {
+          concurrent_exchange->exchange(concurrent_slices,
+              concurrent_lamport_clock, concurrent_poisoned,
+              concurrent_task_barrier, concurrent_variant, 0/*points*/);
+          if (concurrent_validator != NULL)
+            concurrent_validator->elide_collective();
+        }
         // We have no local points, so we can just trigger
         if (serdez_redop_fns == NULL)
         {
@@ -1598,14 +1610,18 @@ namespace Legion {
         }
       }
       if (!runtime->unsafe_mapper)
-        collective_check_id = ctx->get_next_collective_index(COLLECTIVE_LOC_29);
+        collective_check_id = ctx->get_next_collective_index(COLLECTIVE_LOC_76);
       if (concurrent_task)
       {
-        concurrent_prebar = ctx->get_next_concurrent_precondition_barrier();
-        concurrent_postbar = ctx->get_next_concurrent_postcondition_barrier();
+        concurrent_exchange = new ConcurrentAllreduce(COLLECTIVE_LOC_79, ctx,
+            launch_space->get_volume());
+        complete_preconditions.insert(concurrent_exchange->get_done_event());
         if (!runtime->unsafe_mapper)
+        {
           concurrent_validator = new ConcurrentExecutionValidator(this,
               COLLECTIVE_LOC_104, ctx, 0/*owner shard*/);
+          complete_preconditions.insert(concurrent_validator->get_done_event());
+        }
       }
     } 
 
@@ -1644,47 +1660,6 @@ namespace Legion {
     } 
 
     //--------------------------------------------------------------------------
-    void ReplIndexTask::initialize_concurrent_analysis(bool replay)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      ReplicateContext *repl_ctx = dynamic_cast<ReplicateContext*>(parent_ctx);
-      assert(repl_ctx != NULL);
-#else
-      ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
-#endif
-      // See if we are the first local shard on the lowest address space
-      const CollectiveMapping &mapping =
-        repl_ctx->shard_manager->get_collective_mapping();
-      const AddressSpace lowest = mapping[0];
-      if ((lowest == runtime->address_space) && 
-          repl_ctx->shard_manager->is_first_local_shard(repl_ctx->owner_shard))
-      {
-        // Very important! Make sure to give the prior concurrent_prebar as
-        // a precondition to performing the acquire on the reservation to 
-        // avoid deadlocks because Realm barriers need to trigger in order
-        RtBarrier precondition = Runtime::get_previous_phase(concurrent_prebar);
-        // If it's the first generation then we don't need a precondition
-        if (precondition == concurrent_prebar)
-          precondition = RtBarrier::NO_RT_BARRIER;
-        Runtime::phase_barrier_arrive(concurrent_prebar, 1/*arrivals*/,
-          runtime->acquire_concurrent_reservation(concurrent_postbar, 
-                                                  precondition));
-      }
-      concurrent_precondition = concurrent_prebar;
-      Runtime::phase_barrier_arrive(concurrent_postbar, 
-          1/*arrivals*/, mapped_event);
-      // If we are doing concurrent validation and we don't have any local
-      // points then we need to kick that off now. Save an event to make
-      // sure we don't delete the collective until we are done running
-      if ((concurrent_validator != NULL) && !internal_space.exists())
-      {
-        map_applied_conditions.insert(concurrent_validator->get_done_event());
-        concurrent_validator->perform_validation(concurrent_processors);
-      }
-    }
-
-    //--------------------------------------------------------------------------
     RtEvent ReplIndexTask::verify_concurrent_execution(const DomainPoint &point,
                                                        Processor target)
     //--------------------------------------------------------------------------
@@ -1708,6 +1683,62 @@ namespace Legion {
       if (done)
         concurrent_validator->perform_validation(concurrent_processors);
       return result;
+    }
+
+    //--------------------------------------------------------------------------
+    void ReplIndexTask::concurrent_allreduce(SliceTask *slice,
+        AddressSpaceID slice_space, size_t points, uint64_t lamport_clock,
+        VariantID vid, bool poisoned)
+    //--------------------------------------------------------------------------
+    {
+      bool done = false;
+      {
+        AutoLock o_lock(op_lock);
+        if (concurrent_lamport_clock < lamport_clock)
+          concurrent_lamport_clock = lamport_clock;
+        if (poisoned)
+          concurrent_poisoned = true;
+        concurrent_slices.push_back(std::make_pair(slice, slice_space));
+        if (concurrent_points == 0)
+          concurrent_variant = vid;
+        else if (concurrent_variant != vid)
+          concurrent_variant = std::min(concurrent_variant, vid);
+        concurrent_points += points;
+        done = (concurrent_points == total_points);
+      }
+      if (done)
+      {
+        if (concurrent_variant > 0)
+        {
+#ifdef DEBUG_LEGION
+          ReplicateContext *repl_ctx =
+            dynamic_cast<ReplicateContext*>(parent_ctx);
+          assert(repl_ctx != NULL);
+#else
+          ReplicateContext *repl_ctx =
+            static_cast<ReplicateContext*>(parent_ctx);
+#endif
+          // Check to see if we're the shard for the first point in the index
+          // space, if we are, then we are the shard that will make the barrier
+          Domain launch_domain, sharding_domain;
+          launch_space->get_domain(launch_domain);
+          if (sharding_space.exists())
+            runtime->forest->find_domain(sharding_space, sharding_domain);
+          else
+            sharding_domain = launch_domain;
+          for (Domain::DomainPointIterator itr(launch_domain); itr; itr++)
+          {
+            ShardID owner = sharding_function->find_owner(*itr,sharding_domain);
+            if (owner == repl_ctx->owner_shard->shard_id)
+              concurrent_task_barrier = RtBarrier(
+                  Realm::Barrier::create_barrier(launch_space->get_volume()));    
+            break;
+          }
+        }
+        concurrent_exchange->exchange(concurrent_slices, 
+            concurrent_lamport_clock, concurrent_poisoned,
+            concurrent_task_barrier, concurrent_variant, concurrent_points);
+      }
     }
 
     //--------------------------------------------------------------------------
@@ -2006,7 +2037,7 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     ReplVirtualCloseOp::ReplVirtualCloseOp(Runtime *rt)
-      : VirtualCloseOp(rt)
+      : ReplCollectiveVersioning<CollectiveVersioning<VirtualCloseOp> >(rt)
     //--------------------------------------------------------------------------
     {
     }
@@ -2021,20 +2052,48 @@ namespace Legion {
     void ReplVirtualCloseOp::activate(void)
     //--------------------------------------------------------------------------
     {
-      VirtualCloseOp::activate();
+      ReplCollectiveVersioning<
+        CollectiveVersioning<VirtualCloseOp> >::activate();
     }
 
     //--------------------------------------------------------------------------
     void ReplVirtualCloseOp::deactivate(bool free)
     //--------------------------------------------------------------------------
     {
-      VirtualCloseOp::deactivate(false/*free*/);
+      ReplCollectiveVersioning<
+        CollectiveVersioning<VirtualCloseOp> >::deactivate(false/*free*/);
       if (free)
         runtime->free_repl_virtual_close_op(this);
     }
 
     //--------------------------------------------------------------------------
-    void ReplVirtualCloseOp::trigger_mapping(void)
+    void ReplVirtualCloseOp::trigger_dependence_analysis(void)
+    //--------------------------------------------------------------------------
+    {
+      create_collective_rendezvous(0/*requirement index*/);
+      VirtualCloseOp::trigger_dependence_analysis();
+    }
+
+    //--------------------------------------------------------------------------
+    void ReplVirtualCloseOp::trigger_ready(void)
+    //--------------------------------------------------------------------------
+    {
+      std::set<RtEvent> preconditions;
+      runtime->forest->perform_versioning_analysis(this, 0/*idx*/,
+                                                   requirement,
+                                                   source_version_info,
+                                                   preconditions,
+                                                   NULL/*output region*/,
+                                                   true/*rendezvous*/);
+      if (!preconditions.empty())
+        enqueue_ready_operation(Runtime::merge_events(preconditions));
+      else
+        enqueue_ready_operation(); 
+    }
+
+    //--------------------------------------------------------------------------
+    bool ReplVirtualCloseOp::perform_collective_analysis(
+                                 CollectiveMapping *&mapping, bool &first_local)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
@@ -2043,52 +2102,34 @@ namespace Legion {
 #else
       ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
 #endif
-      // We need a consistent way to decide which shard is going to issue
-      // the copies for different sources. We do that based on the owner
-      // space of the equivalence set right now
-      FieldMaskSet<EquivalenceSet> sources;
-      if (repl_ctx->shard_manager->is_first_local_shard(repl_ctx->owner_shard))
-      {
-        const AddressSpaceID local_space = runtime->address_space;
-        const FieldMaskSet<EquivalenceSet> &equivalence_sets = 
-          source_version_info.get_equivalence_sets();
-        const CollectiveMapping &mapping =
-          repl_ctx->shard_manager->get_collective_mapping();
-        for (FieldMaskSet<EquivalenceSet>::const_iterator it =
-              equivalence_sets.begin(); it != equivalence_sets.end(); it++)
-        {
-          if (mapping.contains(it->first->owner_space))
-          {
-            if (it->first->owner_space == local_space)
-              sources.insert(it->first, it->second);
-          }
-          else if (mapping.find_nearest(it->first->owner_space) == local_space)
-            sources.insert(it->first, it->second);
-        }
-      }
-      if (!sources.empty())
-      {
-        IndexSpaceExpression *expr = 
-          runtime->forest->get_node(requirement.region.get_index_space()); 
-        CloneAnalysis *analysis = new CloneAnalysis(runtime, expr, 
-            parent_ctx->owner_task, parent_idx, std::move(sources));
-        analysis->add_reference();
-        
-        const RtEvent traversal_done = analysis->perform_traversal(
-            RtEvent::NO_RT_EVENT, *target_version_info, map_applied_conditions);
-        if (traversal_done.exists() || analysis->has_remote_sets())
-          analysis->perform_remote(traversal_done, map_applied_conditions);
-        if (analysis->remove_reference())
-          delete analysis;
+      mapping = &(repl_ctx->shard_manager->get_collective_mapping()); 
+      mapping->add_reference();
+      first_local = is_collective_first_local_shard();
+      return true;
+    }
 
-        if (!map_applied_conditions.empty())
-        {
-          complete_mapping(Runtime::merge_events(map_applied_conditions));
-          return;
-        }
-      }
-      complete_mapping();
-      complete_execution();
+    //--------------------------------------------------------------------------
+    RtEvent ReplVirtualCloseOp::perform_collective_versioning_analysis(
+        unsigned index, LogicalRegion handle, EqSetTracker *tracker,
+        const FieldMask &mask, unsigned parent_req_index)
+    //--------------------------------------------------------------------------
+    {
+      return rendezvous_collective_versioning_analysis(index, handle, tracker,
+          runtime->address_space, mask, parent_req_index);
+    }
+
+    //--------------------------------------------------------------------------
+    bool ReplVirtualCloseOp::is_collective_first_local_shard(void) const
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      ReplicateContext *repl_ctx = dynamic_cast<ReplicateContext*>(parent_ctx);
+      assert(repl_ctx != NULL);
+#else
+      ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
+#endif
+      return repl_ctx->shard_manager->is_first_local_shard(
+          repl_ctx->owner_shard);
     }
 
     /////////////////////////////////////////////////////////////
@@ -3733,7 +3774,7 @@ namespace Legion {
             unique_intra_space_deps.insert(key);
         }
         if (record_dependence)
-          repl_ctx->record_intra_space_dependence(context_index, point, 
+          repl_ctx->record_intra_space_dependence(context_index, point,
                                                   point_mapped, next_shard);
       }
       else // The next shard is ourself, so we can do the normal thing
@@ -4829,8 +4870,6 @@ namespace Legion {
       dependence_exchange = NULL;
       completion_exchange = NULL;
       resource_return_barrier = RtBarrier::NO_RT_BARRIER;
-      concurrent_prebar = RtBarrier::NO_RT_BARRIER;
-      concurrent_postbar = RtBarrier::NO_RT_BARRIER;
 #ifdef DEBUG_LEGION
       sharding_collective = NULL;
 #endif
@@ -4880,7 +4919,7 @@ namespace Legion {
         ReplIndividualTask *task = 
           runtime->get_available_repl_individual_task();
         task->initialize_task(ctx, launcher.single_tasks[idx],
-                              provenance, false/*track*/, false/*top level*/,
+                              provenance, false/*top level*/,
                               true/*must epoch*/);
         task->set_must_epoch(this, idx, true/*register*/);
         // If we have a trace, set it for this operation as well
@@ -4940,31 +4979,6 @@ namespace Legion {
       const DistributedID future_map_did = repl_ctx->get_next_distributed_id();
       return repl_ctx->shard_manager->deduplicate_future_map_creation(repl_ctx,
           this, launch_node, shard_node, future_map_did, get_provenance());
-    }
-
-    //--------------------------------------------------------------------------
-    RtEvent ReplMustEpochOp::get_concurrent_analysis_precondition(void)
-    //--------------------------------------------------------------------------
-    {
-#ifdef DEBUG_LEGION
-      ReplicateContext *repl_ctx = dynamic_cast<ReplicateContext*>(parent_ctx);
-      assert(repl_ctx != NULL);
-#else
-      ReplicateContext *repl_ctx = static_cast<ReplicateContext*>(parent_ctx);
-#endif
-      // See if we are the first local shard on the lowest address space
-      const CollectiveMapping &mapping = 
-        repl_ctx->shard_manager->get_collective_mapping();
-      const AddressSpace lowest = mapping[0];
-      if ((lowest == runtime->address_space) && 
-          repl_ctx->shard_manager->is_first_local_shard(repl_ctx->owner_shard))
-      {
-        Runtime::phase_barrier_arrive(concurrent_prebar, 1/*arrivals*/,
-          runtime->acquire_concurrent_reservation(concurrent_postbar));
-      }
-      Runtime::phase_barrier_arrive(concurrent_postbar, 
-          1/*arrivals*/, mapped_event);
-      return concurrent_prebar;
     }
 
     //--------------------------------------------------------------------------
@@ -5192,6 +5206,7 @@ namespace Legion {
         ReplIndexTask *task = static_cast<ReplIndexTask*>(index_tasks[idx]);
         task->set_sharding_function(sharding_functor, sharding_function);
       }
+      MustEpochOp::trigger_prepipeline_stage();
     }
 
     //--------------------------------------------------------------------------
@@ -5208,7 +5223,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ReplMustEpochOp::receive_resources(size_t return_index,
+    void ReplMustEpochOp::receive_resources(uint64_t return_index,
               std::map<LogicalRegion,unsigned> &created_regs,
               std::vector<DeletedRegion> &deleted_regs,
               std::set<std::pair<FieldSpace,FieldID> > &created_fids,
@@ -5467,8 +5482,6 @@ namespace Legion {
       completion_exchange = 
         new MustEpochCompletionExchange(ctx, COLLECTIVE_LOC_73);
       resource_return_barrier = ctx->get_next_resource_return_barrier();
-      concurrent_prebar = ctx->get_next_concurrent_precondition_barrier();
-      concurrent_postbar = ctx->get_next_concurrent_postcondition_barrier();
     }
 
     //--------------------------------------------------------------------------
@@ -7909,9 +7922,7 @@ namespace Legion {
                   Provenance *provenance, bool has_block, bool remove_trace_ref)
     //--------------------------------------------------------------------------
     {
-      initialize(ctx, EXECUTION_FENCE, false/*need future*/, provenance);
-      tracing = false;
-      current_template = NULL;
+      initialize(ctx, EXECUTION_FENCE, false/*need future*/, provenance); 
       has_blocking_call = has_block;
       remove_trace_reference = remove_trace_ref;
       // Get a collective ID to use for check all replayable
@@ -7966,6 +7977,8 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(trace != NULL);
 #endif
+      tracing = false;
+      current_template = NULL;
       // Indicate that we are done capturing this trace
       trace->end_trace_execution(this);
       if (trace->is_recording())
@@ -8133,13 +8146,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       initialize(ctx, EXECUTION_FENCE, false/*need future*/, provenance);
-#ifdef DEBUG_LEGION
-      assert(trace != NULL);
-#endif
-      tracing = false;
-      current_template = NULL;
       template_completion = ApEvent::NO_AP_EVENT;
-      replayed = false;
       has_blocking_call = has_block;
       // Get a collective ID to use for check all replayable
       replayable_collective_id = 
@@ -8191,6 +8198,12 @@ namespace Legion {
     void ReplTraceCompleteOp::trigger_dependence_analysis(void)
     //--------------------------------------------------------------------------
     {
+#ifdef DEBUG_LEGION
+      assert(trace != NULL);
+#endif
+      tracing = false;
+      current_template = NULL;
+      replayed = false;
       trace->end_trace_execution(this);
       parent_ctx->record_previous_trace(trace);
 
@@ -8738,12 +8751,16 @@ namespace Legion {
       // Do NOT call 'initialize' here, we're in the dependence
       // analysis stage of the pipeline and we need to get our mapping
       // fence from a different location to avoid racing with the application
-      initialize_operation(ctx, false/*track*/, 0/*regions*/, provenance);
+      initialize_operation(ctx, provenance);
       fence_kind = MAPPING_FENCE;
-      context_index = invalidator->get_ctx_index();
+      context_index = invalidator->get_context_index();
       if (runtime->legion_spy_enabled)
+      {
         LegionSpy::log_fence_operation(parent_ctx->get_unique_id(),
-            unique_op_id, context_index, false/*execution fence*/);
+            unique_op_id, false/*execution fence*/);
+        LegionSpy::log_child_operation_index(parent_ctx->get_unique_id(),
+            context_index, unique_op_id);
+      }
       current_template = tpl;
       // The summary could have been marked as being traced,
       // so here we forcibly clear them out.
@@ -9028,11 +9045,13 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void ShardManager::distribute_explicit(SingleTask *task, VariantID variant,
-                                      std::vector<Processor> &target_processors)
+                                      std::vector<Processor> &target_processors,
+                                      std::vector<VariantID> &leaf_variants)
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
       assert(!local_shards.empty());
+      assert((variant == 0) == !leaf_variants.empty());
 #endif
       // Initialize the address spaces data structure
       set_shard_mapping(target_processors);
@@ -9049,6 +9068,8 @@ namespace Legion {
             pack_shard_manager(rez);
             rez.serialize<bool>(true/*explicit*/);
             rez.serialize(variant);
+            for (unsigned idx = 0; idx < leaf_variants.size(); idx++)
+              rez.serialize(leaf_variants[idx]);
             task->get_context()->pack_inner_context(rez);
             task->pack_single_task(rez, *it);
           }
@@ -9062,29 +9083,41 @@ namespace Legion {
 
     //--------------------------------------------------------------------------
     void ShardManager::distribute_implicit(TaskID task_id, MapperID mapper_id,
-         Processor::Kind kind, unsigned shards_per_space, InnerContext *ctx)
+         Processor::Kind kind, unsigned shards_per_space, TopLevelContext *ctx)
     //--------------------------------------------------------------------------
     {
       if (collective_mapping == NULL)
         return;
       std::vector<AddressSpaceID> children;
       collective_mapping->get_children(owner_space, local_space, children);
-      for (std::vector<AddressSpaceID>::const_iterator it =
-            children.begin(); it != children.end(); it++)
+      if (!children.empty())
       {
-        Serializer rez;
+        TaskTreeCoordinates coordinates;
+        ctx->compute_task_tree_coordinates(coordinates);
+#ifdef DEBUG_LEGION
+        assert(coordinates.size() == 1);
+        assert(coordinates.back().context_index == 0);
+        assert(coordinates.back().index_point[0] == 0);
+#endif
+        const coord_t implicit_coord = coordinates.back().index_point[1];
+        for (std::vector<AddressSpaceID>::const_iterator it =
+              children.begin(); it != children.end(); it++)
         {
-          RezCheck z(rez);
-          pack_shard_manager(rez);
-          rez.serialize<bool>(false/*explicit*/);
-          rez.serialize(task_id);
-          rez.serialize(mapper_id);
-          rez.serialize(kind);
-          rez.serialize(shards_per_space);
-          rez.serialize(ctx->did);
-          rez.serialize(ctx->get_executing_processor());
+          Serializer rez;
+          {
+            RezCheck z(rez);
+            pack_shard_manager(rez);
+            rez.serialize<bool>(false/*explicit*/);
+            rez.serialize(task_id);
+            rez.serialize(mapper_id);
+            rez.serialize(kind);
+            rez.serialize(shards_per_space);
+            rez.serialize(ctx->did);
+            rez.serialize(ctx->get_executing_processor());
+            rez.serialize(implicit_coord);
+          }
+          runtime->send_replicate_distribution(*it, rez);
         }
-        runtime->send_replicate_distribution(*it, rez);
       }
     }
 
@@ -9776,6 +9809,16 @@ namespace Legion {
           finder = created_futures.find(did);
         if (finder != created_futures.end())
         {
+          // Make sure to bump the future coordinate for this context as well
+#ifndef NDEBUG
+#ifdef DEBUG_LEGION
+          const uint64_t coord =
+#endif
+#endif
+            ctx->get_next_future_coordinate();
+#ifdef DEBUG_LEGION
+          assert(coord == finder->second.first->coordinate.context_index);
+#endif
           Future result(finder->second.first);
 #ifdef DEBUG_LEGION
           assert(finder->second.second > 0);
@@ -9790,7 +9833,8 @@ namespace Legion {
         }
         // Didn't find it so make it
         FutureImpl *result = new FutureImpl(ctx, runtime, false/*register*/,
-            did, op, op->get_generation(), op->get_ctx_index(), index_point,
+            did, op, op->get_generation(),
+            ContextCoordinate(ctx->get_next_future_coordinate(), index_point),
             op->get_unique_op_id(), ctx->get_depth(), op->get_provenance(),
             collective_mapping);
         if (runtime->legion_spy_enabled)
@@ -9809,7 +9853,8 @@ namespace Legion {
       else
       {
         FutureImpl *impl = new FutureImpl(ctx, runtime, false/*register*/,
-            did, op, op->get_generation(), op->get_ctx_index(), index_point,
+            did, op, op->get_generation(),
+            ContextCoordinate(ctx->get_next_future_coordinate(), index_point),
             op->get_unique_op_id(), ctx->get_depth(), op->get_provenance(),
             collective_mapping);
         if (runtime->legion_spy_enabled)
@@ -9825,7 +9870,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     FutureMap ShardManager::deduplicate_future_map_creation(
         ReplicateContext *ctx, Operation *op, IndexSpaceNode *domain,
-        IndexSpaceNode *shard_domain, DistributedID map_did, 
+        IndexSpaceNode *shard_domain, DistributedID map_did,
         Provenance *provenance)
     //--------------------------------------------------------------------------
     {
@@ -9837,6 +9882,16 @@ namespace Legion {
           finder = created_future_maps.find(map_did);
         if (finder != created_future_maps.end())
         {
+          // Make sure to bump the future coordinate for this context as well
+#ifndef NDEBUG
+#ifdef DEBUG_LEGION
+          const uint64_t coord =
+#endif
+#endif
+            ctx->get_next_future_coordinate();
+#ifdef DEBUG_LEGION
+          assert(coord == finder->second.first->future_coordinate);
+#endif
           FutureMap result(finder->second.first);
 #ifdef DEBUG_LEGION
           assert(finder->second.second > 0);
@@ -9877,10 +9932,12 @@ namespace Legion {
     //--------------------------------------------------------------------------
     FutureMap ShardManager::deduplicate_future_map_creation(
         ReplicateContext *ctx, IndexSpaceNode *domain,
-        IndexSpaceNode *shard_domain, size_t index,
-        DistributedID map_did, ApEvent completion, Provenance *provenance)
+        IndexSpaceNode *shard_domain, DistributedID map_did,
+        ApEvent completion, Provenance *provenance)
     //--------------------------------------------------------------------------
     {
+      // This future map isn't associated with an oeration so no coordinate
+      constexpr uint64_t coordinate = std::numeric_limits<uint64_t>::max();
       if (local_shards.size() > 1)
       {
         AutoLock m_lock(manager_lock);
@@ -9903,8 +9960,8 @@ namespace Legion {
         }
         // Didn't find it so make it
         ReplFutureMapImpl *result = new ReplFutureMapImpl(ctx, this, runtime,
-                                domain, shard_domain, map_did, index,
-                                completion, provenance, collective_mapping);
+                              domain, shard_domain, map_did, coordinate,
+                              completion, provenance, collective_mapping);
         // Add a reference to it to keep it from being deleted and then 
         // register it with the runtime
         result->add_nested_gc_ref(did);
@@ -9919,7 +9976,7 @@ namespace Legion {
       else
       {
         ReplFutureMapImpl *impl = new ReplFutureMapImpl(ctx, this, runtime,
-            domain, shard_domain, map_did, index, completion,
+            domain, shard_domain, map_did, coordinate, completion,
             provenance, collective_mapping);
         // Get a reference on it before we register it
         FutureMap result(impl);
@@ -9939,7 +9996,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ShardManager::exchange_shard_local_op_data(size_t context_index,
+    void ShardManager::exchange_shard_local_op_data(uint64_t context_index,
                                                     size_t exchange_index,
                                                     const void *data,
                                                     size_t size)
@@ -9966,7 +10023,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ShardManager::find_shard_local_op_data(size_t context_index,
+    void ShardManager::find_shard_local_op_data(uint64_t context_index,
                                                 size_t exchange_index,
                                                 void *result, size_t size)
     //--------------------------------------------------------------------------
@@ -10019,7 +10076,7 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
-    void ShardManager::barrier_shard_local(size_t context_index,
+    void ShardManager::barrier_shard_local(uint64_t context_index,
                                            size_t exchange_index)
     //--------------------------------------------------------------------------
     {
@@ -10700,6 +10757,35 @@ namespace Legion {
     }
 
     //--------------------------------------------------------------------------
+    bool ShardManager::has_empty_shard_subtree(AddressSpaceID space,
+                                               ShardingFunction *sharding,
+                                               IndexSpaceNode *full_space,
+                                               IndexSpace sharding_space)
+    //--------------------------------------------------------------------------
+    {
+      // First check to see if any shards with the space are non-empty
+      const ShardMapping &mapping = *address_spaces;
+      for (ShardID shard = 0; shard < total_shards; shard++)
+      {
+        if (mapping[shard] != space)
+          continue;
+        if (sharding->has_participants(shard, full_space, sharding_space))
+          return false;
+      }
+      // Check any children of this space
+      if (collective_mapping != NULL)
+      {
+        std::vector<AddressSpaceID> children;
+        collective_mapping->get_children(owner_space, space, children);
+        for (std::vector<AddressSpaceID>::const_iterator it =
+              children.begin(); it != children.end(); it++)
+          if (!has_empty_shard_subtree(*it, sharding,full_space,sharding_space))
+            return false;
+      }
+      return true;
+    }
+
+    //--------------------------------------------------------------------------
     void ShardManager::broadcast_message(ShardTask *source, Serializer &rez,
                    BroadcastMessageKind kind, std::set<RtEvent> &applied_events)
     //--------------------------------------------------------------------------
@@ -11307,6 +11393,9 @@ namespace Legion {
       {
         VariantID variant;
         derez.deserialize(variant);
+        std::vector<VariantID> leaf_variants((variant == 0) ? total_shards : 0);
+        for (unsigned idx = 0; idx < leaf_variants.size(); idx++)
+          derez.deserialize(leaf_variants[idx]);
         InnerContext *parent_ctx = 
           InnerContext::unpack_inner_context(derez, runtime);
         // Create the local shards
@@ -11317,12 +11406,15 @@ namespace Legion {
             continue;
           if (first_shard == NULL)
             first_shard = manager->create_shard(idx, target_processors[idx], 
-                variant, parent_ctx, derez);
+                leaf_variants.empty() ? variant : leaf_variants[idx],
+                parent_ctx, derez);
           else
-            manager->create_shard(idx, target_processors[idx], variant,
+            manager->create_shard(idx, target_processors[idx],
+                leaf_variants.empty() ? variant : leaf_variants[idx],
                 parent_ctx, first_shard);
         }
-        manager->distribute_explicit(first_shard, variant, target_processors);
+        manager->distribute_explicit(first_shard, variant,
+                                     target_processors, leaf_variants);
       }
       else
       {
@@ -11338,10 +11430,12 @@ namespace Legion {
         derez.deserialize(ctx_did);
         Processor exec_proc;
         derez.deserialize(exec_proc);
+        coord_t implicit_coord;
+        derez.deserialize(implicit_coord);
         // This is a top-level implicit context so we know we can make
         // a new TopLevelContext here directly
-        TopLevelContext *top_context =
-          new TopLevelContext(runtime, exec_proc, ctx_did, mapping);
+        TopLevelContext *top_context = new TopLevelContext(runtime, 
+            exec_proc, 0/*normal id*/, implicit_coord, ctx_did, mapping);
         top_context->register_with_runtime();
         manager->set_shard_mapping(target_processors);
         // Continue the distribution on to the other nodes
@@ -11930,8 +12024,6 @@ namespace Legion {
         received_notifications(0)
     //--------------------------------------------------------------------------
     {
-      if (expected_notifications > 1)
-        done_event = Runtime::create_rt_user_event();
     }
 
     //--------------------------------------------------------------------------
@@ -11943,18 +12035,12 @@ namespace Legion {
         received_notifications(0)
     //--------------------------------------------------------------------------
     {
-      if (expected_notifications > 1)
-        done_event = Runtime::create_rt_user_event();
     }
 
     //--------------------------------------------------------------------------
     GatherCollective::~GatherCollective(void)
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION
-      if (done_event.exists())
-        assert(done_event.has_triggered());
-#endif
     }
 
     //--------------------------------------------------------------------------
@@ -11972,28 +12058,64 @@ namespace Legion {
         assert(received_notifications < expected_notifications);
 #endif
         done = (++received_notifications == expected_notifications);
+        // This is a bit tricky but if we're done increment the expected
+        // notifications by one to make sure something calling get_done_event
+        // doesn't think we're done too early
+        if (done)
+          received_notifications--;
       }
       if (done)
       {
         if (local_shard != target)
           send_message();
         RtEvent postcondition = post_gather();
-        if (done_event.exists())
-          Runtime::trigger_event(done_event, postcondition);
+        RtUserEvent to_trigger;
+        {
+          AutoLock c_lock(collective_lock);
+#ifdef DEBUG_LEGION
+          assert((received_notifications+1) == expected_notifications);
+#endif
+          // remove the guard
+          received_notifications++;
+          if (done_event.to_trigger.exists())
+          {
+            to_trigger = done_event.to_trigger;
+            done_event.postcondition = to_trigger;
+          }
+          else
+            done_event.postcondition = postcondition;
+        }
+        if (to_trigger.exists())
+          Runtime::trigger_event(to_trigger, postcondition);
       }
+    }
+
+    //--------------------------------------------------------------------------
+    RtEvent GatherCollective::get_done_event(void)
+    //--------------------------------------------------------------------------
+    {
+      AutoLock c_lock(collective_lock);
+      if (received_notifications < expected_notifications)
+      {
+        if (!done_event.to_trigger.exists())
+          done_event.to_trigger = Runtime::create_rt_user_event();
+        return done_event.to_trigger;
+      }
+      else
+        return done_event.postcondition;
     }
 
     //--------------------------------------------------------------------------
     RtEvent GatherCollective::perform_collective_wait(bool block/*=true*/)
     //--------------------------------------------------------------------------
     {
-      if (done_event.exists() && !done_event.has_triggered())
-      {
-        if (block)
-          done_event.wait();
-        else
-          return done_event;
-      }
+      const RtEvent result = get_done_event();
+      if (!block)
+        return result;
+      if (!result.exists())
+        return result;
+      if (!result.has_triggered())
+        result.wait();
       return RtEvent::NO_RT_EVENT;
     }
 
@@ -12011,14 +12133,35 @@ namespace Legion {
         assert(received_notifications < expected_notifications);
 #endif
         done = (++received_notifications == expected_notifications);       
+        // This is a bit tricky but if we're done increment the expected
+        // notifications by one to make sure something calling get_done_event
+        // doesn't think we're done too early
+        if (done)
+          received_notifications--;
       }
       if (done)
       {
         if (local_shard != target)
           send_message();
         RtEvent postcondition = post_gather();
-        if (done_event.exists())
-          Runtime::trigger_event(done_event, postcondition);
+        RtUserEvent to_trigger;
+        {
+          AutoLock c_lock(collective_lock);
+#ifdef DEBUG_LEGION
+          assert((received_notifications+1) == expected_notifications);
+#endif
+          // Remove the guard
+          received_notifications++;
+          if (done_event.to_trigger.exists())
+          {
+            to_trigger = done_event.to_trigger;
+            done_event.postcondition = to_trigger;
+          }
+          else
+            done_event.postcondition = postcondition;
+        }
+        if (to_trigger.exists())
+          Runtime::trigger_event(to_trigger, postcondition);
       }
     }
 
@@ -12026,8 +12169,19 @@ namespace Legion {
     void GatherCollective::elide_collective(void)
     //--------------------------------------------------------------------------
     {
-      if (done_event.exists())
-        Runtime::trigger_event(done_event);
+      AutoLock c_lock(collective_lock);
+#ifdef DEBUG_LEGION
+      assert(received_notifications == 0);
+#endif
+      received_notifications = expected_notifications;
+      if (done_event.to_trigger.exists())
+      {
+        RtUserEvent to_trigger = done_event.to_trigger;
+        Runtime::trigger_event(to_trigger);
+        done_event.postcondition = RtEvent::NO_RT_EVENT;
+      }
+      else
+        done_event.postcondition = RtEvent::NO_RT_EVENT;
     }
 
     //--------------------------------------------------------------------------
@@ -13309,7 +13463,7 @@ namespace Legion {
     //--------------------------------------------------------------------------
     ShardSyncTree::ShardSyncTree(ReplicateContext *ctx, ShardID origin,
                                  CollectiveIndexLocation loc)
-      : GatherCollective(loc, ctx, origin) 
+      : GatherCollective(loc, ctx, origin), done(get_done_event()) 
     //--------------------------------------------------------------------------
     {
     }
@@ -13324,8 +13478,7 @@ namespace Legion {
     void ShardSyncTree::pack_collective(Serializer &rez) const
     //--------------------------------------------------------------------------
     {
-      RtEvent precondition = get_done_event();
-      rez.serialize(precondition);
+      rez.serialize(done);
     }
 
     //--------------------------------------------------------------------------
@@ -14310,7 +14463,7 @@ namespace Legion {
           // then we don't need to add any additional ones
           if (acquired.find(manager) != acquired.end())
             continue;
-          manager->add_base_resource_ref(MAPPER_REF);
+          manager->add_base_gc_ref(MAPPER_REF);
 #ifdef DEBUG_LEGION
 #ifndef NDEBUG
           bool result = 
@@ -14601,7 +14754,7 @@ namespace Legion {
           // then we don't need to add any additional ones
           if (acquired.find(manager) != acquired.end())
             continue;
-          manager->add_base_resource_ref(MAPPER_REF);
+          manager->add_base_gc_ref(MAPPER_REF);
           manager->add_base_valid_ref(MAPPING_ACQUIRE_REF);
           acquired[manager] = 1/*count*/;
         }
@@ -16506,6 +16659,126 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
       concurrent_processors.swap(processors);
+      perform_collective_async();
+    }
+
+    /////////////////////////////////////////////////////////////
+    // Concurrent Allreduce
+    /////////////////////////////////////////////////////////////
+
+    //--------------------------------------------------------------------------
+    ConcurrentAllreduce::ConcurrentAllreduce(CollectiveIndexLocation loc,
+                                           ReplicateContext *ctx, size_t points)
+      : AllGatherCollective<true>(loc, ctx), expected_points(points)
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    ConcurrentAllreduce::~ConcurrentAllreduce(void)
+    //--------------------------------------------------------------------------
+    {
+    }
+
+    //--------------------------------------------------------------------------
+    void ConcurrentAllreduce::pack_collective_stage(ShardID target, 
+                                                    Serializer &rez, int stage)
+    //--------------------------------------------------------------------------
+    {
+      rez.serialize<size_t>(total_points);
+      if (total_points > 0)
+      {
+        rez.serialize(collective_kernel_barrier);
+        rez.serialize(concurrent_lamport_clock);
+        rez.serialize(concurrent_variant);
+        rez.serialize<bool>(concurrent_poisoned);
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    void ConcurrentAllreduce::unpack_collective_stage(Deserializer &derez,
+                                                      int stage)
+    //--------------------------------------------------------------------------
+    {
+      size_t points;
+      derez.deserialize(points);
+      if (points > 0)
+      {
+        RtBarrier barrier;
+        derez.deserialize(barrier);
+        if (!collective_kernel_barrier.exists() && barrier.exists())
+          collective_kernel_barrier = barrier;
+        uint64_t lamport_clock;
+        derez.deserialize(lamport_clock);
+        if (concurrent_lamport_clock < lamport_clock)
+          concurrent_lamport_clock = lamport_clock;
+        VariantID vid;
+        derez.deserialize(vid);
+        if (total_points == 0)
+          concurrent_variant = vid;
+        else if (concurrent_variant != vid)
+          concurrent_variant = std::min(concurrent_variant, vid);
+        bool poisoned;
+        derez.deserialize<bool>(poisoned);
+        if (poisoned)
+          concurrent_poisoned = true;
+        total_points += points;
+#ifdef DEBUG_LEGION
+        assert(total_points <= expected_points);
+#endif
+        // this should only happen once
+        if (total_points == expected_points)
+          notify_concurrent_slices();
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    void ConcurrentAllreduce::notify_concurrent_slices(void)
+    //--------------------------------------------------------------------------
+    {
+      Runtime *runtime = context->runtime;
+      for (std::vector<std::pair<SliceTask*,AddressSpaceID> >::const_iterator
+            it = concurrent_slices.begin(); 
+            it != concurrent_slices.end(); it++)
+      {
+        if (it->second != runtime->address_space)
+        {
+          Serializer rez;
+          {
+            RezCheck z(rez);
+            rez.serialize(it->first);
+            rez.serialize(collective_kernel_barrier);
+            rez.serialize(concurrent_lamport_clock);
+            rez.serialize(concurrent_variant);
+            rez.serialize(concurrent_poisoned);
+          }
+          runtime->send_slice_concurrent_allreduce_response(it->second, rez);
+        }
+        else
+          it->first->finish_concurrent_allreduce(
+              concurrent_lamport_clock, concurrent_poisoned,
+              concurrent_variant, collective_kernel_barrier);
+      }
+    }
+
+    //--------------------------------------------------------------------------
+    void ConcurrentAllreduce::exchange(
+        std::vector<std::pair<SliceTask*,AddressSpaceID> > &slices,
+        uint64_t lamport_clock, bool poisoned, RtBarrier barrier, 
+        VariantID vid, size_t points)
+    //--------------------------------------------------------------------------
+    {
+#ifdef DEBUG_LEGION
+      assert(points <= expected_points);
+#endif
+      concurrent_slices.swap(slices);
+      collective_kernel_barrier = barrier;
+      concurrent_lamport_clock = lamport_clock;
+      concurrent_variant = vid;
+      concurrent_poisoned = poisoned;
+      total_points = points;
+      if (total_points == expected_points)
+        notify_concurrent_slices();
       perform_collective_async();
     }
 

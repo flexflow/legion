@@ -46,7 +46,7 @@ namespace Legion {
       static void unpack_output_requirement(
           OutputRequirement &req, Deserializer &derez);
     public:
-      virtual void set_context_index(size_t index) = 0;
+      virtual void set_context_index(uint64_t index) = 0;
     protected:
       AllocManager *arg_manager;
     };
@@ -135,8 +135,8 @@ namespace Legion {
       virtual ~TaskOp(void);
     public:
       virtual UniqueID get_unique_id(void) const;
-      virtual size_t get_context_index(void) const;
-      virtual void set_context_index(size_t index);
+      virtual uint64_t get_context_index(void) const;
+      virtual void set_context_index(uint64_t index);
       virtual bool has_parent_task(void) const;
       virtual const Task* get_parent_task(void) const;
       virtual const std::string& get_provenance_string(bool human = true) const;
@@ -168,11 +168,10 @@ namespace Legion {
       void unpack_base_external_task(Deserializer &derez);
     public:
       void mark_stolen(void);
-      void initialize_base_task(InnerContext *ctx, bool track,
-            const std::vector<StaticDependence> *dependences,
+      void initialize_base_task(InnerContext *ctx,
             const Predicate &p, Processor::TaskFuncID tid,
             Provenance *provenance);
-      void check_empty_field_requirements(void);
+      void validate_region_requirements(void);
     public:
       bool select_task_options(bool prioritize);
     public:
@@ -329,7 +328,7 @@ namespace Legion {
       RemoteTaskOp& operator=(const RemoteTaskOp &rhs);
     public:
       virtual UniqueID get_unique_id(void) const;
-      virtual size_t get_context_index(void) const;
+      virtual uint64_t get_context_index(void) const;
       virtual int get_depth(void) const;
       virtual bool has_parent_task(void) const;
       virtual const Task* get_parent_task(void) const;
@@ -340,7 +339,7 @@ namespace Legion {
       virtual size_t get_total_shards(void) const;
       virtual DomainPoint get_shard_point(void) const;
       virtual Domain get_shard_domain(void) const;
-      virtual void set_context_index(size_t index);
+      virtual void set_context_index(uint64_t index);
     public:
       virtual const char* get_logging_name(void) const;
       virtual OpKind get_operation_kind(void) const;
@@ -383,6 +382,23 @@ namespace Legion {
       public:
         SingleTask *const task;
       };
+      struct OrderConcurrentLaunchArgs : 
+        public LgTaskArgs<OrderConcurrentLaunchArgs> { 
+      public:
+        static const LgTaskID TASK_ID = LG_ORDER_CONCURRENT_LAUNCH_TASK_ID;
+      public:
+        OrderConcurrentLaunchArgs(SingleTask *t, Processor p, ApEvent s, 
+                                  VariantID v)
+          : LgTaskArgs<OrderConcurrentLaunchArgs>(t->get_unique_op_id()),
+            task(t), processor(p), vid(v), start(s),
+            ready(Runtime::create_ap_user_event(NULL)) { }
+      public:
+        SingleTask *const task;
+        const Processor processor;
+        const VariantID vid;
+        const ApEvent start;
+        const ApUserEvent ready;
+      };
     public:
       SingleTask(Runtime *rt);
       virtual ~SingleTask(void);
@@ -393,6 +409,7 @@ namespace Legion {
       // the task has had its variant selected
       bool is_leaf(void) const;
       bool is_inner(void) const;
+      inline bool is_concurrent(void) const { return concurrent_task; }
       bool is_created_region(unsigned index) const;
       void update_no_access_regions(void);
       void clone_single_from(SingleTask *task);
@@ -413,6 +430,7 @@ namespace Legion {
         { return profiling_reported; }
     public:
       RtEvent perform_versioning_analysis(const bool post_mapper);
+      virtual bool replicate_task(void);
       virtual void initialize_map_task_input(Mapper::MapTaskInput &input,
                                              Mapper::MapTaskOutput &output,
                                              MustEpochOp *must_epoch_owner);
@@ -433,7 +451,6 @@ namespace Legion {
     protected: // mapper helper call
       void validate_target_processors(const std::vector<Processor> &prcs) const;
     protected:
-      bool replicate_task(void);
       void invoke_mapper(MustEpochOp *must_epoch_owner);
       RtEvent map_all_regions(MustEpochOp *must_epoch_owner,
                               const DeferMappingArgs *defer_args);
@@ -502,6 +519,8 @@ namespace Legion {
                                  bool own_functor) = 0;
       virtual void handle_mispredication(void) = 0;
     public:
+      virtual void perform_concurrent_task_barrier(void) = 0;
+    public:
       // From Memoizable
       virtual ApEvent replay_mapping(void);
       virtual void find_completion_effects(std::set<ApEvent> &effects,
@@ -520,13 +539,15 @@ namespace Legion {
       void handle_remote_profiling_response(Deserializer &derez);
       static void process_remote_profiling_response(Deserializer &derez);
     public:
-      void perform_concurrent_analysis(Processor target, RtEvent precondition);
+      virtual void concurrent_allreduce(ProcessorManager *manager, 
+          uint64_t lamport_clock, VariantID vid, bool poisoned) = 0;
       void record_inner_termination(ApEvent termination_event);
     protected:
       virtual TaskContext* create_execution_context(VariantImpl *v,
           std::set<ApEvent> &launch_events, bool inline_task, bool leaf_task);
     public:
       static void handle_deferred_task_complete(const void *args);
+      static void order_concurrent_task_launch(const void *args);
     protected:
       // Boolean for each region saying if it is virtual mapped
       std::vector<bool>                           virtual_mapped;
@@ -550,7 +571,6 @@ namespace Legion {
       std::vector<RtEvent>                  intra_space_mapping_dependences;
       // Events that must be triggered before we are done mapping
       std::set<RtEvent>                     map_applied_conditions;
-      RtUserEvent                           deferred_complete_mapping;
       // The single task termination event encapsulates the exeuction of the
       // task being done and all child operations and their effects being done
       // It does NOT encapsulate the 'effects_complete' of this task
@@ -630,6 +650,8 @@ namespace Legion {
       void trigger_slices(void);
       void clone_multi_from(MultiTask *task, IndexSpace is, Processor p,
                             bool recurse, bool stealable); 
+      inline RtBarrier get_concurrent_task_barrier(void) const
+        { return concurrent_task_barrier; }
     public:
       virtual void activate(void);
       virtual void deactivate(bool free = true);
@@ -677,10 +699,6 @@ namespace Legion {
                                                  const DomainPoint &next,
                                                  RtEvent point_mapped) = 0;
     public:
-      // Support for concurrent execution of index tasks
-      inline RtEvent get_concurrent_precondition(void) const
-        { return concurrent_precondition; }
-    public:
       void pack_multi_task(Serializer &rez, AddressSpaceID target);
       void unpack_multi_task(Deserializer &derez,
                              std::set<RtEvent> &ready_events);
@@ -694,6 +712,7 @@ namespace Legion {
       IndexSpaceNode *launch_space; // global set of points
       IndexSpace internal_space; // local set of points
       FutureMap future_map;
+      size_t future_map_coordinate;
       FutureHandles *future_handles;
       ReductionOpID redop;
       bool deterministic_redop;
@@ -721,10 +740,11 @@ namespace Legion {
       // on the same node but moved it to a different processor
       bool first_mapping;
     protected:
-      // Precondition for performing concurrent analyses across the points
-      RtEvent concurrent_precondition;
       RtUserEvent concurrent_verified;
       std::map<DomainPoint,Processor> concurrent_processors;
+      uint64_t concurrent_lamport_clock;
+      VariantID concurrent_variant;
+      bool concurrent_poisoned;
     protected:
       bool children_complete_invoked;
       bool children_commit_invoked;
@@ -734,6 +754,12 @@ namespace Legion {
       size_t predicate_false_size;
     protected:
       std::map<DomainPoint,RtEvent> intra_space_dependences;
+    protected:
+      // This barrier is only here to help with a bug that currently
+      // exists in the CUDA driver between collective kernel launches
+      // and invocations of cudaMalloc, once it is fixed then we should
+      // be able to remove it
+      RtBarrier concurrent_task_barrier;
     };
 
     /**
@@ -768,7 +794,7 @@ namespace Legion {
       Future initialize_task(InnerContext *ctx,
                              const TaskLauncher &launcher,
                              Provenance *provenance,
-                             bool track = true, bool top_level=false,
+                             bool top_level=false,
                              bool must_epoch_launch = false,
                              std::vector<OutputRequirement> *outputs = NULL);
       void perform_base_dependence_analysis(void);
@@ -796,6 +822,7 @@ namespace Legion {
       virtual void perform_inlining(VariantImpl *variant,
                     const std::deque<InstanceSet> &parent_regions);
       virtual bool is_stealable(void) const;
+      virtual bool replicate_task(void);
     public:
       virtual bool is_output_valid(unsigned idx) const;
     public:
@@ -817,6 +844,10 @@ namespace Legion {
                                std::set<RtEvent> &ready_events);
       virtual bool is_top_level_task(void) const { return top_level_task; }
     public:
+      virtual void concurrent_allreduce(ProcessorManager *manager, 
+          uint64_t lamport_clock, VariantID vid, bool poisoned);
+      virtual void perform_concurrent_task_barrier(void);
+    public:
       virtual void record_completion_effect(ApEvent effect);
       virtual void record_completion_effect(ApEvent effect,
           std::set<RtEvent> &map_applied_events);
@@ -830,10 +861,10 @@ namespace Legion {
       void unpack_remote_commit(Deserializer &derez);
     public:
       // From MemoizableOp
-      virtual void trigger_replay(void);
       virtual void complete_replay(ApEvent pre, ApEvent completion_event);
     public:
       static void process_unpack_remote_future_size(Deserializer &derez);
+      static void process_unpack_remote_mapped(Deserializer &derez);
       static void process_unpack_remote_complete(Deserializer &derez);
       static void process_unpack_remote_commit(Deserializer &derez);
       static void handle_remote_output_registration(Deserializer &derez);
@@ -902,6 +933,7 @@ namespace Legion {
                                       std::set<RtEvent> &applied_events);
       virtual void shard_off(RtEvent mapped_precondition);
       virtual bool is_stealable(void) const;
+      virtual bool replicate_task(void);
       virtual VersionInfo& get_version_info(unsigned idx);
       virtual const VersionInfo& get_version_info(unsigned idx) const;
       virtual bool is_output_global(unsigned idx) const; 
@@ -926,6 +958,11 @@ namespace Legion {
                                  Processor future_proc,
                                  bool own_functor);
       virtual void handle_mispredication(void);
+    public:
+      virtual void concurrent_allreduce(ProcessorManager *manager,
+          uint64_t lamport_clock, VariantID vid, bool poisoned);
+      virtual void perform_concurrent_task_barrier(void);
+      bool check_concurrent_variant(VariantID vid);
     public:
       // ProjectionPoint methods
       virtual const DomainPoint& get_domain_point(void) const;
@@ -980,6 +1017,8 @@ namespace Legion {
       SliceTask                   *slice_owner;
     protected:
       std::map<AddressSpaceID,RemoteTask*> remote_instances;
+    protected:
+      RtBarrier concurrent_task_barrier;
     };
 
     /**
@@ -1058,6 +1097,11 @@ namespace Legion {
                                  Processor future_proc,
                                  bool own_functor); 
       virtual void handle_mispredication(void);
+    public:
+      virtual void concurrent_allreduce(ProcessorManager *manager,
+          uint64_t lamport_clock, VariantID vid, bool poisoned);
+      virtual void perform_concurrent_task_barrier(void);
+    public:
       virtual RtEvent convert_collective_views(unsigned requirement_index,
                        unsigned analysis_index, LogicalRegion region,
                        const InstanceSet &targets, InnerContext *physical_ctx,
@@ -1152,16 +1196,14 @@ namespace Legion {
       FutureMap initialize_task(InnerContext *ctx,
                                 const IndexTaskLauncher &launcher,
                                 IndexSpace launch_space,
-                                Provenance *provenance,
-                                bool track = true,
+                                Provenance *provenance, bool track,
                                 std::vector<OutputRequirement> *outputs = NULL);
       Future initialize_task(InnerContext *ctx,
                              const IndexTaskLauncher &launcher,
                              IndexSpace launch_space,
                              Provenance *provenance,
                              ReductionOpID redop,
-                             bool deterministic,
-                             bool track = true,
+                             bool deterministic, bool track,
                              std::vector<OutputRequirement> *outputs = NULL);
       void initialize_regions(const std::vector<RegionRequirement> &regions);
       void initialize_predicate(const Future &pred_future,
@@ -1240,9 +1282,11 @@ namespace Legion {
       virtual FutureMap create_future_map(TaskContext *ctx,
                     IndexSpace launch_space, IndexSpace shard_space);
       // Also virtual for control replication override
-      virtual void initialize_concurrent_analysis(bool replay);
       virtual RtEvent verify_concurrent_execution(const DomainPoint &point,
                                                   Processor target);
+      virtual void concurrent_allreduce(SliceTask *slice,
+          AddressSpaceID slice_space, size_t points, uint64_t lamport_clock,
+          VariantID vid, bool poisoned);
     public:
       // Methods for supporting intra-index-space mapping dependences
       virtual RtEvent find_intra_space_dependence(const DomainPoint &point);
@@ -1288,6 +1332,7 @@ namespace Legion {
       unsigned mapped_points;
       unsigned complete_points;
       unsigned committed_points;
+      unsigned concurrent_points;
     protected:
       std::set<SliceTask*> origin_mapped_slices;
       std::vector<FutureInstance*> reduction_instances;
@@ -1315,8 +1360,6 @@ namespace Legion {
       std::atomic<int>                  outstanding_profiling_requests;
       std::atomic<int>                  outstanding_profiling_reported;
     protected:
-      // Whether we have to do intra-task alias analysis
-      bool need_intra_task_alias_analysis;
       // For checking aliasing of points in debug mode only
       std::set<std::pair<unsigned,unsigned> > interfering_requirements;
       std::map<DomainPoint,std::vector<LogicalRegion> > point_requirements;
@@ -1325,6 +1368,8 @@ namespace Legion {
       void check_point_requirements(
           const std::map<DomainPoint,std::vector<LogicalRegion> > &point_reqs);
 #endif
+    protected:
+      std::vector<std::pair<SliceTask*,AddressSpace> > concurrent_slices;
     };
 
     /**
@@ -1405,8 +1450,7 @@ namespace Legion {
     public:
       void return_privileges(TaskContext *point_context,
                              std::set<RtEvent> &preconditions);
-      void record_point_mapped(RtEvent child_mapped,
-          std::map<PhysicalManager*,unsigned> &child_acquired);
+      void record_point_mapped(RtEvent child_mapped);
       void record_point_complete(RtEvent child_complete);
       void record_point_committed(RtEvent commit_precondition =
                                   RtEvent::NO_RT_EVENT);
@@ -1419,6 +1463,10 @@ namespace Legion {
                                     std::set<RtEvent> &applied_events);
       RtEvent verify_concurrent_execution(const DomainPoint &point,
                                           Processor target);
+      void concurrent_allreduce(PointTask *point, ProcessorManager *manager,
+          uint64_t lamport_clock, VariantID vid, bool poisoned);
+      void finish_concurrent_allreduce(uint64_t lamport_clock, bool poisoned,
+                            VariantID vid, RtBarrier concurrent_task_barrier);
     protected:
       void trigger_slice_mapped(void);
       void trigger_slice_complete(void);
@@ -1431,7 +1479,7 @@ namespace Legion {
     public:
       static void handle_slice_return(Runtime *rt, Deserializer &derez);
     public: // Privilege tracker methods
-      virtual void receive_resources(size_t return_index,
+      virtual void receive_resources(uint64_t return_index,
               std::map<LogicalRegion,unsigned> &created_regions,
               std::vector<DeletedRegion> &deleted_regions,
               std::set<std::pair<FieldSpace,FieldID> > &created_fields,
@@ -1487,6 +1535,9 @@ namespace Legion {
       static void handle_collective_versioning_rendezvous(Deserializer &derez,
                                                           Runtime *runtime);
       static void handle_verify_concurrent_execution(Deserializer &derez);
+      static void handle_concurrent_allreduce_request(Deserializer &derez,
+                                                      AddressSpaceID source);
+      static void handle_concurrent_allreduce_response(Deserializer &derez);
       static void handle_remote_output_extents(Deserializer &derez);
       static void handle_remote_output_registration(Deserializer &derez);
     protected:
@@ -1513,6 +1564,8 @@ namespace Legion {
       std::set<RtEvent> commit_preconditions;
     protected:
       std::set<std::pair<DomainPoint,DomainPoint> > unique_intra_space_deps;
+    protected:
+      std::vector<std::pair<PointTask*,ProcessorManager*> > concurrent_points; 
     };
 
   }; // namespace Internal

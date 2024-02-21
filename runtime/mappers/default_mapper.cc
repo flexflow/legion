@@ -377,25 +377,6 @@ namespace Legion {
       // This is the best choice for the default mapper assuming
       // there is locality in the remote mapped tasks
       output.map_locally = map_locally;
-      // If all the points are using the same logical region then make this
-      // a collective rendezvous
-      if (task.is_index_space)
-      {
-        // Check for any collective region requirements
-        for (unsigned idx = 0; idx < task.regions.size(); idx++)
-        {
-          const RegionRequirement &req = task.regions[idx];
-          // The runtime will pick this up for us anyway
-          if (req.prop & LEGION_COLLECTIVE_MASK)
-            continue;
-          // If all the points are using the same logical region then
-          // we assume we should do a collective analysis
-          if ((req.handle_type == LEGION_SINGULAR_PROJECTION) ||
-              ((req.handle_type == LEGION_REGION_PROJECTION) && 
-               (req.projection == 0)))
-            output.check_collective_regions.insert(idx);
-        }
-      }
       // Control replicate the top-level task in multi-node settings
       // otherwise we do no control replication
 #ifdef DEBUG_CTRL_REPL
@@ -416,6 +397,9 @@ namespace Legion {
         for (unsigned idx = 0; idx < task.regions.size(); idx++)
         {
           const RegionRequirement &req = task.regions[idx];
+          // The runtime will pick this up for us anyway
+          if (req.prop & LEGION_COLLECTIVE_MASK)
+            continue;
           const bool is_read_only =
             ((req.privilege & LEGION_READ_WRITE) == LEGION_READ_PRIV);
           const bool is_reduction =
@@ -2896,63 +2880,6 @@ namespace Legion {
       log_mapper.spew("Default select_sharding_functor for Copy in %s",
                       get_mapper_name());
       output.chosen_functor = 0; // use the default functor
-    }
-
-    //--------------------------------------------------------------------------
-    void DefaultMapper::map_close(const MapperContext       ctx,
-                                  const Close&              close,
-                                  const MapCloseInput&      input,
-                                        MapCloseOutput&     output)
-    //--------------------------------------------------------------------------
-    {
-      log_mapper.spew("Default map_close in %s", get_mapper_name());
-      // Simple heuristic for closes, if we have an instance use it,
-      // otherwise see if we should make a composite or a real instance.
-      output.chosen_instances = input.valid_instances;
-      if (!output.chosen_instances.empty())
-        runtime->acquire_and_filter_instances(ctx,
-                                                  output.chosen_instances);
-
-      if (default_policy_select_close_virtual(ctx, close)) {
-        output.chosen_instances.push_back(
-                                  PhysicalInstance::get_virtual_instance());
-      } else {
-        // Make one big instance at the location where the parent task
-        // is running.
-        Memory target_memory =
-          default_policy_select_target_memory(ctx,
-                                              close.parent_task->current_proc,
-                                              close.requirement);
-        LayoutConstraintSet constraints;
-        default_policy_select_constraints(ctx, constraints, target_memory,
-                                          close.requirement);
-
-        output.chosen_instances.resize(output.chosen_instances.size()+1);
-        size_t footprint;
-        if (!default_make_instance(ctx, target_memory, constraints,
-              output.chosen_instances.back(), CLOSE_MAPPING,
-              false/*force*/, true/*meets*/, close.requirement, &footprint))
-        {
-          // If we failed to make it that is bad
-          log_mapper.error("Default mapper failed allocation of size %zd bytes "
-                         "for region requirement of close in task %s (UID %lld)"
-                         " in memory " IDFMT " (%s) for processor " IDFMT " (%s). This "
-                         "means the working set of your application is too big "
-                         "for the allotted capacity of the given memory under "
-                         "the default mapper's mapping scheme. You have three "
-                         "choices: ask Realm to allocate more memory, write a "
-                         "custom mapper to better manage working sets, or find "
-                         "a bigger machine.", footprint,
-                         close.parent_task->get_task_name(),
-                         close.parent_task->get_unique_id(),
-                         target_memory.id,
-                         Utilities::to_string(target_memory.kind()),
-                         close.parent_task->current_proc.id,
-                         Utilities::to_string(close.parent_task->current_proc.kind())
-                         );
-          assert(false);
-        }
-      }
     }
 
     //--------------------------------------------------------------------------

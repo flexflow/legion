@@ -30,6 +30,7 @@
 #include <map>
 #include <set>
 #include <list>
+#include <limits>
 #include <deque>
 #include <vector>
 #include <typeinfo>
@@ -421,6 +422,7 @@ namespace Legion {
       LG_DEFERRED_LAUNCH_TASK_ID,
       LG_MISPREDICATION_TASK_ID,
       LG_DEFER_TRIGGER_TASK_COMPLETE_TASK_ID,
+      LG_ORDER_CONCURRENT_LAUNCH_TASK_ID,
       LG_DEFER_MATERIALIZED_VIEW_TASK_ID,
       LG_DEFER_REDUCTION_VIEW_TASK_ID,
       LG_DEFER_PHI_VIEW_REGISTRATION_TASK_ID,
@@ -466,7 +468,6 @@ namespace Legion {
       LG_FINALIZE_OUTPUT_ID,
       LG_DEFER_DELETE_FUTURE_INSTANCE_TASK_ID,
       LG_FREE_EXTERNAL_TASK_ID,
-      LG_DEFER_CONCURRENT_ANALYSIS_TASK_ID,
       LG_DEFER_CONSENSUS_MATCH_TASK_ID,
       LG_DEFER_COLLECTIVE_TASK_ID,
       LG_DEFER_RECORD_COMPLETE_REPLAY_TASK_ID,
@@ -534,6 +535,7 @@ namespace Legion {
         "Deferred Task Launch",                                   \
         "Handle Mapping Mispredication",                          \
         "Defer Trigger Task Complete",                            \
+        "Order Concurrent Launch",                                \
         "Defer Materialized View Registration",                   \
         "Defer Reduction View Registration",                      \
         "Defer Phi View Registration",                            \
@@ -579,7 +581,6 @@ namespace Legion {
         "Finalize Output Region Instance",                        \
         "Defer Delete Future Instance",                           \
         "Free External Allocation",                               \
-        "Defer Concurrent Analysis",                              \
         "Defer Consensus Match",                                  \
         "Defer Collective Async",                                 \
         "Defer Record Complete Replay",                           \
@@ -642,6 +643,7 @@ namespace Legion {
       PERMIT_STEAL_REQUEST_CALL,
       HANDLE_MESSAGE_CALL,
       HANDLE_TASK_RESULT_CALL,
+      HANDLE_INSTANCE_COLLECTION_CALL,
       APPLICATION_MAPPER_CALL,
       LAST_MAPPER_CALL,
     };
@@ -699,6 +701,7 @@ namespace Legion {
       "permit_steal_request",                       \
       "handle_message",                             \
       "handle_task_result",                         \
+      "handle_instance_collection",                 \
       "application mapper call",                    \
     }
 
@@ -826,12 +829,15 @@ namespace Legion {
       LOGICAL_REGION_DESTRUCTION_MESSAGE,
       INDIVIDUAL_REMOTE_FUTURE_SIZE,
       INDIVIDUAL_REMOTE_OUTPUT_REGISTRATION,
+      INDIVIDUAL_REMOTE_MAPPED,
       INDIVIDUAL_REMOTE_COMPLETE,
       INDIVIDUAL_REMOTE_COMMIT,
       SLICE_REMOTE_MAPPED,
       SLICE_REMOTE_COMPLETE,
       SLICE_REMOTE_COMMIT,
       SLICE_VERIFY_CONCURRENT_EXECUTION,
+      SLICE_CONCURRENT_ALLREDUCE_REQUEST,
+      SLICE_CONCURRENT_ALLREDUCE_RESPONSE,
       SLICE_FIND_INTRA_DEP,
       SLICE_RECORD_INTRA_DEP,
       SLICE_REMOTE_COLLECTIVE_RENDEZVOUS,
@@ -843,6 +849,7 @@ namespace Legion {
       DISTRIBUTED_DOWNGRADE_RESPONSE,
       DISTRIBUTED_DOWNGRADE_SUCCESS,
       DISTRIBUTED_DOWNGRADE_UPDATE,
+      DISTRIBUTED_DOWNGRADE_RESTART,
       DISTRIBUTED_GLOBAL_ACQUIRE_REQUEST,
       DISTRIBUTED_GLOBAL_ACQUIRE_RESPONSE,
       DISTRIBUTED_VALID_ACQUIRE_REQUEST,
@@ -1028,13 +1035,12 @@ namespace Legion {
       SEND_REMOTE_TRACE_UPDATE,
       SEND_REMOTE_TRACE_RESPONSE,
       SEND_FREE_EXTERNAL_ALLOCATION,
+      SEND_NOTIFY_COLLECTED_INSTANCES,
       SEND_CREATE_FUTURE_INSTANCE_REQUEST,
       SEND_CREATE_FUTURE_INSTANCE_RESPONSE,
       SEND_FREE_FUTURE_INSTANCE,
       SEND_REMOTE_DISTRIBUTED_ID_REQUEST,
       SEND_REMOTE_DISTRIBUTED_ID_RESPONSE,
-      SEND_CONCURRENT_RESERVATION_CREATION,
-      SEND_CONCURRENT_EXECUTION_ANALYSIS,
       SEND_CONTROL_REPLICATION_FUTURE_ALLREDUCE,
       SEND_CONTROL_REPLICATION_FUTURE_BROADCAST,
       SEND_CONTROL_REPLICATION_FUTURE_REDUCTION,
@@ -1073,6 +1079,7 @@ namespace Legion {
       SEND_CONTROL_REPLICATION_VERSIONING_RENDEZVOUS,
       SEND_CONTROL_REPLICATION_VIEW_RENDEZVOUS,
       SEND_CONTROL_REPLICATION_CONCURRENT_EXECUTION_VALIDATION,
+      SEND_CONTROL_REPLICATION_CONCURRENT_ALLREDUCE,
       SEND_CONTROL_REPLICATION_PROJECTION_TREE_EXCHANGE,
       SEND_CONTROL_REPLICATION_TIMEOUT_MATCH_EXCHANGE,
       SEND_CONTROL_REPLICATION_MASK_EXCHANGE,
@@ -1146,12 +1153,15 @@ namespace Legion {
         "Logical Region Destruction",                                 \
         "Individual Remote Future Size",                              \
         "Individual Remote Output Region Registration",               \
+        "Individual Remote Mapped",                                   \
         "Individual Remote Complete",                                 \
         "Individual Remote Commit",                                   \
         "Slice Remote Mapped",                                        \
         "Slice Remote Complete",                                      \
         "Slice Remote Commit",                                        \
         "Slice Verify Concurrent Execution",                          \
+        "Slice Concurrent Allreduce Request",                         \
+        "Slice Concurrent Allreduce Response",                        \
         "Slice Find Intra-Space Dependence",                          \
         "Slice Record Intra-Space Dependence",                        \
         "Slice Remote Collective Rendezvous",                         \
@@ -1163,6 +1173,7 @@ namespace Legion {
         "Distributed Downgrade Response",                             \
         "Distributed Downgrade Success",                              \
         "Distributed Downgrade Update",                               \
+        "Distributed Downgrade Restart",                              \
         "Distributed Global Acquire Request",                         \
         "Distributed Global Acquire Response",                        \
         "Distributed Valid Acquire Request",                          \
@@ -1348,13 +1359,12 @@ namespace Legion {
         "Send Remote Trace Update",                                   \
         "Send Remote Trace Response",                                 \
         "Send Free External Allocation",                              \
+        "Send Notify Collected Instances",                            \
         "Send Create Future Instance Request",                        \
         "Send Create Future Instance Response",                       \
         "Send Free Future Instance",                                  \
         "Send Remote Distributed ID Request",                         \
         "Send Remote Distributed ID Response",                        \
-        "Send Concurrent Reservation Creation",                       \
-        "Send Concurrent Execution Analysis",                         \
         "Control Replication Collective Future All-Reduce",           \
         "Control Replication Collective Future Broadcast",            \
         "Control Replication Collective Future Reduction",            \
@@ -1393,6 +1403,7 @@ namespace Legion {
         "Control Replication Collective Versioning Rendezvous",       \
         "Control Replication Collective View Rendezvous",             \
         "Control Replication Collective Concurrent Execution Validation",\
+        "Control Replication Collective Concurrent Allreduce",        \
         "Control Replication Collective Projection Tree Exchange",    \
         "Control Replication Collective Timeout Match Exchange",      \
         "Control Replication Collective Mask Exchange",               \
@@ -1456,6 +1467,10 @@ namespace Legion {
       MAPPER_ACQUIRE_AND_FILTER_INSTANCES_CALL,
       MAPPER_RELEASE_INSTANCE_CALL,
       MAPPER_RELEASE_INSTANCES_CALL,
+      MAPPER_SUBSCRIBE_INSTANCE_CALL,
+      MAPPER_UNSUBSCRIBE_INSTANCE_CALL,
+      MAPPER_COLLECT_INSTANCE_CALL,
+      MAPPER_COLLECT_INSTANCES_CALL,
       MAPPER_ACQUIRE_FUTURE_CALL,
       MAPPER_CREATE_INDEX_SPACE_CALL,
       MAPPER_UNION_INDEX_SPACES_CALL,
@@ -1680,6 +1695,10 @@ namespace Legion {
       "MapperRuntime::acquire_and_filter_instances",                  \
       "MapperRuntime::release_instance",                              \
       "MapperRuntime::release_instances",                             \
+      "MapperRuntime::subscribe",                                     \
+      "MapperRuntime::unsubscribe",                                   \
+      "MapperRuntime::collect_instance",                              \
+      "MapperRuntime::collect_instances",                             \
       "MapperRuntime::acquire_future",                                \
       "MapperRuntime::create_index_space",                            \
       "MapperRuntime::union_index_spaces",                            \
@@ -1958,7 +1977,7 @@ namespace Legion {
       COLLECTIVE_LOC_73 = 73,
       COLLECTIVE_LOC_74 = 74,
       COLLECTIVE_LOC_75 = 75,
-      //COLLECTIVE_LOC_76 = 76,
+      COLLECTIVE_LOC_76 = 76,
       COLLECTIVE_LOC_77 = 77,
       COLLECTIVE_LOC_78 = 78,
       COLLECTIVE_LOC_79 = 79,
