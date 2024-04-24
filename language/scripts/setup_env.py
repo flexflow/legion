@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2023 Stanford University
+# Copyright 2024 Stanford University
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -223,7 +223,6 @@ def build_regent(root_dir, use_cmake, cmake_exe, extra_flags,
     subprocess.check_call(
         [os.path.join(root_dir, 'install.py'),
          '--with-terra', terra_dir,
-         '--rdir', 'auto',
          '-j', str(thread_count),
         ] + (['--cmake', '--with-cmake', cmake_exe]
              if use_cmake else ['--no-cmake']) +
@@ -619,11 +618,11 @@ if __name__ == '__main__':
         help='Use Make to build Terra.')
     parser.add_argument(
         '--gasnet-version', dest='gasnet_version', required=False,
-        default=os.environ.get('GASNET_VERSION', 'GASNet-2023.3.0'),
+        default=os.environ.get('GASNET_VERSION', 'GASNet-2023.9.0'),
         help='Select GASNet version.')
     parser.add_argument(
         '--gasnet-config-version', dest='gasnet_config_version', required=False,
-        default='3d75a6ffb3c398a96f91248be29de06e475d029b',
+        default='0fb5a0556e76d1988ea5b59df2789a25d4e1ad99', # master as of 2024-03-11
         help='Select version of the GASNet configuration/build tool.')
     parser.add_argument(
         '-j', dest='thread_count', nargs='?', type=int,

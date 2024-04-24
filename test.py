@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2023 Stanford University
+# Copyright 2024 Stanford University
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -84,7 +84,6 @@ legion_cxx_tests = [
 
     # Tests
     ['test/rendering/rendering', ['-i', '2', '-n', '64', '-ll:cpu', '4']],
-    ['test/legion_stl/test_stl', []],
     ['test/output_requirements/output_requirements', []],
     ['test/output_requirements/output_requirements', ['-replicate']],
     ['test/output_requirements/output_requirements', ['-index']],
@@ -473,8 +472,7 @@ def run_test_external1(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, 
     # Fast Direct Solver
     # Contact: Chao Chen <cchen10@stanford.edu>
     solver_dir = os.path.join(tmp_dir, 'fastSolver2')
-    # clone_github('Charles-Chao-Chen', 'fastSolver2', solver_dir, tmp_dir)
-    clone_github('elliottslaughter', 'fastSolver2', solver_dir, tmp_dir, branch='modernize-legion')
+    clone_github('Charles-Chao-Chen', 'fastSolver2', solver_dir, tmp_dir)
     solver = [[os.path.join(solver_dir, 'spmd_driver/solver'),
         ['-machine', '1', '-core', '8', '-mtxlvl', '6', '-ll:cpu', '8', '-ll:csize', '1024']]]
     run_cxx(solver, flags, launcher, root_dir, None, env, thread_count, timelimit)
@@ -584,25 +582,10 @@ def run_test_external2(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, 
 def run_test_private(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, timelimit):
     flags = ['-logfile', 'out_%.log']
 
-    # MiniAero
-    # Contact: Wonchan Lee <wonchan@cs.stanford.edu>
-    miniaero_dir = os.path.join(tmp_dir, 'miniaero-spmd')
-    cmd(['git', 'clone', '-b', 'spmd_flattened_superblocks',
-         'git@github.com:magnatelee/miniaero-spmd.git', miniaero_dir])
-    cmd([make_exe, '-C', miniaero_dir, '-j', str(thread_count)], env=env,
-        cwd=miniaero_dir)
-    for test in ['3D_Sod', '3D_Sod_2nd_Order'
-                 # These tests take a long time so skip them by default.
-                 # , 'FlatPlate', 'Ramp'
-                ]:
-        test_dir = os.path.join(miniaero_dir, 'tests', test)
-        cmd([os.path.join(test_dir, 'test.sh')], env=env, cwd=test_dir, timelimit=timelimit)
-
     # PENNANT
     # Contact: Galen Shipman <gshipman@lanl.gov>
     pennant_dir = os.path.join(tmp_dir, 'pennant')
-    cmd(['git', 'clone', '-b', 'spmdv2',
-         'git@github.com:gshipman/pennant-legion.git', pennant_dir])
+    clone_github('StanfordLegion', 'pennant-legion', pennant_dir, tmp_dir)
     # This uses a custom Makefile that requires additional
     # configuration. Rather than go to that trouble it's easier to
     # just use a copy of the standard Makefile template.
@@ -610,7 +593,7 @@ def run_test_private(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, ti
         ('OUTFILE', 'pennant'),
         ('GEN_SRC', ' '.join(glob.glob(os.path.join(pennant_dir, 'src/*.cc')))),
         ('CXXFLAGS', (env['CXXFLAGS'] if 'CXXFLAGS' in env else '') +
-         ' -std=c++11 -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-variable' +
+         ' -Wno-sign-compare -Wno-unknown-pragmas -Wno-unused-variable' +
          ' -D__STDC_FORMAT_MACROS -DDISABLE_BARRIER_MIGRATION'),
         ('WARN_AS_ERROR', '0'),
     ])
@@ -619,7 +602,7 @@ def run_test_private(launcher, root_dir, tmp_dir, bin_dir, env, thread_count, ti
     cmd([make_exe, '-f', makefile, '-C', pennant_dir, 'clean'], env=pennant_env)
     cmd([make_exe, '-f', makefile, '-C', pennant_dir, '-j', str(thread_count)], env=pennant_env)
     pennant = os.path.join(pennant_dir, 'pennant')
-    cmd([pennant, str(app_cores), 'test/sedovsmall/sedovsmall.pnt', '-ll:cpu', str(app_cores)],
+    cmd([pennant, '-n', str(app_cores), '-f', 'test/sedov/sedov.pnt', '-ll:cpu', str(app_cores)],
         env=env,
         cwd=pennant_dir,
         timelimit=timelimit)
@@ -957,7 +940,7 @@ def build_make(root_dir, tmp_dir, env, thread_count, networks):
     os.mkdir(build_dir)
     os.mkdir(install_dir)
     makefile = os.path.join(build_dir, 'Makefile')
-    cmd(['cp', os.path.join(root_dir, 'apps', 'Makefile.template'), makefile])
+    shutil.copyfile(os.path.join(root_dir, 'apps', 'Makefile.template'), makefile)
     # We'll just always for shared objects here for performance
     env['SHARED_OBJECTS'] = '1'
     # If we have networks always turn on the use of the network
@@ -1019,7 +1002,7 @@ def report_mode(debug, max_dim, launcher,
                 use_hdf, use_fortran, use_spy, use_prof,
                 use_bounds_checks, use_privilege_checks, use_complex,
                 use_shared_objects,
-                use_gcov, use_cmake, use_rdir, use_nvtx, use_libdw, cxx_standard):
+                use_gcov, use_cmake, use_nvtx, use_libdw, cxx_standard):
     print()
     print('#'*60)
     print('### Test Suite Configuration')
@@ -1060,7 +1043,6 @@ def report_mode(debug, max_dim, launcher,
     print('###   * Shared Obj: %s' % use_shared_objects)
     print('###   * Gcov:       %s' % use_gcov)
     print('###   * CMake:      %s' % use_cmake)
-    print('###   * RDIR:       %s' % use_rdir)
     print('###   * NVTX:       %s' % use_nvtx)
     print('###   * LIBDW:      %s' % use_libdw)
     print('###   * Max DIM:    %s' % max_dim)
@@ -1133,7 +1115,6 @@ def run_tests(test_modules=None,
     use_complex = feature_enabled('complex', True)
     use_gcov = feature_enabled('gcov', False)
     use_cmake = feature_enabled('cmake', False)
-    use_rdir = feature_enabled('rdir', True)
     use_nvtx = feature_enabled('nvtx', False)
     use_libdw = feature_enabled('libdw', False, prefix='REALM_BACKTRACE_USE_')
     use_shared_objects = feature_enabled('shared', False,
@@ -1189,7 +1170,7 @@ def run_tests(test_modules=None,
                 use_hdf, use_fortran, use_spy, use_prof,
                 use_bounds_checks, use_privilege_checks, use_complex,
                 use_shared_objects,
-                use_gcov, use_cmake, use_rdir, use_nvtx, use_libdw, cxx_standard)
+                use_gcov, use_cmake, use_nvtx, use_libdw, cxx_standard)
 
     if not tmp_dir:
         tmp_dir = tempfile.mkdtemp(dir=root_dir)
@@ -1231,7 +1212,6 @@ def run_tests(test_modules=None,
         ('USE_COMPLEX', '1' if use_complex else '0'),
         ('SHARED_OBJECTS', '1' if use_shared_objects else '0'),
         ('TEST_GCOV', '1' if use_gcov else '0'),
-        ('USE_RDIR', '1' if use_rdir else '0'),
         ('USE_NVTX', '1' if use_nvtx else '0'),
         ('REALM_BACKTRACE_USE_LIBDW', '1' if use_libdw else '0'),
         ('MAX_DIM', str(max_dim)),
@@ -1403,7 +1383,7 @@ def driver():
         choices=MultipleChoiceList('gasnet', 'cuda', 'hip', 'openmp', 'kokkos',
                                    'python', 'llvm', 'hdf', 'fortran', 'spy', 'prof',
                                    'bounds', 'privilege', 'complex',
-                                   'gcov', 'cmake', 'rdir', 'nvtx'),
+                                   'gcov', 'cmake', 'nvtx'),
         type=lambda s: s.split(','),
         default=None,
         help='Build Legion with features (also via USE_*).')

@@ -1,4 +1,4 @@
-/* Copyright 2023 Stanford University, NVIDIA Corporation
+/* Copyright 2024 Stanford University, NVIDIA Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -532,8 +532,9 @@ namespace Realm {
       if(!argc) argc = &my_argc;
       if(!argv) argv = &my_argv;
 
-      if(!create_configs(*argc, *argv)) return false;
       if(!network_init(argc, argv)) return false;
+      if(!create_configs(*argc, *argv))
+        return false;
       if(!configure_from_command_line(*argc, *argv)) return false;
       start();
       return true;

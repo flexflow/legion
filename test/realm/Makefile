@@ -1,4 +1,4 @@
-# Copyright 2023 Stanford University
+# Copyright 2024 Stanford University
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -204,13 +204,12 @@ endif
 ifeq ($(strip $(USE_HIP)),1)
 EXTRAOBJS_memspeed := memspeed_gpu.o
 EXTRAOBJS_simple_reduce := simple_reduce_gpu.o
-# FIXME: https://github.com/StanfordLegion/legion/issues/1476
-# EXTRAOBJS_multiaffine := multiaffine_gpu.o
+EXTRAOBJS_multiaffine := multiaffine_gpu.o
 EXTRAOBJS_task_stream := task_stream_gpu.o
 TEST_OBJS += $(EXTRAOBJS_memspeed) $(EXTRAOBJS_simple_reduce) $(EXTRAOBJS_multiaffine) $(EXTRAOBJS_task_stream)
 memspeed : memspeed_gpu.o
 simple_reduce : simple_reduce_gpu.o
-# multiaffine : multiaffine_gpu.o
+multiaffine : multiaffine_gpu.o
 task_stream : task_stream_gpu.o
 
 %.o : %.cu $(REALM_DEFINES_HEADER) $(LEGION_DEFINES_HEADER)

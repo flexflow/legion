@@ -1,4 +1,4 @@
-/* Copyright 2023 Stanford University, NVIDIA Corporation
+/* Copyright 2024 Stanford University, NVIDIA Corporation
  *                Los Alamos National Laboratory
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -1302,7 +1302,11 @@ namespace Realm {
                   // if src is allocated by hipHostMalloc, then this is not necessary                  
                   hipPointerAttribute_t src_attr;
                   CHECK_HIP( hipPointerGetAttributes(&src_attr, src_ptr) );
-                  if (src_attr.memoryType == hipMemoryTypeHost) {
+#if HIP_VERSION_MAJOR < 6
+                  if(src_attr.memoryType == hipMemoryTypeHost) {
+#else
+                  if(src_attr.type == hipMemoryTypeHost) {
+#endif
                     CHECK_HIP( hipHostGetDevicePointer((void **)&src_device, src_ptr, 0) );
                   }
 #endif
