@@ -747,6 +747,7 @@ namespace Realm {
     config_map.insert({"pin_util_procs", &pin_util_procs});
     config_map.insert({"use_ext_sysmem", &use_ext_sysmem});
     config_map.insert({"regmem", &reg_mem_size});
+    config_map.insert({"enable_sparsity_refcount", &enable_sparsity_refcount});
 
     resource_map.insert({"cpu", &res_num_cpus});
     resource_map.insert({"sysmem", &res_sysmem_size});
@@ -1464,18 +1465,6 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
       if(!ok) {
         return ok;
       }
-      ok = serialize_announce(serializer, node->memories, net);
-      if(!ok) {
-        return ok;
-      }
-      ok = serialize_announce(serializer, node->memories, net);
-      if(!ok) {
-        return ok;
-      }
-      ok = serialize_announce(serializer, node->ib_memories, net);
-      if(!ok) {
-        return ok;
-      }
       for(ProcessorImpl *proc : node->processors) {
         get_machine()->get_proc_mem_affinity(pmas, proc->me);
         ok = serialize_announce(serializer, pmas, net);
@@ -1711,6 +1700,37 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 #else  // REALM_USE_SHM
       return true;
 #endif
+    }
+
+    static void allgather_announcement(Realm::Serialization::DynamicBufferSerializer &dbs,
+                                       const NodeSet &targets, MachineImpl *machine,
+                                       NetworkModule *network_module)
+    {
+      std::vector<char> all_announcements;
+      std::vector<size_t> lengths(targets.size() + 1);
+      char *buffer = nullptr;
+      size_t rank = 0;
+
+      // Use the networking module to exchange all the announcement information, by
+      // whatever optimal path is available.  We assume a non-symmetric machine here,
+      // so we use allgatherv.
+      network_module->allgatherv(reinterpret_cast<const char *>(dbs.get_buffer()),
+                                 dbs.bytes_used(), all_announcements, lengths);
+      buffer = all_announcements.data();
+      // Traverse the nodes _in-order_, as their data is laid out in the same order
+      for(NodeID node_id = 0; node_id <= Network::max_node_id; node_id++) {
+        if(node_id != Network::my_node_id) {
+          if(!targets.contains(node_id)) {
+            // Not a node that's collaborating here, so skip it and don't update the
+            // buffer pointer
+            continue;
+          }
+          machine->parse_node_announce_data(node_id, buffer, lengths[rank], true);
+        }
+        // Increment to the next section of the buffer with data for the next node id
+        buffer += lengths[rank];
+        rank++;
+      }
     }
 
     void RuntimeImpl::parse_command_line(std::vector<std::string> &cmdline)
@@ -2182,58 +2202,56 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 	local_cpu_kinds.insert(Processor::IO_PROC);
 	local_cpu_kinds.insert(Processor::PROC_SET);
 
-	for(std::set<Processor::Kind>::const_iterator it = local_cpu_kinds.begin();
-	    it != local_cpu_kinds.end();
-	    it++) {
-	  Processor::Kind k = *it;
+        for(std::set<Processor::Kind>::const_iterator it = local_cpu_kinds.begin();
+            it != local_cpu_kinds.end(); it++) {
+          Processor::Kind k = *it;
 
-	  add_proc_mem_affinities(machine,
-				  procs_by_kind[k],
-				  mems_by_kind[Memory::SYSTEM_MEM],
-				  100, // "large" bandwidth
-				  5   // "small" latency
-				  );
+          add_proc_mem_affinities(machine, procs_by_kind[k],
+                                  mems_by_kind[Memory::SYSTEM_MEM],
+                                  100, // "large" bandwidth
+                                  5    // "small" latency
+          );
 
-	  add_proc_mem_affinities(machine,
-				  procs_by_kind[k],
-				  mems_by_kind[Memory::REGDMA_MEM],
-				  80,  // "large" bandwidth
-				  10   // "small" latency
-				  );
+          add_proc_mem_affinities(machine, procs_by_kind[k],
+                                  mems_by_kind[Memory::REGDMA_MEM],
+                                  80, // "large" bandwidth
+                                  10  // "small" latency
+          );
 
-	  add_proc_mem_affinities(machine,
-				  procs_by_kind[k],
-				  mems_by_kind[Memory::DISK_MEM],
-				  5,   // "low" bandwidth
-				  100 // "high" latency
-				  );
+          add_proc_mem_affinities(machine, procs_by_kind[k],
+                                  mems_by_kind[Memory::SOCKET_MEM],
+                                  100, // "large" bandwidth
+                                  5    // "small" latency
+          );
 
-	  add_proc_mem_affinities(machine,
-				  procs_by_kind[k],
-				  mems_by_kind[Memory::HDF_MEM],
-				  5,   // "low" bandwidth
-				  100 // "high" latency
-				  );
+          add_proc_mem_affinities(machine, procs_by_kind[k],
+                                  mems_by_kind[Memory::DISK_MEM],
+                                  5,  // "low" bandwidth
+                                  100 // "high" latency
+          );
 
-	  add_proc_mem_affinities(machine,
-                  procs_by_kind[k],
-                  mems_by_kind[Memory::FILE_MEM],
-                  5,    // low bandwidth
-                  100   // high latency)
-                  );
+          add_proc_mem_affinities(machine, procs_by_kind[k],
+                                  mems_by_kind[Memory::HDF_MEM],
+                                  5,  // "low" bandwidth
+                                  100 // "high" latency
+          );
 
-	  add_proc_mem_affinities(machine,
-				  procs_by_kind[k],
-				  mems_by_kind[Memory::GLOBAL_MEM],
-				  10,  // "lower" bandwidth
-				  50  // "higher" latency
-				  );
-	}
+          add_proc_mem_affinities(machine, procs_by_kind[k],
+                                  mems_by_kind[Memory::FILE_MEM],
+                                  5,  // low bandwidth
+                                  100 // high latency)
+          );
 
-	for(std::set<Processor::Kind>::const_iterator it = local_cpu_kinds.begin();
-	    it != local_cpu_kinds.end();
-	    it++) {
-	  Processor::Kind k = *it;
+          add_proc_mem_affinities(machine, procs_by_kind[k],
+                                  mems_by_kind[Memory::GLOBAL_MEM],
+                                  10, // "lower" bandwidth
+                                  50  // "higher" latency
+          );
+        }
+
+        for(std::set<Processor::Kind>::const_iterator it = local_cpu_kinds.begin();
+            it != local_cpu_kinds.end(); it++) {
+          Processor::Kind k = *it;
 
 	  add_proc_mem_affinities(machine,
 				  procs_by_kind[k],
@@ -2241,8 +2259,7 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
 				  40,  // "large" bandwidth
 				  3   // "small" latency
 				  );
-	}
-
+        }
       }
 
       // retrieve process info
@@ -2279,47 +2296,31 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
           continue;
         }
 
+        // Announcement needs to happen in two stages in order to ensure all memory
+        // information is available for later serialization information (like remote
+        // channels)
+        // Stage 1: Announce all the memories attributes
+        dbs.reset();
+        ok = serialize_announce(dbs, n->memories, module);
+        assert(ok && "Failed to serialize memories");
+        ok = serialize_announce(dbs, n->ib_memories, module);
+        assert(ok && "Failed to serialize ib memories");
+        allgather_announcement(dbs, targets, machine, module);
+
+        // Stage 2: Announce everything else.
         dbs.reset();
         ok = serialize_announce(dbs, n, machine, module);
         assert(ok && "Failed to serialize node for announcement");
-
-        // Now that all of this node's network-specific information is collected, time to
-        // send it all out
-        {
-          std::vector<char> all_announcements;
-          std::vector<size_t> lengths(targets.size() + 1);
-          char *buffer = nullptr;
-          size_t rank = 0;
-
-          // Use the networking module to exchange all the announcement information, by
-          // whatever optimal path is available.  We assume a non-symmetric machine here,
-          // so we use allgatherv.
-          module->allgatherv(reinterpret_cast<const char *>(dbs.get_buffer()),
-                             dbs.bytes_used(), all_announcements, lengths);
-          buffer = all_announcements.data();
-          // Traverse the nodes _in-order_, as their data is laid out in the same order
-          for(NodeID node_id = 0; node_id <= Network::max_node_id; node_id++) {
-            if(node_id != Network::my_node_id) {
-              if(!targets.contains(node_id)) {
-                // Not a node that's collaborating here, so skip it and don't update the
-                // buffer pointer
-                continue;
-              }
-              machine->parse_node_announce_data(node_id, buffer, lengths[rank], true);
-            }
-            // Increment to the next section of the buffer with data for the next node id
-            buffer += lengths[rank];
-            rank++;
-          }
-        }
+        allgather_announcement(dbs, targets, machine, module);
       }
 
       // Now that we have full knowledge of the machine, update the machine model's
-      // internal representation Start with the kind maps
+      // internal representation.  Start with the kind maps
       machine->update_kind_maps();
       // and the mem_mem affinities
       machine->enumerate_mem_mem_affinities();
 
+      // Then update the path caches
       if (Config::path_cache_lru_size) {
         assert(Config::path_cache_lru_size > 0);
         init_path_cache();
@@ -3022,6 +3023,14 @@ static DWORD CountSetBits(ULONG_PTR bitMask)
       SparsityMapImplWrapper *wrap = local_sparsity_map_free_lists[target_node]->alloc_entry();
       wrap->me.sparsity_creator_node() = Network::my_node_id;
       return wrap;
+    }
+
+    void RuntimeImpl::free_sparsity_impl(SparsityMapImplWrapper *impl)
+    {
+      assert(
+          local_sparsity_map_free_lists[impl->me.sparsity_owner_node()]->table.has_entry(
+              impl->me.sparsity_sparsity_idx()));
+      local_sparsity_map_free_lists[impl->me.sparsity_owner_node()]->free_entry(impl);
     }
 
     SubgraphImpl *RuntimeImpl::get_subgraph_impl(ID id)

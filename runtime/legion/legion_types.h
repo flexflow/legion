@@ -33,8 +33,10 @@
 #include <limits>
 #include <deque>
 #include <vector>
+#include <optional>
 #include <typeinfo>
 #include <type_traits>
+#include <string_view>
 #include <unordered_set>
 #include <unordered_map>
 
@@ -140,6 +142,7 @@ namespace Legion {
   typedef ::legion_resource_constraint_t ResourceKind;
   typedef ::legion_launch_constraint_t LaunchKind;
   typedef ::legion_specialized_constraint_t SpecializedKind;
+  typedef ::legion_unbounded_pool_scope_t UnboundPoolScope;
 
   // Forward declarations for user level objects
   // legion.h
@@ -368,17 +371,15 @@ namespace Legion {
     // Enumeration of Legion runtime tasks
     enum LgTaskID {
       LG_SCHEDULER_ID,
-      LG_POST_END_ID,
       LG_TRIGGER_READY_ID,
       LG_TRIGGER_EXECUTION_ID,
-      LG_TRIGGER_RESOLUTION_ID,
       LG_TRIGGER_COMMIT_ID,
       LG_DEFERRED_EXECUTION_ID,
       LG_DEFERRED_COMPLETION_ID,
       LG_DEFERRED_COMMIT_ID,
       LG_PRE_PIPELINE_ID,
       LG_TRIGGER_DEPENDENCE_ID,
-      LG_TRIGGER_COMPLETION_ID,
+      LG_DEFERRED_MAPPED_ID,
       LG_TRIGGER_OP_ID,
       LG_TRIGGER_TASK_ID,
       LG_DEFER_MAPPER_SCHEDULER_TASK_ID,
@@ -394,7 +395,7 @@ namespace Legion {
       LG_TOP_FINISH_TASK_ID,
       LG_MAPPER_TASK_ID,
       LG_DISJOINTNESS_TASK_ID,
-      LG_ISSUE_FRAME_TASK_ID,
+      LG_DEFER_TIMING_MEASUREMENT_TASK_ID,
       LG_TASK_IMPL_SEMANTIC_INFO_REQ_TASK_ID,
       LG_INDEX_SPACE_SEMANTIC_INFO_REQ_TASK_ID,
       LG_INDEX_PART_SEMANTIC_INFO_REQ_TASK_ID,
@@ -414,7 +415,7 @@ namespace Legion {
       LG_FINALIZE_OUTPUT_TREE_TASK_ID,
       LG_DEFERRED_LAUNCH_TASK_ID,
       LG_MISPREDICATION_TASK_ID,
-      LG_DEFER_TRIGGER_TASK_COMPLETE_TASK_ID,
+      LG_DEFER_TRIGGER_CHILDREN_COMMIT_TASK_ID,
       LG_ORDER_CONCURRENT_LAUNCH_TASK_ID,
       LG_DEFER_MATERIALIZED_VIEW_TASK_ID,
       LG_DEFER_REDUCTION_VIEW_TASK_ID,
@@ -461,9 +462,9 @@ namespace Legion {
       LG_FREE_EXTERNAL_TASK_ID,
       LG_DEFER_CONSENSUS_MATCH_TASK_ID,
       LG_DEFER_COLLECTIVE_TASK_ID,
-      LG_DEFER_RECORD_COMPLETE_REPLAY_TASK_ID,
       LG_DEFER_ISSUE_FILL_TASK_ID,
       LG_DEFER_MUST_EPOCH_RETURN_TASK_ID,
+      LG_DEFER_DELETION_COMMIT_TASK_ID,
       LG_YIELD_TASK_ID,
       // this marks the beginning of task IDs tracked by the shutdown algorithm
       LG_BEGIN_SHUTDOWN_TASK_IDS,
@@ -479,17 +480,15 @@ namespace Legion {
 #define LG_TASK_DESCRIPTIONS(name)                               \
       const char *name[LG_LAST_TASK_ID] = {                      \
         "Scheduler",                                              \
-        "Post-Task Execution",                                    \
         "Trigger Ready",                                          \
         "Trigger Execution",                                      \
-        "Trigger Resolution",                                     \
         "Trigger Commit",                                         \
         "Deferred Execution",                                     \
         "Deferred Completion",                                    \
         "Deferred Commit",                                        \
         "Prepipeline Stage",                                      \
         "Logical Dependence Analysis",                            \
-        "Trigger Completion",                                     \
+        "Deferred Mapped",                                        \
         "Trigger Operation Mapping",                              \
         "Trigger Task Mapping",                                   \
         "Defer Mapper Scheduler",                                 \
@@ -505,7 +504,7 @@ namespace Legion {
         "Top Finish",                                             \
         "Mapper Task",                                            \
         "Disjointness Test",                                      \
-        "Issue Frame",                                            \
+        "Defer Timing Measurement",                               \
         "Task Impl Semantic Request",                             \
         "Index Space Semantic Request",                           \
         "Index Partition Semantic Request",                       \
@@ -525,7 +524,7 @@ namespace Legion {
         "Finalize Output Regions Eq KD Tree",                     \
         "Deferred Task Launch",                                   \
         "Handle Mapping Mispredication",                          \
-        "Defer Trigger Task Complete",                            \
+        "Defer Trigger Children Commit",                          \
         "Order Concurrent Launch",                                \
         "Defer Materialized View Registration",                   \
         "Defer Reduction View Registration",                      \
@@ -572,9 +571,9 @@ namespace Legion {
         "Free External Allocation",                               \
         "Defer Consensus Match",                                  \
         "Defer Collective Async",                                 \
-        "Defer Record Complete Replay",                           \
         "Defer Issue Fill",                                       \
         "Defer Must Epoch Return Resources",                      \
+        "Defer Deletion Commit",                                  \
         "Yield",                                                  \
         "Retry Shutdown",                                         \
         "Remote Message",                                         \
@@ -975,6 +974,7 @@ namespace Legion {
       SEND_EQUIVALENCE_SET_REMOTE_OVERWRITES,
       SEND_EQUIVALENCE_SET_REMOTE_FILTERS,
       SEND_EQUIVALENCE_SET_REMOTE_INSTANCES,
+      SEND_EQUIVALENCE_SET_FILTER_INVALIDATIONS,
       SEND_INSTANCE_REQUEST,
       SEND_INSTANCE_RESPONSE,
       SEND_EXTERNAL_CREATE_REQUEST,
@@ -1003,8 +1003,8 @@ namespace Legion {
       SEND_REPLICATE_COLLECTIVE_VERSIONING,
       SEND_REPLICATE_COLLECTIVE_MAPPING,
       SEND_REPLICATE_VIRTUAL_RENDEZVOUS,
+      SEND_REPLICATE_STARTUP_COMPLETE,
       SEND_REPLICATE_POST_MAPPED,
-      SEND_REPLICATE_POST_EXECUTION,
       SEND_REPLICATE_TRIGGER_COMPLETE,
       SEND_REPLICATE_TRIGGER_COMMIT,
       SEND_CONTROL_REPLICATE_RENDEZVOUS_MESSAGE,
@@ -1304,6 +1304,7 @@ namespace Legion {
         "Send Equivalence Set Remote Overwrites",                     \
         "Send Equivalence Set Remote Filters",                        \
         "Send Equivalence Set Remote Instances",                      \
+        "Send Equivalence Set Filter Invalidations",                  \
         "Send Instance Request",                                      \
         "Send Instance Response",                                     \
         "Send External Create Request",                               \
@@ -1332,8 +1333,8 @@ namespace Legion {
         "Send Replication Collective Versioning",                     \
         "Send Replication Collective Mapping",                        \
         "Send Replication Virtual Mapping Rendezvous",                \
+        "Send Replication Startup Complete",                          \
         "Send Replication Post Mapped",                               \
-        "Send Replication Post Execution",                            \
         "Send Replication Trigger Complete",                          \
         "Send Replication Trigger Commit",                            \
         "Send Control Replication Rendezvous Message",                \
@@ -2344,6 +2345,8 @@ namespace Legion {
     extern thread_local TaskContext *implicit_context;
     // Same thing for the runtime
     extern thread_local Runtime *implicit_runtime;
+    // Implicit thread-local profiler
+    extern thread_local LegionProfInstance *implicit_profiler;
     // Another nasty global variable for tracking the fast
     // reservations that we are holding
     extern thread_local AutoLock *local_lock_list;
@@ -2366,9 +2369,6 @@ namespace Legion {
     // changes to remote distributed collectable that can be
     // delayed and batched together.
     extern thread_local ImplicitReferenceTracker *implicit_reference_tracker; 
-#ifdef DEBUG_LEGION_WAITS
-    extern thread_local int meta_task_id;
-#endif
 #ifdef DEBUG_LEGION_CALLERS
     extern thread_local LgTaskID implicit_task_kind;
     extern thread_local LgTaskID implicit_task_caller;
@@ -2598,6 +2598,7 @@ namespace Legion {
   typedef ::legion_task_id_t TaskID;
   typedef ::legion_layout_constraint_id_t LayoutConstraintID;
   typedef ::legion_shard_id_t ShardID;
+  typedef ::legion_provenance_id_t ProvenanceID;
   typedef ::legion_internal_color_t LegionColor;
   typedef void (*RegistrationCallbackFnptr)(Machine machine, 
                 Runtime *rt, const std::set<Processor> &local_procs);
@@ -2894,6 +2895,8 @@ namespace Legion {
     protected:
       void begin_context_wait(Context ctx, bool from_application) const;
       void end_context_wait(Context ctx, bool from_application) const;
+      void record_event_wait(LegionProfInstance *profiler, 
+                             Realm::Backtrace &bt) const;
     };
 
     class PredEvent : public LgEvent {
@@ -3241,10 +3244,8 @@ namespace Legion {
     inline void LgEvent::wait(void) const
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION_WAITS
-      const int local_meta_task_id = Internal::meta_task_id;
-      const long long start = Realm::Clock::current_time_in_microseconds();
-#endif
+      if (!exists())
+        return;
       // Save the context locally
       Internal::TaskContext *local_ctx = Internal::implicit_context; 
       // Save the task provenance information
@@ -3258,6 +3259,15 @@ namespace Legion {
       // Save the reference tracker that we have
       ImplicitReferenceTracker *local_tracker = implicit_reference_tracker;
       Internal::implicit_reference_tracker = NULL;
+      LegionProfInstance *local_profiler = Internal::implicit_profiler;
+      if (local_profiler != NULL)
+      {
+        // Cannot call back into wait while recording a wait
+        implicit_profiler = NULL;
+        Realm::Backtrace bt;
+        bt.capture_backtrace();
+        record_event_wait(local_profiler, bt);
+      }
       // Check to see if we have any local locks to notify
       if (Internal::local_lock_list != NULL)
       {
@@ -3299,6 +3309,8 @@ namespace Legion {
       Internal::implicit_context = local_ctx;
       // Write the provenance information back
       Internal::implicit_provenance = local_provenance;
+      // Restore the local profiler
+      Internal::implicit_profiler = local_profiler;
 #ifdef DEBUG_LEGION_CALLERS
       Internal::implicit_task_kind = local_kind;
       Internal::implicit_task_caller = local_caller;
@@ -3310,22 +3322,14 @@ namespace Legion {
 #endif
       // Write the local reference tracker back
       Internal::implicit_reference_tracker = local_tracker;
-#ifdef DEBUG_LEGION_WAITS
-      Internal::meta_task_id = local_meta_task_id;
-      const long long stop = Realm::Clock::current_time_in_microseconds();
-      if (((stop - start) >= LIMIT) && (local_meta_task_id == BAD_TASK_ID))
-        assert(false);
-#endif
     }
 
     //--------------------------------------------------------------------------
     inline void LgEvent::wait_faultaware(bool &poisoned, bool from_app) const
     //--------------------------------------------------------------------------
     {
-#ifdef DEBUG_LEGION_WAITS
-      const int local_meta_task_id = Internal::meta_task_id;
-      const long long start = Realm::Clock::current_time_in_microseconds();
-#endif
+      if (!exists())
+        return;
       // Save the context locally
       Internal::TaskContext *local_ctx = Internal::implicit_context; 
       // Save the task provenance information
@@ -3339,6 +3343,15 @@ namespace Legion {
       // Save the reference tracker that we have
       ImplicitReferenceTracker *local_tracker = implicit_reference_tracker;
       Internal::implicit_reference_tracker = NULL;
+      LegionProfInstance *local_profiler = Internal::implicit_profiler;
+      if (local_profiler != NULL)
+      {
+        // Cannot call back into wait while recording a wait
+        implicit_profiler = NULL;
+        Realm::Backtrace bt;
+        bt.capture_backtrace();
+        record_event_wait(local_profiler, bt);
+      }
       // Check to see if we have any local locks to notify
       if (Internal::local_lock_list != NULL)
       {
@@ -3380,6 +3393,8 @@ namespace Legion {
       Internal::implicit_context = local_ctx;
       // Write the provenance information back
       Internal::implicit_provenance = local_provenance;
+      // Restore the local profiler
+      Internal::implicit_profiler = local_profiler;
 #ifdef DEBUG_LEGION_CALLERS
       Internal::implicit_task_kind = local_kind;
       Internal::implicit_task_caller = local_caller;
@@ -3391,12 +3406,6 @@ namespace Legion {
 #endif
       // Write the local reference tracker back
       Internal::implicit_reference_tracker = local_tracker;
-#ifdef DEBUG_LEGION_WAITS
-      Internal::meta_task_id = local_meta_task_id;
-      const long long stop = Realm::Clock::current_time_in_microseconds();
-      if (((stop - start) >= LIMIT) && (local_meta_task_id == BAD_TASK_ID))
-        assert(false);
-#endif
     }
 
   }; // namespace Internal 

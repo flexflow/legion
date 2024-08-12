@@ -23,9 +23,9 @@ use crate::backend::common::{
 };
 use crate::conditional_assert;
 use crate::state::{
-    ChanEntry, ChanID, ChanKind, Color, Config, Container, ContainerEntry, Copy, CopyInstInfo,
-    DeviceKind, Fill, FillInstInfo, Inst, InstUID, MemID, MemKind, NodeID, OpID, ProcEntryKind,
-    ProcID, ProcKind, ProfUID, State, TimeRange, Timestamp,
+    BacktraceID, ChanEntry, ChanID, Color, Config, Container, ContainerEntry, Copy, CopyInstInfo,
+    DeviceKind, Fill, FillInstInfo, Inst, MemID, MemKind, NodeID, OpID, ProcEntryKind, ProcID,
+    ProcKind, ProfUID, State, TimeRange, Timestamp,
 };
 
 impl Into<ts::Timestamp> for Timestamp {
@@ -70,6 +70,8 @@ enum EntryKind {
     Mem(MemID),
     ChanKind(Option<NodeID>),
     Chan(ChanID),
+    DepPartKind(Option<NodeID>),
+    DepPart(ChanID),
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +101,10 @@ pub struct Fields {
     delayed_time: FieldID,
     creator: FieldID,
     caller: FieldID,
+    callee: FieldID,
+    mapper: FieldID,
+    mapper_proc: FieldID,
+    backtrace: FieldID,
 }
 
 #[derive(Debug)]
@@ -113,6 +119,7 @@ pub struct StateDataSource {
     mem_entries: BTreeMap<MemID, EntryID>,
     mem_groups: BTreeMap<MemGroup, Vec<MemID>>,
     chan_groups: BTreeMap<Option<NodeID>, Vec<ChanID>>,
+    deppart_groups: BTreeMap<Option<NodeID>, Vec<ChanID>>,
     step_utilization_cache: Mutex<BTreeMap<EntryID, Arc<Vec<(Timestamp, f64)>>>>,
 }
 
@@ -141,6 +148,10 @@ impl StateDataSource {
             delayed_time: field_schema.insert("Delayed".to_owned(), false),
             creator: field_schema.insert("Creator".to_owned(), false),
             caller: field_schema.insert("Caller".to_owned(), false),
+            callee: field_schema.insert("Callee".to_owned(), false),
+            mapper: field_schema.insert("Mapper".to_owned(), true),
+            mapper_proc: field_schema.insert("Mapper Processor".to_owned(), true),
+            backtrace: field_schema.insert("Backtrace".to_owned(), false),
         };
 
         let mut entry_map = BTreeMap::<EntryID, EntryKind>::new();
@@ -150,6 +161,7 @@ impl StateDataSource {
         let mut proc_groups = state.group_procs();
         let mem_groups = state.group_mems();
         let chan_groups = state.group_chans();
+        let deppart_groups = state.group_depparts();
 
         let mut nodes: BTreeSet<_> = proc_groups.keys().map(|ProcGroup(n, _, _)| *n).collect();
         let proc_kinds: BTreeSet<_> = proc_groups
@@ -358,13 +370,14 @@ impl StateDataSource {
                 });
             }
 
-            // Channels
+            // Channels (except for Dependent Partitioning)
             loop {
                 let Some(chans) = chan_groups.get(node) else {
                     break;
                 };
 
                 let kind_id = node_id.child(kind_index);
+                kind_index += 1;
 
                 let color: Color32 = Color::ORANGERED.into();
 
@@ -374,72 +387,76 @@ impl StateDataSource {
                         let chan_id = kind_id.child(chan_index as u64);
                         entry_map.insert(chan_id, EntryKind::Chan(*chan));
 
-                        let (src_name, src_short) = if let Some(mem) = chan.src {
-                            let kind = state.mems.get(&mem).unwrap().kind;
-                            let kind_first_letter =
-                                format!("{:?}", kind).chars().next().unwrap().to_lowercase();
-                            let src_node = mem.node_id().0;
-                            (
-                                Some(format!(
-                                    "Node {} {:?} {}",
-                                    src_node,
-                                    kind,
-                                    mem.mem_in_node()
-                                )),
-                                Some(format!(
-                                    "n{}{}{}",
-                                    src_node,
-                                    kind_first_letter,
-                                    mem.mem_in_node()
-                                )),
-                            )
-                        } else {
-                            (None, None)
+                        let (src_name, src_short) = match chan {
+                            ChanID::Copy { src, .. } | ChanID::Scatter { src } => {
+                                let kind = state.mems.get(&src).unwrap().kind;
+                                let kind_first_letter =
+                                    format!("{:?}", kind).chars().next().unwrap().to_lowercase();
+                                let src_node = src.node_id().0;
+                                (
+                                    Some(format!(
+                                        "Node {} {:?} {}",
+                                        src_node,
+                                        kind,
+                                        src.mem_in_node()
+                                    )),
+                                    Some(format!(
+                                        "n{}{}{}",
+                                        src_node,
+                                        kind_first_letter,
+                                        src.mem_in_node()
+                                    )),
+                                )
+                            }
+                            _ => (None, None),
                         };
 
-                        let (dst_name, dst_short) = if let Some(mem) = chan.dst {
-                            let kind = state.mems.get(&mem).unwrap().kind;
-                            let kind_first_letter =
-                                format!("{:?}", kind).chars().next().unwrap().to_lowercase();
-                            let dst_node = mem.node_id().0;
-                            (
-                                Some(format!(
-                                    "Node {} {:?} {}",
-                                    dst_node,
-                                    kind,
-                                    mem.mem_in_node()
-                                )),
-                                Some(format!(
-                                    "n{}{}{}",
-                                    dst_node,
-                                    kind_first_letter,
-                                    mem.mem_in_node()
-                                )),
-                            )
-                        } else {
-                            (None, None)
+                        let (dst_name, dst_short) = match chan {
+                            ChanID::Copy { dst, .. }
+                            | ChanID::Fill { dst }
+                            | ChanID::Gather { dst } => {
+                                let kind = state.mems.get(&dst).unwrap().kind;
+                                let kind_first_letter =
+                                    format!("{:?}", kind).chars().next().unwrap().to_lowercase();
+                                let dst_node = dst.node_id().0;
+                                (
+                                    Some(format!(
+                                        "Node {} {:?} {}",
+                                        dst_node,
+                                        kind,
+                                        dst.mem_in_node()
+                                    )),
+                                    Some(format!(
+                                        "n{}{}{}",
+                                        dst_node,
+                                        kind_first_letter,
+                                        dst.mem_in_node()
+                                    )),
+                                )
+                            }
+                            _ => (None, None),
                         };
 
-                        let short_name = match chan.channel_kind {
-                            ChanKind::Copy => {
+                        let short_name = match chan {
+                            ChanID::Copy { .. } => {
                                 format!("{}-{}", src_short.unwrap(), dst_short.unwrap())
                             }
-                            ChanKind::Fill => format!("f {}", dst_short.unwrap()),
-                            ChanKind::Gather => format!("g {}", dst_short.unwrap()),
-                            ChanKind::Scatter => format!("s {}", src_short.unwrap()),
-                            ChanKind::DepPart => "dp".to_owned(),
+                            ChanID::Fill { .. } => format!("f {}", dst_short.unwrap()),
+                            ChanID::Gather { .. } => format!("g {}", dst_short.unwrap()),
+                            ChanID::Scatter { .. } => format!("s {}", src_short.unwrap()),
+                            ChanID::DepPart { .. } => unreachable!(),
                         };
 
-                        let long_name = match chan.channel_kind {
-                            ChanKind::Copy => {
+                        let long_name = match chan {
+                            ChanID::Copy { .. } => {
                                 format!("{} to {}", src_name.unwrap(), dst_name.unwrap())
                             }
-                            ChanKind::Fill => format!("Fill {}", dst_name.unwrap()),
-                            ChanKind::Gather => format!("Gather to {}", dst_name.unwrap()),
-                            ChanKind::Scatter => {
+                            ChanID::Fill { .. } => format!("Fill {}", dst_name.unwrap()),
+                            ChanID::Gather { .. } => format!("Gather to {}", dst_name.unwrap()),
+                            ChanID::Scatter { .. } => {
                                 format!("Scatter from {}", src_name.unwrap())
                             }
-                            ChanKind::DepPart => "Dependent Partitioning".to_owned(),
+                            ChanID::DepPart { .. } => unreachable!(),
                         };
 
                         let rows = state.chans.get(chan).unwrap().max_levels(None) as u64 + 1;
@@ -459,6 +476,56 @@ impl StateDataSource {
                     long_name: format!("{} Channel", node_long_name),
                     summary: Some(Box::new(EntryInfo::Summary { color })),
                     slots: chan_slots,
+                });
+
+                break;
+            }
+
+            // Dependent Partitioning Channels
+            loop {
+                let Some(chans) = deppart_groups.get(node) else {
+                    break;
+                };
+
+                let kind_id = node_id.child(kind_index);
+
+                let color: Color32 = Color::ORANGERED.into();
+
+                let mut deppart_slots = Vec::new();
+                if node.is_some() {
+                    for (chan_index, chan) in chans.iter().enumerate() {
+                        let chan_id = kind_id.child(chan_index as u64);
+                        entry_map.insert(chan_id, EntryKind::DepPart(*chan));
+
+                        let short_name = match chan {
+                            ChanID::DepPart { node_id } => format!("dp{}", node_id.0),
+                            _ => unreachable!(),
+                        };
+
+                        let long_name = match chan {
+                            ChanID::DepPart { node_id } => {
+                                format!("Dependent Partitioning {}", node_id.0)
+                            }
+                            _ => unreachable!(),
+                        };
+
+                        let rows = state.chans.get(chan).unwrap().max_levels(None) as u64 + 1;
+                        deppart_slots.push(EntryInfo::Slot {
+                            short_name,
+                            long_name,
+                            max_rows: rows,
+                        });
+                    }
+                }
+
+                let summary_id = kind_id.summary();
+                entry_map.insert(summary_id, EntryKind::DepPartKind(*node));
+
+                kind_slots.push(EntryInfo::Panel {
+                    short_name: "dp".to_owned(),
+                    long_name: format!("{} Dependent Partitioning", node_long_name),
+                    summary: Some(Box::new(EntryInfo::Summary { color })),
+                    slots: deppart_slots,
                 });
 
                 break;
@@ -489,6 +556,7 @@ impl StateDataSource {
             mem_entries,
             mem_groups,
             chan_groups,
+            deppart_groups,
             step_utilization_cache: Mutex::new(BTreeMap::new()),
         }
     }
@@ -513,7 +581,8 @@ impl StateDataSource {
             return util.clone();
         }
 
-        let step_utilization = match self.entry_map.get(entry_id).unwrap() {
+        let group_kind = self.entry_map.get(entry_id).unwrap();
+        let step_utilization = match group_kind {
             EntryKind::ProcKind(group) => {
                 let ProcGroup(_, _, device) = *group;
                 let procs = self.proc_groups.get(group).unwrap();
@@ -564,8 +633,12 @@ impl StateDataSource {
                         .calculate_mem_utilization_data(utilizations, owners)
                 }
             }
-            EntryKind::ChanKind(node) => {
-                let chans = self.chan_groups.get(node).unwrap();
+            EntryKind::ChanKind(node) | EntryKind::DepPartKind(node) => {
+                let chans = match group_kind {
+                    EntryKind::ChanKind(..) => self.chan_groups.get(node).unwrap(),
+                    EntryKind::DepPartKind(..) => self.deppart_groups.get(node).unwrap(),
+                    _ => unreachable!(),
+                };
                 let points = self.state.chan_group_timepoints(chans);
                 let owners: BTreeSet<_> = chans
                     .iter()
@@ -844,7 +917,11 @@ impl StateDataSource {
                 });
 
                 let mut add_item =
-                    |interval: ts::Interval, opacity: f32, status: Option<FieldID>| {
+                    |interval: ts::Interval,
+                     opacity: f32,
+                     status: Option<FieldID>,
+                     wait_callee: Option<ProfUID>,
+                     wait_backtrace: Option<BacktraceID>| {
                         if !interval.overlaps(tile_id.0) {
                             return;
                         }
@@ -864,6 +941,19 @@ impl StateDataSource {
                                     .fields
                                     .insert(1, (status, Field::Interval(interval)));
                             }
+                            if let Some(callee) = wait_callee {
+                                item_meta
+                                    .fields
+                                    .push((self.fields.callee, self.generate_creator_link(callee)));
+                            }
+                            if let Some(backtrace) = wait_backtrace {
+                                item_meta.fields.push((
+                                    self.fields.backtrace,
+                                    Field::String(
+                                        self.state.backtraces.get(&backtrace).unwrap().to_string(),
+                                    ),
+                                ));
+                            }
                             item_metas.push(item_meta);
                         }
                     };
@@ -874,18 +964,42 @@ impl StateDataSource {
                         let waiting_interval =
                             ts::Interval::new(wait.start.into(), wait.ready.into());
                         let ready_interval = ts::Interval::new(wait.ready.into(), wait.end.into());
-                        add_item(running_interval, 1.0, Some(self.fields.status_running));
-                        add_item(waiting_interval, 0.15, Some(self.fields.status_waiting));
-                        add_item(ready_interval, 0.45, Some(self.fields.status_ready));
+                        add_item(
+                            running_interval,
+                            1.0,
+                            Some(self.fields.status_running),
+                            None,
+                            None,
+                        );
+                        add_item(
+                            waiting_interval,
+                            0.15,
+                            Some(self.fields.status_waiting),
+                            wait.callee,
+                            wait.backtrace,
+                        );
+                        add_item(
+                            ready_interval,
+                            0.45,
+                            Some(self.fields.status_ready),
+                            None,
+                            None,
+                        );
                         start = max(start, wait.end);
                     }
                     let stop = time_range.stop.unwrap();
                     if start < stop {
                         let running_interval = ts::Interval::new(start.into(), stop.into());
-                        add_item(running_interval, 1.0, Some(self.fields.status_running));
+                        add_item(
+                            running_interval,
+                            1.0,
+                            Some(self.fields.status_running),
+                            None,
+                            None,
+                        );
                     }
                 } else {
-                    add_item(view_interval, 1.0, None);
+                    add_item(view_interval, 1.0, None, None, None);
                 }
             }
         }
@@ -940,7 +1054,7 @@ impl StateDataSource {
         Field::U64(op_id.0.get())
     }
 
-    fn generate_inst_link(&self, inst_uid: InstUID, prefix: &str) -> Option<Field> {
+    fn generate_inst_link(&self, inst_uid: ProfUID, prefix: &str) -> Option<Field> {
         let mem_id = self.state.insts.get(&inst_uid)?;
         let mem = self.state.mems.get(mem_id)?;
         let inst = mem.insts.get(&inst_uid)?;
@@ -953,27 +1067,29 @@ impl StateDataSource {
         }))
     }
 
-    fn generate_creator_link(&self, prof_uid: ProfUID, create_time: Timestamp) -> Field {
-        let proc_id = self.state.prof_uid_proc.get(&prof_uid).unwrap();
-        let proc = self.state.procs.get(&proc_id).unwrap();
-        let mut entry = proc.find_entry(prof_uid).unwrap();
-        // Check to see if we need to link one of the subcalls instead
-        // of the main task that produced the this operation
-        // Subcalls are sorted from smallest to largest so the first one we hit
-        // is the one we know that that actually made this box
-        for (call_uid, start_time, stop_time) in &entry.subcalls {
-            if (*start_time <= create_time) && (create_time < *stop_time) {
-                entry = proc.find_entry(*call_uid).unwrap();
-                break;
-            }
+    fn generate_creator_link(&self, prof_uid: ProfUID) -> Field {
+        // Not all ProfUIDs will have a processor since some of them
+        // might be referering to fevents that we never found
+        if let Some(proc_id) = self.state.prof_uid_proc.get(&prof_uid) {
+            let proc = self.state.procs.get(&proc_id).unwrap();
+            let entry = proc.find_entry(prof_uid).unwrap();
+            let op_name = entry.name(&self.state);
+            Field::ItemLink(ItemLink {
+                item_uid: entry.base().prof_uid.into(),
+                title: op_name,
+                interval: entry.time_range().into(),
+                entry_id: self.proc_entries.get(proc_id).unwrap().clone(),
+            })
+        } else {
+            // Convert the ProfUID back into an fevent so we can figure
+            // out which node it is on and tell the user that they need
+            // to load the logfile from that node if they want to see it
+            let node = self.state.find_fevent(prof_uid).node_id();
+            Field::String(format!(
+                "Unknown creator on node {}. Please load the logfile from that node to see it.",
+                node.0
+            ))
         }
-        let op_name = entry.name(&self.state);
-        Field::ItemLink(ItemLink {
-            item_uid: entry.base().prof_uid.into(),
-            title: op_name,
-            interval: entry.time_range().into(),
-            entry_id: self.proc_entries.get(proc_id).unwrap().clone(),
-        })
     }
 
     fn generate_proc_slot_meta_tile(
@@ -1034,31 +1150,39 @@ impl StateDataSource {
                     Field::String(provenance.to_string()),
                 ));
             }
-            if let Some(creator) = self.state.fevents.get(&entry.creator) {
+            if let Some(creator) = entry.creator() {
                 // Check to see if these are function calls or tasks
                 match entry.kind {
-                    ProcEntryKind::MapperCall(_)
+                    ProcEntryKind::MapperCall(..)
                     | ProcEntryKind::RuntimeCall(_)
+                    | ProcEntryKind::ApplicationCall(_)
                     | ProcEntryKind::GPUKernel(_, _) => {
-                        if let Some(start_time) = entry.time_range.start {
-                            fields.push((
-                                self.fields.caller,
-                                // Use the first tick before the start so it is outside
-                                // of our box but hopefully in the caller's box
-                                self.generate_creator_link(*creator, start_time - Timestamp::ONE),
-                            ));
-                        }
+                        fields.push((self.fields.caller, self.generate_creator_link(creator)));
                     }
                     _ => {
                         // Everything else can use the create time to find the creator
-                        if let Some(create_time) = entry.time_range.create {
-                            fields.push((
-                                self.fields.creator,
-                                self.generate_creator_link(*creator, create_time),
-                            ));
-                        }
+                        fields.push((self.fields.creator, self.generate_creator_link(creator)));
                     }
                 }
+            }
+            match entry.kind {
+                ProcEntryKind::MapperCall(mapper_id, mapper_proc, _) => {
+                    let mapper = self.state.mappers.get(&(mapper_id, mapper_proc)).unwrap();
+                    fields.push((self.fields.mapper, Field::String(mapper.name.to_owned())));
+                    if let Some(proc) = self.state.procs.get(&mapper_proc) {
+                        let proc_name = format!(
+                            "Node {} {:?} {}",
+                            mapper_proc.node_id().0,
+                            proc.kind,
+                            mapper_proc.proc_in_node()
+                        );
+                        fields.push((self.fields.mapper_proc, Field::String(proc_name)));
+                    } else {
+                        let proc_name = format!("Node {}", mapper_proc.node_id().0);
+                        fields.push((self.fields.mapper_proc, Field::String(proc_name)));
+                    }
+                }
+                _ => {}
             }
             if let Some(ready) = entry.time_range.ready {
                 if let Some(create) = entry.time_range.create {
@@ -1172,15 +1296,8 @@ impl StateDataSource {
                     Field::String(provenance.to_string()),
                 ));
             }
-            if let Some(creator_event) = entry.creator {
-                if let Some(creator) = self.state.fevents.get(&creator_event) {
-                    if let Some(create_time) = entry.time_range.create {
-                        fields.push((
-                            self.fields.creator,
-                            self.generate_creator_link(*creator, create_time),
-                        ));
-                    }
-                }
+            if let Some(creator) = entry.creator() {
+                fields.push((self.fields.creator, self.generate_creator_link(creator)));
             }
             ItemMeta {
                 item_uid: entry.base().prof_uid.into(),
@@ -1238,8 +1355,16 @@ impl StateDataSource {
                 ..
             } = group[0];
 
-            let src_inst = self.state.find_inst(src_inst_uid);
-            let dst_inst = self.state.find_inst(dst_inst_uid);
+            let src_inst = if let Some(src_uid) = src_inst_uid {
+                self.state.find_inst(src_uid)
+            } else {
+                None
+            };
+            let dst_inst = if let Some(dst_uid) = dst_inst_uid {
+                self.state.find_inst(dst_uid)
+            } else {
+                None
+            };
 
             let src_fids = group.iter().map(|x| x.src_fid).collect();
             let src_fields = format!(
@@ -1253,29 +1378,29 @@ impl StateDataSource {
                 ChanEntryFieldsPretty(dst_inst, &dst_fids, &self.state)
             );
 
-            match (src_inst_uid.0, dst_inst_uid.0) {
-                (0, 0) => unreachable!(),
-                (0, _) => {
+            match (src_inst_uid, dst_inst_uid) {
+                (None, None) => unreachable!(),
+                (None, Some(dst_uid)) => {
                     let prefix = "Scatter: destination indirect instance ";
-                    if let Some(dst) = self.generate_inst_link(dst_inst_uid, prefix) {
+                    if let Some(dst) = self.generate_inst_link(dst_uid, prefix) {
                         result_reqs.push(dst);
                     } else {
                         result_reqs.push(Field::String(format!("{}<unknown instance>", prefix)));
                     }
                     result_reqs.push(Field::String(dst_fields));
                 }
-                (_, 0) => {
+                (Some(src_uid), None) => {
                     let prefix = "Gather: source indirect instance ";
-                    if let Some(src) = self.generate_inst_link(src_inst_uid, prefix) {
+                    if let Some(src) = self.generate_inst_link(src_uid, prefix) {
                         result_reqs.push(src);
                     } else {
                         result_reqs.push(Field::String(format!("{}<unknown instance>", prefix)));
                     }
                     result_reqs.push(Field::String(src_fields));
                 }
-                (_, _) => {
+                (Some(src_uid), Some(dst_uid)) => {
                     let prefix = "Source: ";
-                    if let Some(src) = self.generate_inst_link(src_inst_uid, prefix) {
+                    if let Some(src) = self.generate_inst_link(src_uid, prefix) {
                         result_reqs.push(src);
                     } else {
                         result_reqs.push(Field::String(format!("{}<unknown instance>", prefix)));
@@ -1283,7 +1408,7 @@ impl StateDataSource {
                     result_reqs.push(Field::String(src_fields));
 
                     let prefix = "Destination: ";
-                    if let Some(dst) = self.generate_inst_link(dst_inst_uid, prefix) {
+                    if let Some(dst) = self.generate_inst_link(dst_uid, prefix) {
                         result_reqs.push(dst);
                     } else {
                         result_reqs.push(Field::String(format!("{}<unknown instance>", prefix)));
@@ -1397,13 +1522,21 @@ impl StateDataSource {
                 ));
             }
             if let Some(creator) = entry.creator() {
-                if let Some(creator_uid) = self.state.fevents.get(&creator) {
-                    if let Some(create_time) = entry.time_range().create {
-                        fields.push((
-                            self.fields.creator,
-                            self.generate_creator_link(*creator_uid, create_time),
-                        ));
-                    }
+                fields.push((self.fields.creator, self.generate_creator_link(creator)));
+            }
+            let time_range = entry.time_range();
+            if let Some(ready) = time_range.ready {
+                if let Some(create) = time_range.create {
+                    fields.push((
+                        self.fields.deferred_time,
+                        Field::Interval(ts::Interval::new(create.into(), ready.into())),
+                    ));
+                }
+                if let Some(start) = time_range.start {
+                    fields.push((
+                        self.fields.delayed_time,
+                        Field::Interval(ts::Interval::new(ready.into(), start.into())),
+                    ));
                 }
             }
             ItemMeta {
@@ -1483,7 +1616,7 @@ impl DataSource for StateDataSource {
                 self.generate_proc_slot_tile(entry_id, *proc_id, *device, tile_id, full)
             }
             EntryKind::Mem(mem_id) => self.generate_mem_slot_tile(entry_id, *mem_id, tile_id, full),
-            EntryKind::Chan(chan_id) => {
+            EntryKind::Chan(chan_id) | EntryKind::DepPart(chan_id) => {
                 self.generate_chan_slot_tile(entry_id, *chan_id, tile_id, full)
             }
             _ => unreachable!(),
@@ -1504,7 +1637,7 @@ impl DataSource for StateDataSource {
             EntryKind::Mem(mem_id) => {
                 self.generate_mem_slot_meta_tile(entry_id, *mem_id, tile_id, full)
             }
-            EntryKind::Chan(chan_id) => {
+            EntryKind::Chan(chan_id) | EntryKind::DepPart(chan_id) => {
                 self.generate_chan_slot_meta_tile(entry_id, *chan_id, tile_id, full)
             }
             _ => unreachable!(),

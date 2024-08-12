@@ -69,7 +69,7 @@ namespace Legion {
     class Serializer {
     public:
       Serializer(size_t base_bytes = 4096)
-        : total_bytes(base_bytes), buffer((char*)malloc(base_bytes)), 
+        : total_bytes(base_bytes), buffer((uint8_t*)malloc(base_bytes)),
           index(0) 
 #ifdef DEBUG_LEGION
           , context_bytes(0)
@@ -139,7 +139,7 @@ namespace Legion {
       inline void resize(void);
     private:
       size_t total_bytes;
-      char *buffer;
+      uint8_t *buffer;
       size_t index;
 #ifdef DEBUG_LEGION
       size_t context_bytes;
@@ -156,7 +156,7 @@ namespace Legion {
           , size_t ctx_bytes = 0
 #endif
           )
-        : total_bytes(buffer_size), buffer((const char*)buf), index(0)
+        : total_bytes(buffer_size), buffer((const uint8_t*)buf), index(0)
 #ifdef DEBUG_LEGION
           , context_bytes(ctx_bytes)
 #endif
@@ -224,7 +224,7 @@ namespace Legion {
       inline void advance_pointer(size_t bytes);
     private:
       const size_t total_bytes;
-      const char *buffer;
+      const uint8_t *buffer;
       size_t index;
 #ifdef DEBUG_LEGION
       size_t context_bytes;
@@ -833,10 +833,7 @@ namespace Legion {
     inline void Serializer::serialize(const T &element)
     //--------------------------------------------------------------------------
     {
-      // Old versions of g++ don't have support for all of c++11
-#if !defined(__GNUC__) || (__GNUC__ >= 5)
-      static_assert(std::is_trivially_copyable<T>::value, "unserializable");
-#endif
+      static_assert(std::is_trivially_copyable<T>::value);
       while ((index + sizeof(T)) > total_bytes)
         resize();
       memcpy(buffer+index, (const void*)&element, sizeof(T));
@@ -1021,10 +1018,10 @@ namespace Legion {
     //--------------------------------------------------------------------------
     {
 #ifdef DEBUG_LEGION
-      while ((index + sizeof(size_t)) > total_bytes)
+      while ((index + sizeof(context_bytes)) > total_bytes)
         resize();
-      *((size_t*)(buffer+index)) = context_bytes;
-      index += sizeof(size_t);
+      memcpy(buffer+index, &context_bytes, sizeof(context_bytes));
+      index += sizeof(context_bytes);
       context_bytes = 0;
 #endif
     }
@@ -1035,10 +1032,10 @@ namespace Legion {
     {
 #ifdef DEBUG_LEGION
       // Save the size into the buffer
-      while ((index + sizeof(size_t)) > total_bytes)
+      while ((index + sizeof(context_bytes)) > total_bytes)
         resize();
-      *((size_t*)(buffer+index)) = context_bytes;
-      index += sizeof(size_t);
+      memcpy(buffer+index, &context_bytes, sizeof(context_bytes));
+      index += sizeof(context_bytes);
       context_bytes = 0;
 #endif
     }
@@ -1076,7 +1073,7 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       assert(total_bytes != 0); // this would cause deallocation
 #endif
-      char *next = (char*)realloc(buffer,total_bytes);
+      uint8_t *next = (uint8_t*)realloc(buffer,total_bytes);
 #ifdef DEBUG_LEGION
       assert(next != NULL);
 #endif
@@ -1097,10 +1094,7 @@ namespace Legion {
     inline void Deserializer::deserialize(T &element)
     //--------------------------------------------------------------------------
     {
-      // Old versions of g++ don't have support for all of c++11
-#if !defined(__GNUC__) || (__GNUC__ >= 5)
-      static_assert(std::is_trivially_copyable<T>::value, "unserializable");
-#endif
+      static_assert(std::is_trivially_copyable<T>::value);
 #ifdef DEBUG_LEGION
       // Check to make sure we don't read past the end
       assert((index+sizeof(T)) <= total_bytes);
@@ -1303,9 +1297,10 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       // Save our enclosing context on the stack
 #ifndef NDEBUG
-      size_t sent_context = *((const size_t*)(buffer+index));
+      decltype(context_bytes) sent_context = 0;
+      memcpy(&sent_context, buffer+index, sizeof(sent_context));
 #endif
-      index += sizeof(size_t);
+      index += sizeof(context_bytes);
       // Check to make sure that they match
       assert(sent_context == context_bytes);
       context_bytes = 0;
@@ -1319,9 +1314,10 @@ namespace Legion {
 #ifdef DEBUG_LEGION
       // Read the send context size out of the buffer      
 #ifndef NDEBUG
-      size_t sent_context = *((const size_t*)(buffer+index));
+      decltype(context_bytes) sent_context = 0;
+      memcpy(&sent_context, buffer+index, sizeof(sent_context));
 #endif
-      index += sizeof(size_t);
+      index += sizeof(context_bytes);
       // Check to make sure that they match
       assert(sent_context == context_bytes);
       context_bytes = 0;
@@ -1851,10 +1847,10 @@ namespace Legion {
     inline void Murmur3Hasher::hash(const T &value)
     //-------------------------------------------------------------------------
     {
-      static_assert(std::is_trivially_copyable<T>::value, "unhashable");
+      static_assert(std::is_trivially_copyable<T>::value);
       const T *ptr = &value;
       const uint8_t *data = NULL;
-      static_assert(sizeof(ptr) == sizeof(data), "Fuck c++");
+      static_assert(sizeof(ptr) == sizeof(data));
       memcpy(&data, &ptr, sizeof(data));
       for (unsigned idx = 0; idx < sizeof(T); idx++)
       {
@@ -1865,7 +1861,7 @@ namespace Legion {
           uint64_t k1, k2;
           memcpy(&k1, blocks, sizeof(k1));
           memcpy(&k2, blocks+sizeof(k1), sizeof(k2));
-          static_assert(sizeof(blocks) == (sizeof(k1)+sizeof(k2)), "sanity");
+          static_assert(sizeof(blocks) == (sizeof(k1)+sizeof(k2)));
           k1 *= c1; k1  = rotl64(k1,31); k1 *= c2; h1 ^= k1;
           h1 = rotl64(h1,27); h1 += h2; h1 = h1*5+0x52dce729;
           k2 *= c2; k2  = rotl64(k2,33); k2 *= c1; h2 ^= k2;
@@ -1923,7 +1919,7 @@ namespace Legion {
     //-------------------------------------------------------------------------
     {
       const uint8_t *data = NULL;
-      static_assert(sizeof(data) == sizeof(value), "Fuck c++");
+      static_assert(sizeof(data) == sizeof(value));
       memcpy(&data, &value, sizeof(data));
       for (unsigned idx = 0; idx < size; idx++)
       {
@@ -1934,7 +1930,7 @@ namespace Legion {
           uint64_t k1, k2;
           memcpy(&k1, blocks, sizeof(k1));
           memcpy(&k2, blocks+sizeof(k1), sizeof(k2));
-          static_assert(sizeof(blocks) == (sizeof(k1)+sizeof(k2)), "sanity");
+          static_assert(sizeof(blocks) == (sizeof(k1)+sizeof(k2)));
           k1 *= c1; k1  = rotl64(k1,31); k1 *= c2; h1 ^= k1;
           h1 = rotl64(h1,27); h1 += h2; h1 = h1*5+0x52dce729;
           k2 *= c2; k2  = rotl64(k2,33); k2 *= c1; h2 ^= k2;
@@ -3665,7 +3661,7 @@ namespace Legion {
           return end();
         FieldMaskSet<T,A,D> *ptr = this;
         std::pair<T*const,FieldMask> *result = NULL;
-        static_assert(sizeof(result) == sizeof(ptr), "C++ is dumb");
+        static_assert(sizeof(result) == sizeof(ptr));
         memcpy(&result, &ptr, sizeof(result));
         return iterator(this, result); 
       }
@@ -3685,7 +3681,7 @@ namespace Legion {
           return end();
         FieldMaskSet<T,A,D> *ptr = this;
         std::pair<T*const,FieldMask> *result = NULL;
-        static_assert(sizeof(result) == sizeof(ptr), "C++ is dumb");
+        static_assert(sizeof(result) == sizeof(ptr));
         memcpy(&result, &ptr, sizeof(result));
         return iterator(this, result);
       }
@@ -3757,7 +3753,7 @@ namespace Legion {
           return end();
         FieldMaskSet<T,A,D> *ptr = const_cast<FieldMaskSet<T,A,D>*>(this);
         std::pair<T*const,FieldMask> *result = NULL;
-        static_assert(sizeof(ptr) == sizeof(result), "C++ is dumb");
+        static_assert(sizeof(ptr) == sizeof(result));
         memcpy(&result, &ptr, sizeof(result));
         return const_iterator(this, result); 
       }
@@ -3777,7 +3773,7 @@ namespace Legion {
           return end();
         FieldMaskSet<T,A,D> *ptr = const_cast<FieldMaskSet<T,A,D>*>(this);
         std::pair<T*const,FieldMask> *result = NULL;
-        static_assert(sizeof(ptr) == sizeof(result), "C++ is dumb");
+        static_assert(sizeof(ptr) == sizeof(result));
         memcpy(&result, &ptr, sizeof(result));
         return const_iterator(this, result);
       }
