@@ -121,7 +121,7 @@ namespace Realm {
       size_t cfg_dynfb_max_size = ~size_t(0);
       int cfg_num_gpus = 0;
       std::string cfg_gpu_idxs;
-      unsigned cfg_task_streams = 1, cfg_d2d_streams = 4;
+      unsigned cfg_task_streams = 12, cfg_d2d_streams = 4;
       bool cfg_use_worker_threads = false, cfg_use_shared_worker = true, cfg_pin_sysmem = true;
       bool cfg_fences_use_callbacks = false;
       bool cfg_suppress_hijack_warning = false;
